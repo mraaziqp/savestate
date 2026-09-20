@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexus TV</title>
+<style>
+/* ── 10-foot UI ────────────────────────────────────────────────────────────
+   Sizing is expressed in cqw/vw, never fixed px. A TV browser reports a 1920
+   or 3840 viewport but composites at a different physical size, and the old
+   fixed-pixel layout clipped on one and left half the screen empty on the
+   other. Everything below scales off the viewport, so 1080p and 4K render the
+   same layout at different densities. Posters use aspect-ratio so a missing
+   or slow image can never change row height mid-navigation — which is what
+   made focus jump to the wrong tile.                                        */
+:root{
+  --u: 0.0521vw;              /* 1u = 1px at 1920 wide; scales to any panel */
+  --sidebar: 88px; --sidebar-open: 300px;
+  --bg:#07090d; --panel:#11151d; --line:#222a38;
+  --fg:#f2f5fa; --dim:#8b96ab; --accent:#4d7cff; --focus:#fff;
+  --pad: calc(40 * var(--u));
+  --safe: 3vh;                /* TV overscan: many sets crop ~2-3% of edges */
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+  font:calc(17 * var(--u))/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{display:flex;padding:var(--safe)}
+
+/* ── Mini sidebar: icons only, expands on focus ─────────────────────────── */
+#side{width:var(--sidebar);flex:0 0 auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:calc(18 * var(--u));display:flex;flex-direction:column;gap:calc(8 * var(--u));
+  padding:calc(16 * var(--u)) calc(12 * var(--u));transition:width .22s ease;overflow:hidden}
+#side.open{width:var(--sidebar-open)}
+.navitem{display:flex;align-items:center;gap:calc(18 * var(--u));white-space:nowrap;
+  padding:calc(14 * var(--u)) calc(14 * var(--u));border-radius:calc(12 * var(--u));
+  color:var(--dim);cursor:pointer;border:calc(3 * var(--u)) solid transparent}
+.navitem .ico{flex:0 0 auto;width:calc(30 * var(--u));height:calc(30 * var(--u));display:grid;place-items:center}
+.navitem svg{width:100%;height:100%;fill:currentColor}
+.navitem .lbl{opacity:0;transition:opacity .18s ease;font-weight:600}
+#side.open .navitem .lbl{opacity:1}
+.navitem.active{color:var(--fg);background:rgba(77,124,255,.16)}
+.navitem.focused{color:#04101f;background:var(--focus);border-color:var(--focus)}
+
+/* ── Main ───────────────────────────────────────────────────────────────── */
+#main{flex:1;min-width:0;display:flex;flex-direction:column;padding-left:var(--pad);overflow:hidden}
+#head{display:flex;align-items:baseline;gap:calc(20 * var(--u));margin-bottom:calc(18 * var(--u))}
+h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
+#count{color:var(--dim);font-size:calc(17 * var(--u))}
+#rows{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;scroll-behavior:smooth}
+#rows::-webkit-scrollbar{display:none}
+.rowtitle{font-size:calc(22 * var(--u));font-weight:700;margin:calc(20 * var(--u)) 0 calc(12 * var(--u))}
+
+/* Strict grid: fixed column count per breakpoint, so D-pad up/down always
+   lands on a predictable neighbour instead of wherever reflow put it. */
+.grid{display:grid;grid-template-columns:repeat(var(--cols,6),1fr);gap:calc(22 * var(--u))}
+.tile{position:relative;border-radius:calc(12 * var(--u));overflow:hidden;background:var(--panel);
+  border:calc(4 * var(--u)) solid transparent;cursor:pointer;
+  transition:transform .16s ease,border-color .16s ease}
+.tile .art{width:100%;aspect-ratio:2/3;background:#161b25 center/cover no-repeat;display:grid;place-items:center}
+.tile.wide .art{aspect-ratio:16/9}
+.tile .art span{font-size:calc(34 * var(--u));opacity:.34}
+.tile .cap{padding:calc(10 * var(--u)) calc(12 * var(--u));font-size:calc(15 * var(--u));
+  font-weight:600;line-height:1.3;height:calc(58 * var(--u));overflow:hidden}
+.tile .sub{color:var(--dim);font-size:calc(13 * var(--u));font-weight:500}
+.tile.focused{border-color:var(--focus);transform:scale(1.07);z-index:5;
+  box-shadow:0 calc(14 * var(--u)) calc(40 * var(--u)) rgba(0,0,0,.72)}
+.tile.missing{opacity:.42}
+.badge{position:absolute;top:calc(8 * var(--u));right:calc(8 * var(--u));background:rgba(0,0,0,.82);
+  padding:calc(3 * var(--u)) calc(9 * var(--u));border-radius:999px;font-size:calc(12 * var(--u));font-weight:700}
+
+#empty{color:var(--dim);padding:calc(40 * var(--u)) 0;font-size:calc(19 * var(--u))}
+#hint{position:fixed;bottom:var(--safe);right:var(--safe);color:var(--dim);
+  font-size:calc(14 * var(--u));background:rgba(0,0,0,.6);padding:calc(8 * var(--u)) calc(14 * var(--u));
+  border-radius:calc(9 * var(--u))}
+
+/* Column counts tuned so a poster is never smaller than ~10% of screen width
+   — below that, titles are unreadable from a sofa. */
+@media (min-width:2000px){ .grid{--cols:8} }
+@media (max-width:1400px){ .grid{--cols:5} }
+@media (max-width:1000px){ .grid{--cols:4} }
+@media (max-width:700px) { .grid{--cols:3} :root{--sidebar:64px} }
+</style>
+</head>
+<body>
+
+<nav id="side">
+  <div class="navitem" data-nav="media"><span class="ico"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4zm2 2v8h12V8z"/><path d="M10 9.5v5l4-2.5z"/></svg></span><span class="lbl">Media Vault</span></div>
+  <div class="navitem" data-nav="games"><span class="ico"><svg viewBox="0 0 24 24"><path d="M7 6h10a5 5 0 0 1 0 10h-.5l-2-2H9.5l-2 2H7A5 5 0 0 1 7 6zm1 3v2H6v2h2v2h2v-2h2v-2h-2V9H8zm8 1a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/></svg></span><span class="lbl">Emulation Hub</span></div>
+  <div class="navitem" data-nav="coop"><span class="ico"><svg viewBox="0 0 24 24"><path d="M16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-8 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 2c-2.7 0-8 1.3-8 4v3h10v-3c0-1 .4-1.9 1-2.6-.9-.3-2-.4-3-.4zm8 0c-.3 0-.6 0-1 .1 1.2.9 2 2 2 3.4v3h7v-3c0-2.7-5.3-3.5-8-3.5z"/></svg></span><span class="lbl">Co-Op Lobby</span></div>
+  <div class="navitem" data-nav="admin"><span class="ico"><svg viewBox="0 0 24 24"><path d="M12 2l8 4v6c0 5-3.4 9.3-8 10-4.6-.7-8-5-8-10V6l8-4zm0 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 5c-1.7 0-4 .8-4 2v1h8v-1c0-1.2-2.3-2-4-2z"/></svg></span><span class="lbl">Admin</span></div>
+</nav>
+
+<div id="main">
+  <div id="head"><h1 id="title">Media Vault</h1><div id="count"></div></div>
+  <div id="rows"><div id="empty">Loading…</div></div>
+</div>
+<div id="hint">↑↓←→ move · OK select · Back returns</div>
+
+<script>
+const $  = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+const token = localStorage.getItem('nexus_token') || new URLSearchParams(location.search).get('token') || '';
+const H = token ? { Authorization: `Bearer ${token}` } : {};
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ── Spatial navigation ────────────────────────────────────────────────────
+// Written directly rather than pulling in a library: the frontend has no build
+// step on this host, and the failure mode being fixed (focus trapped in the
+// sidebar, or dropped entirely when a row re-rendered) comes from focus being
+// held as an element reference. Focus here is a KEY, re-resolved from the DOM
+// on every move, so a re-render can never strand it.
+let focusKey = null;
+const el = (k) => document.querySelector(`[data-fk="${CSS.escape(k)}"]`);
+
+function setFocus(key, scroll = true) {
+  if (!key) return;
+  const next = el(key);
+  if (!next) return;
+  $$('.focused').forEach((n) => n.classList.remove('focused'));
+  next.classList.add('focused');
+  focusKey = key;
+  $('#side').classList.toggle('open', next.classList.contains('navitem'));
+  if (scroll) next.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+}
+
+/** Nearest focusable in a direction, scored by axis distance then drift. */
+function move(dir) {
+  const cur = el(focusKey);
+  if (!cur) { const f = $$('[data-fk]')[0]; return f && setFocus(f.dataset.fk); }
+  const a = cur.getBoundingClientRect();
+  const ax = a.left + a.width / 2, ay = a.top + a.height / 2;
+
+  let best = null, bestScore = Infinity;
+  for (const n of $$('[data-fk]')) {
+    if (n === cur) continue;
+    const b = n.getBoundingClientRect();
+    if (!b.width && !b.height) continue;            // hidden
+    const bx = b.left + b.width / 2, by = b.top + b.height / 2;
+    const dx = bx - ax, dy = by - ay;
+
+    // Must actually lie in the requested direction, with a small tolerance so
+    // sub-pixel row differences don't block a horizontal move.
+    if (dir === 'left'  && dx > -4) continue;
+    if (dir === 'right' && dx <  4) continue;
+    if (dir === 'up'    && dy > -4) continue;
+    if (dir === 'down'  && dy <  4) continue;
+
+    const along  = (dir === 'left' || dir === 'right') ? Math.abs(dx) : Math.abs(dy);
+    const across = (dir === 'left' || dir === 'right') ? Math.abs(dy) : Math.abs(dx);
+    // Drift across the axis is penalised heavily: moving down from a poster
+    // should land directly below it, not diagonally across the grid.
+    const score = along + across * 4;
+    if (score < bestScore) { bestScore = score; best = n; }
+  }
+  if (best) setFocus(best.dataset.fk);
+}
+
+// ── Remote keys ───────────────────────────────────────────────────────────
+// Covers Android TV / Tizen / webOS. Arrow keys MUST be prevented or the TV
+// browser scrolls the page underneath the focus ring, which is what made the
+// selection appear to jump randomly.
+const BACK_KEYS = new Set([10009 /* Tizen */, 461 /* webOS */, 8 /* backspace */, 27 /* Escape */]);
+window.addEventListener('keydown', (e) => {
+  const k = e.keyCode || e.which;
+  if (BACK_KEYS.has(k)) { e.preventDefault(); goBack(); return; }
+  switch (k) {
+    case 37: e.preventDefault(); move('left');  break;
+    case 38: e.preventDefault(); move('up');    break;
+    case 39: e.preventDefault(); move('right'); break;
+    case 40: e.preventDefault(); move('down');  break;
+    case 13: case 32:                                  // OK / Enter / Space
+      e.preventDefault(); el(focusKey)?.click(); break;
+    default: return;
+  }
+}, true);   // capture: beat any page-level handler that would scroll first
+
+// Pointer users get the same model, so mouse and remote never disagree.
+document.addEventListener('mouseover', (e) => {
+  const t = e.target.closest('[data-fk]');
+  if (t) setFocus(t.dataset.fk, false);
+});
+
+// ── Back behaves like a TV remote, not a browser ──────────────────────────
+// Inside a section, Back returns to the sidebar. At the top level it does NOT
+// exit the app — the old build fell out to the launcher, which is the single
+// most complained-about TV behaviour.
+function goBack() {
+  const cur = el(focusKey);
+  if (cur && !cur.classList.contains('navitem')) {
+    setFocus(`nav:${view}`);
+    return;
+  }
+  if (view !== 'media') { show('media'); return; }
+  history.length > 1 ? history.back() : null;
+}
+
+// ── Views ─────────────────────────────────────────────────────────────────
+let view = 'media';
+const cache = {};
+
+// Real artwork only: resolved from the poster service by title. Nothing is
+// invented — a title with no match keeps the neutral placeholder tile.
+const artMem = new Map();
+function artCached(title) {
+  if (artMem.has(title)) return artMem.get(title);
+  try {
+    const v = localStorage.getItem('nexus_art:' + title);
+    if (v !== null) { artMem.set(title, v); return v; }
+  } catch {}
+  return undefined;
+}
+async function resolveArt(title) {
+  const hit = artCached(title);
+  if (hit !== undefined) return hit;
+  try {
+    const d = await api(`/api/media/poster?title=${encodeURIComponent(title)}`);
+    const url = (d.results || []).find((r) => r.posterUrl)?.posterUrl || '';
+    artMem.set(title, url);
+    try { localStorage.setItem('nexus_art:' + title, url); } catch {}
+    return url;
+  } catch { artMem.set(title, ''); return ''; }
+}
+
+/** Fill in posters after first paint so the grid never waits on the network. */
+function hydrateArt(entries) {
+  let i = 0;
+  const next = async () => {
+    if (i >= entries.length) return;
+    const { key, title } = entries[i++];
+    const url = await resolveArt(title);
+    if (url) {
+      const node = document.querySelector(`[data-fk="${CSS.escape(key)}"] .art`);
+      if (node) { node.style.backgroundImage = `url('${url}')`; node.textContent = ''; }
+    }
+    next();
+  };
+  // Four in flight: enough to fill a screen quickly without hammering a TV's
+  // limited connection pool.
+  for (let n = 0; n < 4; n++) next();
+}
+
+async function api(path) {
+  const r = await fetch(path, { headers: H });
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
+function tiles(list, { wide = false } = {}) {
+  return `<div class="grid">${list.map((x, i) => `
+    <div class="tile${wide ? ' wide' : ''}${x.missing ? ' missing' : ''}" data-fk="t:${i}" data-act="${esc(x.act || '')}">
+      <div class="art"${x.art ? ` style="background-image:url('${esc(x.art)}')"` : ''}>${x.art ? '' : `<span>${x.icon || '▦'}</span>`}</div>
+      ${x.badge ? `<div class="badge">${esc(x.badge)}</div>` : ''}
+      <div class="cap">${esc(x.title)}${x.sub ? `<div class="sub">${esc(x.sub)}</div>` : ''}</div>
+    </div>`).join('')}</div>`;
+}
+
+async function show(v) {
+  view = v;
+  $$('.navitem').forEach((n) => n.classList.toggle('active', n.dataset.nav === v));
+  const rows = $('#rows');
+  rows.innerHTML = '<div id="empty">Loading…</div>';
+
+  try {
+    if (v === 'media') {
+      $('#title').textContent = 'Media Vault';
+      const d = cache.media ?? (cache.media = await api('/api/media/library'));
+      const vids = (d.items || []).filter((i) => i.kind === 'video');
+      const movies = vids.filter((i) => i.category === 'movie');
+      // Collapse episodes to one tile per series — 1,047 episode tiles is not
+      // something anyone can navigate with a D-pad.
+      const bySeries = new Map();
+      for (const i of vids.filter((x) => x.category === 'series')) {
+        const k = i.seriesTitle || i.name;
+        if (!bySeries.has(k)) bySeries.set(k, []);
+        bySeries.get(k).push(i);
+      }
+      $('#count').textContent = `${movies.length} movies · ${bySeries.size} series`;
+      const clean = (n) => n.replace(/\.[a-z0-9]+$/i, '').replace(/[._]/g, ' ')
+        .replace(/\b(1080p|720p|2160p|4k|x264|x265|hevc|web-?dl|bluray|remux|hdr|aac|dts|ddp?5 1)\b.*/i, '').trim();
+      const mv = movies.map((m) => ({
+        title: clean(m.name), artTitle: clean(m.name), icon:'🎬', act:`play:${m.relPath}`,
+      }));
+      const sv = [...bySeries.entries()].map(([k, eps]) => ({
+        title: k, sub: `${eps.length} episode${eps.length>1?'s':''}`, icon:'📺',
+        act: `play:${eps.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode))[0].relPath}`,
+      }));
+      rows.innerHTML =
+        (sv.length ? `<div class="rowtitle">Series</div>${tiles(sv)}` : '') +
+        (mv.length ? `<div class="rowtitle">Movies</div>${tiles(mv)}` : '') ||
+        '<div id="empty">Nothing in the vault yet.</div>';
+      // Re-key so series and movies don't collide on t:<i>.
+      $$('#rows .tile').forEach((t, i) => (t.dataset.fk = `t:${i}`));
+      hydrateArt([...sv, ...mv].map((x, i) => ({ key: `t:${i}`, title: x.artTitle || x.title })));
+    }
+
+    else if (v === 'games') {
+      $('#title').textContent = 'Emulation Hub';
+      const d = cache.games ?? (cache.games = await api('/api/games'));
+      const g = Array.isArray(d) ? d : (d.games || d.items || []);
+      const playable = g.filter((x) => (x.syncStatus || x.sync_status) !== 'missing_media');
+      $('#count').textContent = `${playable.length} playable · ${g.length - playable.length} awaiting re-download`;
+      const list = [...playable, ...g.filter((x) => (x.syncStatus || x.sync_status) === 'missing_media').slice(0, 120)]
+        .map((x) => ({
+          title: x.title, sub: x.platform, art: x.boxArt || x.box_art || '',
+          icon: '🎮', missing: (x.syncStatus || x.sync_status) === 'missing_media',
+          badge: (x.syncStatus || x.sync_status) === 'missing_media' ? 'Missing' : '',
+          act: `game:${x.id}`,
+        }));
+      rows.innerHTML = list.length ? tiles(list) : '<div id="empty">No games indexed.</div>';
+      // Only look up the ones with no stored box art; the DB value is authoritative.
+      hydrateArt(list.map((x, i) => (x.art ? null : { key: `t:${i}`, title: x.title })).filter(Boolean));
+    }
+
+    else if (v === 'coop') {
+      $('#title').textContent = 'Co-Op Lobby';
+      // Live session store + whoever is actually playing right now.
+      const [ms, np] = await Promise.all([
+        api('/api/multiplayer/sessions').catch(() => ({ sessions: [] })),
+        api('/api/games/now-playing').catch(() => ({})),
+      ]);
+      const sessions = ms.sessions || [];
+      const playing = Array.isArray(np) ? np : (np.sessions || np.players || np.nowPlaying || []);
+      $('#count').textContent = `${sessions.length} open session${sessions.length === 1 ? '' : 's'}`
+        + (playing.length ? ` · ${playing.length} playing now` : '');
+
+      const sTiles = sessions.map((x) => ({
+        title: x.gameTitle || x.game_title || x.gameId || 'Session',
+        sub: `${x.playerCount ?? (x.players || []).length ?? 0}/${x.maxPlayers ?? '?'} · ${x.mode || x.status || ''}`.trim(),
+        icon: '👥', act: `open:/?tab=multiplayer&session=${encodeURIComponent(x.id || '')}`,
+      }));
+      const pTiles = playing.map((x) => ({
+        title: x.title || x.gameTitle || x.game_title || 'In progress',
+        sub: x.username || x.player || x.platform || '',
+        icon: '🎮', act: x.gameId || x.game_id ? `game:${x.gameId || x.game_id}` : 'open:/',
+      }));
+
+      rows.innerHTML =
+        (sTiles.length ? `<div class="rowtitle">Open sessions</div>${tiles(sTiles, { wide: true })}` : '') +
+        (pTiles.length ? `<div class="rowtitle">Playing now</div>${tiles(pTiles, { wide: true })}` : '');
+      if (!sTiles.length && !pTiles.length) {
+        rows.innerHTML = '<div id="empty">Nothing live right now.</div>';
+      }
+      $$('#rows .tile').forEach((t, i) => (t.dataset.fk = `t:${i}`));
+    }
+
+    else if (v === 'admin') {
+      $('#title').textContent = 'Admin';
+      $('#count').textContent = '';
+      // Live host figures rather than static labels.
+      let sub1 = 'Cloud survivor audit';
+      try {
+        const rep = await api('/api/recovery/report?limit=1');
+        const t = Object.fromEntries((rep.totals || []).map((x) => [x.status, x.n]));
+        sub1 = `${t.recovered ?? 0} recovered · ${t.missing_media ?? 0} missing`;
+      } catch {}
+      let sub2 = 'Open the full app';
+      try {
+        const st = await api('/api/recovery/status');
+        sub2 = `Drive ${st.gdriveMounted ? 'mounted' : 'offline'} · cloud-first ${st.cloudFirst ? 'on' : 'off'}`;
+      } catch {}
+      rows.innerHTML = tiles([
+        { title:'Recovery Report', sub:sub1, icon:'🛟', act:'open:/recovery' },
+        { title:'Full Dashboard',  sub:sub2, icon:'🖥️', act:'open:/' },
+      ], { wide:true });
+    }
+  } catch (e) {
+    rows.innerHTML = `<div id="empty">Could not load: ${esc(e.message)}${token ? '' : ' — no session token; open this from the app.'}</div>`;
+  }
+
+  const first = $$('#rows [data-fk]')[0];
+  setFocus(first ? first.dataset.fk : `nav:${v}`);
+}
+
+// ── Activation ────────────────────────────────────────────────────────────
+document.addEventListener('click', (e) => {
+  const nav = e.target.closest('.navitem');
+  if (nav) return show(nav.dataset.nav);
+  const tile = e.target.closest('.tile');
+  if (!tile) return;
+  const act = tile.dataset.act || '';
+  if (act.startsWith('play:'))  location.href = `/player?rel=${encodeURIComponent(act.slice(5))}`;
+  else if (act.startsWith('open:')) location.href = act.slice(5);
+  else if (act.startsWith('game:')) location.href = `/?game=${encodeURIComponent(act.slice(5))}`;
+});
+
+$$('.navitem').forEach((n) => (n.dataset.fk = `nav:${n.dataset.nav}`));
+show('media');
+</script>
+</body>
+</html>

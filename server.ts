@@ -5072,6 +5072,7 @@ async function startServer() {
     // this route exists to remove. Nothing user-specific is exposed.
     "/api/emulator/native-core/",
     "/api/downloads/",    // APK / installer downloads — public so any device can get the app
+    "/api/webhooks/arr",        // called by Sonarr/Radarr; authenticated by shared secret, not JWT
     "/api/host/readiness",      // polled by setup wizard before first login
     "/api/host/info",           // public host identity for welcome screens
     "/api/host/public-profile", // join-step host card — called before user has a token
@@ -8994,6 +8995,128 @@ async function startServer() {
     return preferred;
   }
 
+  // ── Sonarr / Radarr completion webhook ────────────────────────────────────
+  // Closes the acquisition loop: the Arr app imports a finished download, tells
+  // us, and the file is ingested into the library without anyone pressing scan.
+  //
+  // Auth note: this is called by Sonarr/Radarr, which cannot carry a user JWT,
+  // so it authenticates with a shared secret instead — supplied as ?token= or
+  // an X-Nexus-Token header. The route is added to PUBLIC_API_PREFIXES for the
+  // same reason. The secret defaults to the host share secret already in .env.
+  const ARR_WEBHOOK_SECRET =
+    process.env.NEXUS_ARR_WEBHOOK_SECRET ?? process.env.NEXUS_HOST_SHARE_SECRET ?? "";
+
+  // Several episodes of one season import within seconds of each other. Scanning
+  // per event would run the whole library walk a dozen times over; coalescing
+  // means one scan a few seconds after the last file lands.
+  let _arrScanTimer: ReturnType<typeof setTimeout> | null = null;
+  let _arrPendingFiles: string[] = [];
+  function scheduleArrIngest(file: string | null, why: string) {
+    if (file) _arrPendingFiles.push(file);
+    if (_arrScanTimer) clearTimeout(_arrScanTimer);
+    _arrScanTimer = setTimeout(async () => {
+      const batch = _arrPendingFiles.slice();
+      _arrPendingFiles = [];
+      _arrScanTimer = null;
+      try {
+        const scanned = await refreshMediaLibrary(mediaRoot || DEFAULT_MEDIA_ROOT);
+        await persistHostStateNow(true).catch(() => {});
+        log("INFO",
+          `Arr ingest (${why}): ${batch.length} new file(s), library now ${scanned.length} item(s)`,
+          "arr");
+      } catch (e: any) {
+        log("ERROR", `Arr ingest scan failed: ${e?.message ?? e}`, "arr");
+      }
+    }, 8000);
+  }
+
+  app.post("/api/webhooks/arr", express.json({ limit: "1mb" }), async (req, res) => {
+    const supplied = String(
+      req.query.token ?? req.headers["x-nexus-token"] ?? "",
+    ).trim();
+    if (!ARR_WEBHOOK_SECRET || supplied !== ARR_WEBHOOK_SECRET) {
+      // Deliberately terse: this endpoint is reachable without a session.
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const body = (req.body ?? {}) as any;
+    const eventType = String(body.eventType ?? body.EventType ?? "").trim();
+    // Sonarr sends `series` + `episodeFile`; Radarr sends `movie` + `movieFile`.
+    const isSeries = !!body.series;
+    const title = String(body.series?.title ?? body.movie?.title ?? "").trim();
+    const importedPath =
+      body.episodeFile?.path ?? body.movieFile?.path ??
+      (Array.isArray(body.episodeFiles) ? body.episodeFiles[0]?.path : null) ?? null;
+
+    // "Test" fires when someone hits Test in the Arr UI — answer 200 so the
+    // connection validates, but do not kick off a library scan for it.
+    if (eventType === "Test") {
+      log("INFO", `Arr webhook test received from ${isSeries ? "Sonarr" : "Radarr"}`, "arr");
+      return res.json({ ok: true, test: true });
+    }
+
+    const INGEST_EVENTS = new Set(["Download", "Import", "Rename", "MovieFileImported", "EpisodeFileImported"]);
+    if (!INGEST_EVENTS.has(eventType)) {
+      return res.json({ ok: true, ignored: eventType || "unknown" });
+    }
+
+    log("INFO",
+      `Arr ${eventType}: ${title || "(untitled)"}${importedPath ? ` -> ${path.basename(importedPath)}` : ""}`,
+      "arr");
+    scheduleArrIngest(importedPath, eventType);
+    res.json({ ok: true, queuedScan: true, title, path: importedPath });
+  });
+
+  // One-shot helper that registers this webhook in both Arr apps, so the user
+  // does not have to paste URLs into two separate settings screens.
+  app.post("/api/arr/install-webhook", async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const cfg = await loadArrConfig();
+    if (!cfg) return res.status(404).json({ error: "Sonarr/Radarr not configured" });
+    if (!ARR_WEBHOOK_SECRET) {
+      return res.status(400).json({ error: "No webhook secret — set NEXUS_ARR_WEBHOOK_SECRET or NEXUS_HOST_SHARE_SECRET" });
+    }
+
+    // The Arr apps run on this same host, so they must reach Nexus on loopback;
+    // the public URL would route back out through the tunnel for no reason.
+    const callback = `http://127.0.0.1:${PORT}/api/webhooks/arr?token=${encodeURIComponent(ARR_WEBHOOK_SECRET)}`;
+    const out: any = {};
+
+    for (const [name, base, key] of [
+      ["radarr", cfg.radarrUrl, cfg.radarrApiKey],
+      ["sonarr", cfg.sonarrUrl, cfg.sonarrApiKey],
+    ] as [string, string, string][]) {
+      if (!base || !key) { out[name] = { skipped: "not configured" }; continue; }
+      const root = base.replace(/\/$/, "");
+      const hdr = { "X-Api-Key": key, "Content-Type": "application/json" };
+      try {
+        const existing = await fetch(`${root}/api/v3/notification`, { headers: hdr, signal: AbortSignal.timeout(10000) })
+          .then((r) => r.json()).catch(() => []);
+        const mine = (existing as any[]).find((n) => n?.name === "NexusEmu");
+        const payload = {
+          name: "NexusEmu",
+          implementation: "Webhook",
+          configContract: "WebhookSettings",
+          onDownload: true, onUpgrade: true, onRename: true,
+          onGrab: false, onHealthIssue: false,
+          fields: [
+            { name: "url", value: callback },
+            { name: "method", value: 1 },   // 1 = POST
+          ],
+        };
+        const r = mine
+          ? await fetch(`${root}/api/v3/notification/${mine.id}`, { method: "PUT", headers: hdr, body: JSON.stringify({ ...mine, ...payload }), signal: AbortSignal.timeout(10000) })
+          : await fetch(`${root}/api/v3/notification`, { method: "POST", headers: hdr, body: JSON.stringify(payload), signal: AbortSignal.timeout(10000) });
+        out[name] = r.ok ? { ok: true, updated: !!mine } : { ok: false, status: r.status, detail: (await r.text()).slice(0, 300) };
+      } catch (e: any) {
+        out[name] = { ok: false, error: e?.message ?? String(e) };
+      }
+    }
+    res.json({ ok: true, callback: callback.replace(ARR_WEBHOOK_SECRET, "***"), results: out });
+  });
+
   app.get('/api/arr/config', async (_req, res) => {
     const cfg = await loadArrConfig();
     if (!cfg) return res.json({ configured: false });
@@ -10674,6 +10797,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.setHeader("Cache-Control", "no-store");
     res.sendFile(path.join(PUBLIC_PAGES, "recovery.html"));
   });
+  // 10-foot interface for TV boxes and Android TV. /tv and /leanback are both
+  // accepted because some launchers deep-link the latter by convention.
+  for (const route of ["/tv", "/leanback"]) {
+    app.get(route, (_req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      res.sendFile(path.join(PUBLIC_PAGES, "tv.html"));
+    });
+  }
 
   // Stable alias for hls.js. The library is only present as a content-hashed
   // chunk inside the compiled bundle (it is not in node_modules on this host),
