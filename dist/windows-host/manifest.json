@@ -1,0 +1,32 @@
+{
+  "name": "NexusEmu Windows Desktop Host",
+  "version": "2.0.4",
+  "packageDate": "2026-09-19T23:57:43.432Z",
+  "service": {
+    "id": "nexus-service",
+    "displayName": "NexusEmu Host Background Service",
+    "startup": "auto",
+    "restartRules": "reset=86400 actions=restart/5000/restart/5000/restart/5000"
+  },
+  "protocol": {
+    "scheme": "nexus",
+    "routes": [
+      {
+        "pattern": "nexus://join/:sessionId",
+        "description": "One-click WebRTC Co-Op session join"
+      },
+      {
+        "pattern": "nexus://play/:gameId",
+        "description": "Direct ROM / game launch"
+      }
+    ]
+  },
+  "artifacts": [
+    "install-service.bat",
+    "uninstall-service.bat",
+    "register-protocol.bat",
+    "register-protocol.reg",
+    "launch-silent.vbs",
+    "launch.bat"
+  ]
+}

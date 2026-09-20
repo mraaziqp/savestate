@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover is essential for iPhone notch/Dynamic Island safe areas -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimum-scale=1.0, maximum-scale=1.0" />
+    <title>NexusEmu | Your Media &amp; Games Hub</title>
+
+    <!-- Private app — block all search engine indexing and caching -->
+    <meta name="robots" content="noindex, nofollow, noarchive, noimageindex, nosnippet" />
+    <meta name="googlebot" content="noindex, nofollow, noarchive, noimageindex, nosnippet" />
+
+    <!-- ── PWA / Add to Home Screen ── -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- iOS (iPhone / iPad) -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="NexusEmu" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- iPhone X/11/12/13/14/15 splash screens — dark themed -->
+    <link rel="apple-touch-startup-image" href="/apple-touch-icon.png" />
+
+    <!-- Android / Chrome -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#050505" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#050505" />
+
+    <!-- Samsung Internet -->
+    <meta name="msapplication-TileColor" content="#050505" />
+
+    <!-- Huawei / EMUI / HarmonyOS (Petal Browser) -->
+    <meta name="format-detection" content="telephone=no, date=no, email=no, address=no" />
+
+    <!-- Prevent iOS from styling phone numbers, dates, addresses -->
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- Disable iOS text size adjust (prevents layout shift when rotating) -->
+    <meta name="HandheldFriendly" content="True" />
+    <meta name="MobileOptimized" content="320" />
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="NexusEmu" />
+    <meta property="og:description" content="Your Media &amp; Games Hub" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/pwa-512x512.png" />
+
+    <!-- Critical inline CSS: prevent flash of unstyled white background on all phones -->
+    <style>
+      *, *::before, *::after {
+        box-sizing: border-box;
+      }
+      html, body, #root {
+        background: #050505;
+        color: #ffffff;
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        min-height: 100vh;
+        min-height: 100dvh;
+        overflow-x: hidden;
+        -webkit-font-smoothing: antialiased;
+        scroll-behavior: smooth;
+        overscroll-behavior-y: contain;
+      }
+      body {
+        background-color: #050505;
+        padding-top: max(env(safe-area-inset-top, 0px), var(--tv-pad-top, 0px));
+        padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--tv-pad-bottom, 0px));
+        padding-left: max(env(safe-area-inset-left, 0px), var(--tv-pad-side, 0px));
+        padding-right: max(env(safe-area-inset-right, 0px), var(--tv-pad-side, 0px));
+      }
+      #root { visibility: hidden; }
+      #root.mounted { visibility: visible; }
+
+      @media screen and (min-width: 900px) and (hover: none), screen and (min-width: 1200px) {
+        :root {
+          --tv-pad-top: 14px;
+          --tv-pad-bottom: 20px;
+          --tv-pad-side: 24px;
+        }
+      }
+      :focus-visible {
+        outline: 3px solid #00f0ff !important;
+        outline-offset: 4px !important;
+        scroll-margin: 50px !important;
+        transition: transform 0.15s ease-out, outline 0.15s ease-out;
+      }
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 4px;
+      }
+    </style>
+    <script type="module" crossorigin src="/assets/index-CKnFRVZB.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-CfSZB2vO.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-icons-Btsoypng.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-react-C_B4NnYc.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-motion-Cv7i68yK.js">
+    <link rel="modulepreload" crossorigin href="/assets/proxy-BC7yw7QF.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-1ZNanW1_.css">
+  <link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Mark root as mounted to prevent FOUC
+      document.addEventListener('DOMContentLoaded', function() {
+        document.getElementById('root').classList.add('mounted');
+        var ua = navigator.userAgent || '';
+        if (/TV|SmartTV|GoogleTV|AppleTV|HbbTV|NetCast|Web0S|Tizen|MiBOX|AFT|Nexus Player/i.test(ua)) {
+          document.documentElement.classList.add('tv-mode');
+          document.body.style.setProperty('--tv-pad-side', '32px');
+          document.body.style.setProperty('--tv-pad-top', '20px');
+          document.body.style.setProperty('--tv-pad-bottom', '28px');
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,43 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+certs/
+letsencrypt/
+*.pem
+*.key
+*.p12
+# rclone/Google OAuth tokens and Cloudflare tunnel credentials
+*credentials*.json
+.cloudflared/
+
+# ── Dependencies & build scratch ─────────────────────────────────────────────
+node_modules/
+node-win-x64/
+*.tsbuildinfo
+.recovery-backup/
+.recovery-*.mjs
+
+# ── Runtime state (belongs in Neon / Google Drive, never the repo) ───────────
+data/
+*.log
+npm-debug.log*
+host-state.json
+hls-cache/
+
+# ── Large binaries — these live in releases, not in git ──────────────────────
+*.exe
+*.deb
+*.apk
+*.AppImage
+*.dmg
+*.msi
+
+# ── NOTE: dist/ IS COMMITTED, DELIBERATELY. ──────────────────────────────────
+# The Vite frontend sources (vite.config.ts, index.html, main.tsx, App.tsx and
+# most components) were lost with the media drive on 2026-09-20 and cannot be
+# rebuilt — `npm run build` does not work. The compiled bundle in dist/ is now
+# the ONLY surviving copy of the frontend. Ignoring it, as one normally would,
+# would mean the repository does not contain the running application.
+# Remove this exception once the frontend sources are rewritten.
+dist/server.mjs

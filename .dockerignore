@@ -1,0 +1,28 @@
+# Keep the build context small and secrets out of the image.
+node_modules
+.git
+.env
+.env.*
+!.env.example
+.recovery-backup
+.recovery-*.mjs
+*.log
+npm-debug.log*
+
+# Host-only artifacts — nothing here belongs in a stateless container.
+node-win-x64
+windows-gamepad-bridge
+android
+releases
+data
+nexus-installers
+*.exe
+*.deb
+*.apk
+*.AppImage
+client-launcher.cjs
+dist/client-launcher.ps1
+
+# The server bundle is rebuilt inside the image; the rest of dist/ (the
+# compiled frontend) IS copied in deliberately — see the Dockerfile note.
+dist/server.mjs

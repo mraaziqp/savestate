@@ -1,0 +1,150 @@
+{
+  "version": "1.0.0",
+  "updatedAt": "2026-09-19T14:30:00.000Z",
+  "games": [
+    {
+      "appId": "550",
+      "title": "Left 4 Dead 2",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "Left4Dead2.js",
+      "inputSupport": ["gamepad", "keyboard_mouse"],
+      "verified": true,
+      "notes": "Seamless 4-player campaign and versus mode with separate audio channels."
+    },
+    {
+      "appId": "49520",
+      "title": "Borderlands 2",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "Borderlands2.js",
+      "inputSupport": ["gamepad"],
+      "verified": true,
+      "notes": "LAN co-op emulation with independent window positioning."
+    },
+    {
+      "appId": "252950",
+      "title": "Rocket League",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "RocketLeague.js",
+      "inputSupport": ["gamepad"],
+      "verified": true,
+      "notes": "Local offline split-screen and LAN match support."
+    },
+    {
+      "appId": "413150",
+      "title": "Stardew Valley",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "StardewValley.js",
+      "inputSupport": ["gamepad", "keyboard_mouse"],
+      "verified": true,
+      "notes": "Supports up to 4 farmer cabins with isolated save synchronization."
+    },
+    {
+      "appId": "268910",
+      "title": "Cuphead",
+      "nucleusSupported": true,
+      "maxPlayers": 2,
+      "splitScreenTypes": ["shared_screen"],
+      "handlerAvailable": true,
+      "handlerName": "Cuphead.js",
+      "inputSupport": ["gamepad", "keyboard_mouse"],
+      "verified": true,
+      "notes": "Native and multi-process input isolation."
+    },
+    {
+      "appId": "108600",
+      "title": "Project Zomboid",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "ProjectZomboid.js",
+      "inputSupport": ["gamepad", "keyboard_mouse"],
+      "verified": true,
+      "notes": "Direct memory hooks for dynamic split-screen survivor co-op."
+    },
+    {
+      "appId": "242760",
+      "title": "The Forest",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "TheForest.js",
+      "inputSupport": ["gamepad"],
+      "verified": true,
+      "notes": "Dedicated peer-to-peer split-screen survival orchestration."
+    },
+    {
+      "appId": "381210",
+      "title": "Dead by Daylight",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["four_way"],
+      "handlerAvailable": true,
+      "handlerName": "DeadByDaylight.js",
+      "inputSupport": ["gamepad"],
+      "verified": false,
+      "notes": "Requires anti-cheat bypass script for offline private matches."
+    },
+    {
+      "appId": "105600",
+      "title": "Terraria",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "Terraria.js",
+      "inputSupport": ["gamepad", "keyboard_mouse"],
+      "verified": true,
+      "notes": "Multi-instance host & play LAN co-op."
+    },
+    {
+      "appId": "674020",
+      "title": "World War Z",
+      "nucleusSupported": true,
+      "maxPlayers": 4,
+      "splitScreenTypes": ["horizontal", "vertical", "four_way"],
+      "handlerAvailable": true,
+      "handlerName": "WorldWarZ.js",
+      "inputSupport": ["gamepad"],
+      "verified": true,
+      "notes": "Full swarming horde co-op with independent sound cards."
+    },
+    {
+      "appId": "252490",
+      "title": "Rust",
+      "nucleusSupported": true,
+      "maxPlayers": 2,
+      "splitScreenTypes": ["horizontal", "vertical"],
+      "handlerAvailable": true,
+      "handlerName": "Rust.js",
+      "inputSupport": ["gamepad", "keyboard_mouse"],
+      "verified": false,
+      "notes": "LAN server only."
+    },
+    {
+      "appId": "346110",
+      "title": "ARK: Survival Evolved",
+      "nucleusSupported": true,
+      "maxPlayers": 2,
+      "splitScreenTypes": ["horizontal", "vertical"],
+      "handlerAvailable": true,
+      "handlerName": "ArkSurvivalEvolved.js",
+      "inputSupport": ["gamepad"],
+      "verified": true,
+      "notes": "Non-dedicated tetherless co-op with multi-monitor support."
+    }
+  ]
+}

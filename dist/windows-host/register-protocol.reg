@@ -1,0 +1,15 @@
+Windows Registry Editor Version 5.00
+
+[HKEY_CLASSES_ROOT\nexus]
+@="URL:Nexus Protocol"
+"URL Protocol"=""
+
+[HKEY_CLASSES_ROOT\nexus\DefaultIcon]
+@="NexusEmu.exe,0"
+
+[HKEY_CLASSES_ROOT\nexus\shell]
+
+[HKEY_CLASSES_ROOT\nexus\shell\open]
+
+[HKEY_CLASSES_ROOT\nexus\shell\open\command]
+@="\"%~dp0NexusEmu.exe\" \"%1\""

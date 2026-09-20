@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>NexusEmu Wear</title>
+  <meta name="theme-color" content="#050505" />
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;user-select:none}
+    :root{
+      --accent:#a855f7;--cyan:#22d3ee;--pink:#ec4899;--green:#22c55e;
+      --bg:#060608;--surface:#0e0e16;--border:rgba(255,255,255,0.08);
+      --text:#fff;--muted:rgba(255,255,255,0.45);
+    }
+    html,body{width:100%;height:100%;background:var(--bg);color:var(--text);
+      font-family:-apple-system,system-ui,'SF Pro',sans-serif;overflow:hidden;
+      max-width:450px;max-height:450px;margin:auto;position:relative;
+    }
+    body{border-radius:50%;overflow:hidden;}
+    .screen{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+      justify-content:center;padding:32px 22px;
+      transition:transform .3s cubic-bezier(.4,0,.2,1),opacity .25s;will-change:transform,opacity}
+    .screen.hidden{transform:translateX(110%);opacity:0;pointer-events:none}
+    .screen.slide-left{transform:translateX(-110%);opacity:0;pointer-events:none}
+
+    /* HOME */
+    .home-bg{background:radial-gradient(circle at 50% 35%,rgba(77,124,255,.2),transparent 65%),var(--bg)}
+    .clock{font-size:54px;font-weight:900;letter-spacing:-3px;line-height:1}
+    .date-str{font-size:11px;color:var(--muted);margin-top:3px;letter-spacing:.07em}
+    .status-chip{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);
+      background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:20px;
+      padding:3px 9px;margin-top:12px}
+    .s-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+    .nav-row{display:flex;gap:12px;margin-top:16px}
+    .nav-btn{width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,.06);
+      border:1px solid var(--border);display:flex;flex-direction:column;align-items:center;
+      justify-content:center;gap:2px;font-size:20px;cursor:pointer;transition:all .15s}
+    .nav-btn span{font-size:8px;color:var(--muted)}
+    .nav-btn:active{transform:scale(.88);background:rgba(255,255,255,.14)}
+
+    /* MUSIC */
+    .music-bg{background:radial-gradient(circle at 50% 28%,rgba(168,85,247,.24),transparent 65%),var(--bg)}
+    .album-art{width:88px;height:88px;border-radius:50%;background:var(--surface);
+      border:2px solid var(--accent);display:flex;align-items:center;justify-content:center;
+      font-size:30px;margin-bottom:8px;box-shadow:0 0 28px rgba(168,85,247,.4);
+      overflow:hidden;flex-shrink:0;transition:box-shadow .4s}
+    .album-art.playing{animation:pulse-art 2s ease-in-out infinite}
+    @keyframes pulse-art{0%,100%{box-shadow:0 0 28px rgba(168,85,247,.4)}50%{box-shadow:0 0 44px rgba(168,85,247,.75)}}
+    .album-art img{width:100%;height:100%;object-fit:cover;border-radius:50%}
+    .track-title{font-size:13px;font-weight:800;text-align:center;max-width:165px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .track-artist{font-size:10px;color:var(--muted);text-align:center;margin-top:2px;
+      max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .prog-wrap{width:145px;height:3px;background:rgba(255,255,255,.1);border-radius:2px;margin:10px 0 6px}
+    .prog-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--accent),var(--cyan));
+      transition:width .5s linear;max-width:100%}
+    .ctrl-row{display:flex;align-items:center;gap:14px}
+    .ctrl-btn{width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.07);
+      border:1px solid var(--border);display:flex;align-items:center;justify-content:center;
+      font-size:15px;cursor:pointer;transition:all .15s}
+    .ctrl-btn.main{width:52px;height:52px;font-size:22px;
+      background:linear-gradient(135deg,var(--accent),#7c3aed);border:none;
+      box-shadow:0 0 20px rgba(168,85,247,.4)}
+    .ctrl-btn:active{transform:scale(.88)}
+    .vol-row{display:flex;align-items:center;gap:18px;margin-top:8px}
+    .vol-btn{width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.05);
+      border:1px solid var(--border);display:flex;align-items:center;justify-content:center;
+      font-size:13px;cursor:pointer;transition:all .15s}
+    .vol-btn:active{transform:scale(.88);background:rgba(255,255,255,.15)}
+
+    /* AI */
+    .ai-bg{background:radial-gradient(circle at 50% 38%,rgba(34,211,238,.15),transparent 62%),var(--bg)}
+    .ai-orb{width:66px;height:66px;border-radius:50%;
+      background:conic-gradient(var(--cyan) 0%,var(--accent) 35%,var(--pink) 65%,var(--cyan) 100%);
+      display:flex;align-items:center;justify-content:center;font-size:24px;
+      box-shadow:0 0 22px rgba(34,211,238,.35);flex-shrink:0;transition:box-shadow .3s}
+    .ai-orb.thinking{animation:ai-pulse 1s ease-in-out infinite}
+    @keyframes ai-pulse{0%,100%{box-shadow:0 0 22px rgba(34,211,238,.35);transform:scale(1)}
+      50%{box-shadow:0 0 42px rgba(34,211,238,.8);transform:scale(1.06)}}
+    .ai-reply{font-size:10.5px;color:#e2e8f0;text-align:center;max-width:185px;
+      max-height:72px;overflow:hidden;line-height:1.45;margin:7px 0;min-height:20px}
+    .ai-input{width:168px;padding:7px 11px;border-radius:20px;border:1px solid rgba(34,211,238,.3);
+      background:rgba(34,211,238,.06);color:var(--text);font-size:11px;outline:none;
+      caret-color:var(--cyan);text-align:center}
+    .ai-input::placeholder{color:var(--muted)}
+    .ai-quick{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;margin-top:6px}
+    .aqb{padding:4px 8px;border-radius:12px;background:rgba(34,211,238,.09);
+      border:1px solid rgba(34,211,238,.22);font-size:9px;color:var(--cyan);cursor:pointer;
+      transition:all .15s}
+    .aqb:active{background:rgba(34,211,238,.25)}
+
+    /* ACTIONS */
+    .act-bg{background:radial-gradient(circle at 50% 35%,rgba(236,72,153,.15),transparent 60%),var(--bg)}
+    .act-title{font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;
+      color:var(--pink);margin-bottom:10px}
+    .act-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;width:188px}
+    .act-item{padding:10px 5px;border-radius:14px;background:var(--surface);
+      border:1px solid var(--border);display:flex;flex-direction:column;align-items:center;
+      gap:4px;cursor:pointer;transition:all .15s;-webkit-tap-highlight-color:transparent}
+    .act-item:active{transform:scale(.9);background:rgba(255,255,255,.1)}
+    .act-icon{font-size:20px;line-height:1}
+    .act-label{font-size:8.5px;color:var(--muted);text-align:center}
+
+    .back-btn{position:absolute;bottom:22px;width:30px;height:30px;border-radius:50%;
+      background:rgba(255,255,255,.06);border:1px solid var(--border);
+      display:flex;align-items:center;justify-content:center;font-size:13px;cursor:pointer;
+      transition:all .15s}
+    .back-btn:active{transform:scale(.88);background:rgba(255,255,255,.15)}
+
+    .toast{position:absolute;bottom:48px;left:50%;transform:translateX(-50%);
+      background:rgba(8,8,18,.96);border:1px solid var(--border);border-radius:12px;
+      padding:5px 13px;font-size:10px;white-space:nowrap;
+      transition:opacity .3s;pointer-events:none;z-index:999}
+    .toast.hidden{opacity:0}
+  </style>
+</head>
+<body>
+
+<!-- HOME -->
+<div class="screen home-bg" id="s-home">
+  <div class="clock" id="clock">--:--</div>
+  <div class="date-str" id="date-str">---</div>
+  <div class="status-chip">
+    <div class="s-dot" id="server-dot" style="background:#ef4444"></div>
+    <span id="server-lbl">Connecting…</span>
+  </div>
+  <div class="nav-row">
+    <div class="nav-btn" onclick="go('s-music')">🎵<span>Music</span></div>
+    <div class="nav-btn" onclick="go('s-ai')">🤖<span>AI</span></div>
+    <div class="nav-btn" onclick="go('s-actions')">⚡<span>Actions</span></div>
+  </div>
+</div>
+
+<!-- MUSIC -->
+<div class="screen music-bg hidden" id="s-music">
+  <div class="album-art" id="album-art">🎵</div>
+  <div class="track-title" id="track-title">Nothing Playing</div>
+  <div class="track-artist" id="track-artist">Open NexusEmu to start</div>
+  <div class="prog-wrap"><div class="prog-fill" id="prog-fill" style="width:0%"></div></div>
+  <div class="ctrl-row">
+    <div class="ctrl-btn" onclick="musicCmd('prev')">⏮</div>
+    <div class="ctrl-btn main" id="play-btn" onclick="musicCmd('toggle')">▶</div>
+    <div class="ctrl-btn" onclick="musicCmd('next')">⏭</div>
+  </div>
+  <div class="vol-row">
+    <div class="vol-btn" onclick="musicCmd('vol-down')">🔉</div>
+    <div class="vol-btn" onclick="musicCmd('shuffle')" id="shuf-btn">🔀</div>
+    <div class="vol-btn" onclick="musicCmd('repeat')" id="rep-btn">🔁</div>
+    <div class="vol-btn" onclick="musicCmd('vol-up')">🔊</div>
+  </div>
+  <div class="back-btn" onclick="go('s-home')">‹</div>
+</div>
+
+<!-- AI -->
+<div class="screen ai-bg hidden" id="s-ai">
+  <div class="ai-orb" id="ai-orb">🤖</div>
+  <div class="ai-reply" id="ai-reply">Ask me anything about your library…</div>
+  <input class="ai-input" id="ai-input" placeholder="Ask NexusAI…" maxlength="120"
+    onkeydown="if(event.key==='Enter'){askAI();this.blur()}"/>
+  <div class="ai-quick">
+    <div class="aqb" onclick="quickAsk('What movies can I watch tonight?')">🎬 Movies</div>
+    <div class="aqb" onclick="quickAsk('What is currently downloading?')">⬇ DLs</div>
+    <div class="aqb" onclick="quickAsk('Play the next episode of My Family')">▶ Next ep</div>
+    <div class="aqb" onclick="quickAsk('What games do I have for SNES?')">🎮 Games</div>
+    <div class="aqb" onclick="startVoice()">🎤 Voice</div>
+  </div>
+  <div class="back-btn" onclick="go('s-home')">‹</div>
+</div>
+
+<!-- ACTIONS -->
+<div class="screen act-bg hidden" id="s-actions">
+  <div class="act-title">Quick Actions</div>
+  <div class="act-grid">
+    <div class="act-item" onclick="action('scan')"><div class="act-icon">🔍</div><div class="act-label">Scan Library</div></div>
+    <div class="act-item" onclick="action('media')"><div class="act-icon">🎬</div><div class="act-label">Open Media</div></div>
+    <div class="act-item" onclick="action('downloads')"><div class="act-icon">⬇️</div><div class="act-label">Downloads</div></div>
+    <div class="act-item" onclick="action('multiplayer')"><div class="act-icon">🎮</div><div class="act-label">Multiplayer</div></div>
+    <div class="act-item" onclick="action('photos')"><div class="act-icon">📸</div><div class="act-label">Photos</div></div>
+    <div class="act-item" onclick="action('ask')"><div class="act-icon">✨</div><div class="act-label">AI Status</div></div>
+  </div>
+  <div class="back-btn" onclick="go('s-home')">‹</div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script>
+'use strict';
+// ── Server URL ───────────────────────────────────────────────────────────────
+const BASE = (() => {
+  try {
+    const s = localStorage.getItem('nexus_client_host_url') || localStorage.getItem('nexus_last_working_host');
+    if (s && s.startsWith('http')) return s.replace(/\/$/, '');
+  } catch {}
+  return location.origin.includes('localhost') ? 'http://localhost:3000' : 'https://savestate.co.za';
+})();
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function go(id) {
+  document.querySelectorAll('.screen').forEach(s => {
+    if (s.id === id) { s.classList.remove('hidden', 'slide-left'); }
+    else {
+      const idx1 = SCREENS.indexOf(s.id), idx2 = SCREENS.indexOf(id);
+      if (idx1 >= 0 && idx2 >= 0) {
+        s.classList.remove('hidden', 'slide-left');
+        s.classList.add(idx1 < idx2 ? 'slide-left' : 'hidden');
+      } else { s.classList.add('hidden'); }
+    }
+  });
+}
+const SCREENS = ['s-home','s-music','s-ai','s-actions'];
+
+let toastT;
+function toast(msg, ms=2200) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.remove('hidden');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.add('hidden'), ms);
+}
+
+async function api(path, opts) {
+  try {
+    const tk = localStorage.getItem('nexus_token') || '';
+    const h = { 'Content-Type':'application/json', ...(tk ? { Authorization:`Bearer ${tk}` } : {}) };
+    const r = await fetch(BASE + path, { ...opts, headers:{ ...h, ...(opts?.headers ?? {}) }, signal: AbortSignal.timeout(8000) });
+    return r.ok ? r.json() : null;
+  } catch { return null; }
+}
+
+// ── Clock ────────────────────────────────────────────────────────────────────
+function tick() {
+  const n = new Date();
+  document.getElementById('clock').textContent = `${n.getHours().toString().padStart(2,'0')}:${n.getMinutes().toString().padStart(2,'0')}`;
+  document.getElementById('date-str').textContent = n.toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric' });
+}
+tick(); setInterval(tick, 15000);
+
+// ── Server health ─────────────────────────────────────────────────────────────
+async function pingServer() {
+  const d = await api('/api/host/readiness');
+  const ok = !!d;
+  document.getElementById('server-dot').style.background = ok ? '#22c55e' : '#ef4444';
+  document.getElementById('server-lbl').textContent = ok ? (d?.bestUrl ? 'Online ✓' : 'Online') : 'Offline';
+}
+pingServer(); setInterval(pingServer, 30000);
+
+// ── Music ─────────────────────────────────────────────────────────────────────
+let nowPlaying = { playing: false, title: '', artist: '', progress: 0, duration: 0, coverUrl: '' };
+
+async function fetchMusic() {
+  const d = await api('/api/music/status');
+  if (!d) return;
+  nowPlaying = { ...nowPlaying, ...d };
+  document.getElementById('track-title').textContent = d.title || 'Nothing Playing';
+  document.getElementById('track-artist').textContent = d.artist || d.album || '';
+  document.getElementById('play-btn').textContent = d.playing ? '⏸' : '▶';
+  const art = document.getElementById('album-art');
+  art.classList.toggle('playing', !!d.playing);
+  if (d.duration > 0) {
+    document.getElementById('prog-fill').style.width = Math.min(100, Math.round((d.progress / d.duration) * 100)) + '%';
+  }
+  if (d.coverUrl) {
+    art.innerHTML = `<img src="${BASE + d.coverUrl}" onerror="this.parentElement.innerHTML='🎵'" alt="">`;
+  }
+}
+fetchMusic(); setInterval(fetchMusic, 4000);
+
+async function musicCmd(cmd) {
+  const act = { toggle: nowPlaying.playing ? 'pause' : 'play', prev:'prev', next:'next', shuffle:'shuffle', repeat:'repeat', 'vol-up':'volume-up', 'vol-down':'volume-down' }[cmd] || cmd;
+  await api('/api/music/control', { method:'POST', body: JSON.stringify({ action: act }) });
+  if (cmd === 'toggle') toast(nowPlaying.playing ? '⏸ Paused' : '▶ Playing');
+  else if (cmd === 'next') toast('⏭ Next track');
+  else if (cmd === 'prev') toast('⏮ Previous');
+  else if (cmd === 'vol-up') toast('🔊 Volume up');
+  else if (cmd === 'vol-down') toast('🔉 Volume down');
+  setTimeout(fetchMusic, 500);
+}
+
+// ── NexusAI ───────────────────────────────────────────────────────────────────
+const AI_CONV = 'wear-' + Math.random().toString(36).slice(2, 8);
+
+async function askAI() {
+  const inp = document.getElementById('ai-input');
+  const msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  const orb = document.getElementById('ai-orb');
+  const reply = document.getElementById('ai-reply');
+  orb.classList.add('thinking');
+  reply.textContent = '…';
+
+  const d = await api('/api/ai/chat', {
+    method:'POST',
+    body: JSON.stringify({ message: msg, conversationId: AI_CONV })
+  });
+
+  const text = d?.response ?? d?.text ?? d?.message ?? "Sorry, couldn't reach NexusAI.";
+  reply.textContent = text.length > 130 ? text.slice(0, 127) + '…' : text;
+  orb.classList.remove('thinking');
+}
+
+function quickAsk(q) { document.getElementById('ai-input').value = q; askAI(); }
+
+function startVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('Voice not supported here'); return; }
+  const rec = new SR();
+  rec.lang = 'en-US'; rec.interimResults = false;
+  document.getElementById('ai-reply').textContent = '🎤 Listening…';
+  rec.onresult = e => { document.getElementById('ai-input').value = e.results[0][0].transcript; askAI(); };
+  rec.onerror = () => { document.getElementById('ai-reply').textContent = 'Voice failed — try typing'; };
+  rec.start();
+}
+
+// ── Quick Actions ─────────────────────────────────────────────────────────────
+async function action(type) {
+  if (type === 'scan') {
+    toast('🔍 Scanning…', 3000);
+    await api('/api/vault/scan', { method:'POST', body:'{}' });
+    toast('✓ Scan started!');
+  } else if (type === 'media') {
+    window.open(BASE + '/?tab=media', '_blank');
+    toast('Opening Movies & TV…');
+  } else if (type === 'downloads') {
+    const d = await api('/api/torrent/download-status');
+    const n = d?.total ?? 0;
+    toast(n > 0 ? `⬇️ ${n} active download${n>1?'s':''}` : '✓ Nothing downloading', 3000);
+  } else if (type === 'multiplayer') {
+    window.open(BASE + '/?tab=multiplayer', '_blank');
+    toast('Opening Multiplayer…');
+  } else if (type === 'photos') {
+    window.open(BASE + '/?tab=photos', '_blank');
+    toast('Opening Photo Booklet…');
+  } else if (type === 'ask') {
+    quickAsk('Give me a quick summary of what is on the server: movies, games, downloads.');
+    go('s-ai');
+  }
+}
+
+// ── Swipe navigation ──────────────────────────────────────────────────────────
+let tx = 0, ty = 0;
+document.addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive:true });
+document.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - tx;
+  const dy = Math.abs(e.changedTouches[0].clientY - ty);
+  if (Math.abs(dx) < 45 || dy > 60) return; // require horizontal swipe
+  const cur = document.querySelector('.screen:not(.hidden):not(.slide-left)');
+  if (!cur) return;
+  const i = SCREENS.indexOf(cur.id);
+  if (dx < 0 && i < SCREENS.length - 1) go(SCREENS[i + 1]);
+  else if (dx > 0 && i > 0) go(SCREENS[i - 1]);
+}, { passive:true });
+</script>
+</body>
+</html>
