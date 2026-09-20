@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexus Recovery Report</title>
+<style>
+  :root{--bg:#0b0d11;--panel:#141821;--line:#232936;--fg:#eef1f6;--dim:#96a0b5;
+        --ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--accent:#4d7cff}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:28px}
+  .wrap{max-width:1180px;margin:0 auto}
+  h1{font-size:23px;margin-bottom:4px}
+  .sub{color:var(--dim);font-size:14px;margin-bottom:22px}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:24px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card .n{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums}
+  .card .l{color:var(--dim);font-size:13px;margin-top:2px}
+  .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+  .bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+  button,select{background:var(--panel);color:var(--fg);border:1px solid var(--line);
+    border-radius:8px;padding:9px 14px;font-size:14px;cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#04101f;font-weight:700}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+  table{width:100%;border-collapse:collapse;background:var(--panel);font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);
+    max-width:430px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  th{color:var(--dim);font-weight:600;position:sticky;top:0;background:var(--panel)}
+  tr:last-child td{border-bottom:0}
+  .pill{padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+  .p-recovered{background:rgba(34,197,94,.16);color:var(--ok)}
+  .p-missing_media{background:rgba(239,68,68,.16);color:var(--bad)}
+  .p-size_mismatch{background:rgba(245,158,11,.16);color:var(--warn)}
+  #msg{margin:14px 0;color:var(--dim);font-size:14px;min-height:20px}
+  code{background:#0e1218;padding:2px 6px;border-radius:5px;font-size:12.5px}
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Recovery Report</h1>
+  <p class="sub">What survived the loss of <code>/media/moh/EMULATION dRIVE</code>, and what did not.</p>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="bar">
+    <button class="primary" id="run">Re-run cloud audit</button>
+    <select id="filter">
+      <option value="">All results</option>
+      <option value="missing_media">Missing only</option>
+      <option value="recovered">Recovered only</option>
+      <option value="size_mismatch">Size mismatch only</option>
+    </select>
+    <button id="csv">Export CSV</button>
+  </div>
+  <div id="msg"></div>
+
+  <div class="scroll"><table>
+    <thead><tr><th>Status</th><th>Title</th><th>Source</th><th>Original path</th><th>Found in cloud</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="5" style="color:var(--dim)">Loading…</td></tr></tbody>
+  </table></div>
+</div>
+
+<script>
+const token = localStorage.getItem('nexus_token') ||
+              new URLSearchParams(location.search).get('token') || '';
+const H = { Authorization: `Bearer ${token}` };
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let current = [];
+
+const LABEL = { recovered:'Recovered', missing_media:'Missing', size_mismatch:'Size mismatch', ok:'OK' };
+
+async function load() {
+  const f = $('#filter').value;
+  try {
+    const r = await fetch(`/api/recovery/report?limit=1000${f ? `&status=${f}` : ''}`, { headers: H });
+    if (r.status === 401 || r.status === 403) return $('#msg').textContent = 'Admin sign-in required — open this from the app so the token is present.';
+    const d = await r.json();
+    if (d.error) return $('#msg').textContent = `${d.error}${d.hint ? ' — ' + d.hint : ''}`;
+
+    const totals = Object.fromEntries((d.totals || []).map((t) => [t.status, t]));
+    const n = (k) => totals[k]?.n ?? 0;
+    $('#cards').innerHTML = `
+      <div class="card"><div class="n ok">${n('recovered')}</div><div class="l">Recovered from Google Drive</div></div>
+      <div class="card"><div class="n bad">${n('missing_media')}</div><div class="l">Missing — needs re-downloading</div></div>
+      <div class="card"><div class="n warn">${n('size_mismatch')}</div><div class="l">Name matched, size differs</div></div>
+      <div class="card"><div class="n">${(d.rows||[]).length}</div><div class="l">Rows shown</div></div>`;
+
+    current = d.rows || [];
+    $('#rows').innerHTML = current.length
+      ? current.map((x) => `<tr>
+          <td><span class="pill p-${esc(x.status)}">${esc(LABEL[x.status] || x.status)}</span></td>
+          <td title="${esc(x.title)}">${esc(x.title || '—')}</td>
+          <td style="color:var(--dim)">${esc((x.source || '').split('.')[0])}</td>
+          <td title="${esc(x.old_path)}" style="color:var(--dim)">${esc(x.old_path)}</td>
+          <td title="${esc(x.cloud_path)}">${esc(x.cloud_path || '—')}</td></tr>`).join('')
+      : '<tr><td colspan="5" style="color:var(--dim)">No rows. Run the audit.</td></tr>';
+    $('#msg').textContent = '';
+  } catch (e) { $('#msg').textContent = 'Failed to load: ' + e.message; }
+}
+
+$('#run').onclick = async () => {
+  const b = $('#run'); b.disabled = true; b.textContent = 'Auditing…';
+  $('#msg').textContent = 'Indexing Google Drive and matching every row — this takes a minute or two.';
+  try {
+    const r = await fetch('/api/recovery/reconcile-cloud', {
+      method: 'POST', headers: { ...H, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apply: true }),
+    });
+    const d = await r.json();
+    $('#msg').textContent = d.error
+      ? 'Audit failed: ' + d.error
+      : `Indexed ${d.cloudFilesIndexed} cloud files · repointed ${d.rowsRepointed ?? 0} rows · flagged ${d.gamesFlaggedMissing ?? 0} games missing.`;
+    await load();
+  } catch (e) { $('#msg').textContent = 'Audit failed: ' + e.message; }
+  b.disabled = false; b.textContent = 'Re-run cloud audit';
+};
+
+$('#filter').onchange = load;
+$('#csv').onclick = () => {
+  const head = ['status','title','source','old_path','cloud_path'];
+  const body = current.map((r) => head.map((k) => `"${String(r[k] ?? '').replace(/"/g,'""')}"`).join(','));
+  const blob = new Blob([[head.join(','), ...body].join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'nexus-recovery-report.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+load();
+</script>
+</body></html>

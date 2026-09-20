@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Nexus Player</title>
+<style>
+  :root{
+    --bg:#000; --fg:#fff; --dim:rgba(255,255,255,.62); --accent:#e50914;
+    --track:rgba(255,255,255,.28); --buffered:rgba(255,255,255,.48);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--fg);
+    font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  #stage{position:fixed;inset:0;background:#000;display:grid;place-items:center}
+  video{width:100%;height:100%;object-fit:contain;background:#000}
+
+  /* Controls fade as a single layer so nothing pops in independently. */
+  #ui{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;
+    opacity:0;transition:opacity .28s ease;pointer-events:none;
+    background:linear-gradient(180deg,rgba(0,0,0,.72) 0%,transparent 22%,transparent 62%,rgba(0,0,0,.86) 100%)}
+  #ui.show{opacity:1;pointer-events:auto}
+  #stage.idle{cursor:none}
+
+  #top{display:flex;align-items:center;gap:14px;padding:18px 22px}
+  #title{font-size:17px;font-weight:600;letter-spacing:.2px;text-shadow:0 1px 3px rgba(0,0,0,.8);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #bottom{padding:0 22px 18px}
+
+  /* ── Scrubber ─────────────────────────────────────────────────────────── */
+  #bar{position:relative;height:22px;display:flex;align-items:center;cursor:pointer;touch-action:none}
+  #rail{position:relative;width:100%;height:4px;border-radius:3px;background:var(--track);
+    transition:height .12s ease}
+  #bar:hover #rail,#bar.dragging #rail{height:7px}
+  #buf,#play{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+  #buf{background:var(--buffered);width:0}
+  #play{background:var(--accent);width:0}
+  #knob{position:absolute;top:50%;width:14px;height:14px;margin-left:-7px;border-radius:50%;
+    background:var(--accent);transform:translateY(-50%) scale(0);transition:transform .12s ease;left:0}
+  #bar:hover #knob,#bar.dragging #knob{transform:translateY(-50%) scale(1)}
+  #hover{position:absolute;bottom:26px;transform:translateX(-50%);padding:3px 8px;border-radius:5px;
+    background:rgba(0,0,0,.88);font-size:12px;font-variant-numeric:tabular-nums;display:none;white-space:nowrap}
+  #bar:hover #hover,#bar.dragging #hover{display:block}
+
+  #row{display:flex;align-items:center;gap:8px;margin-top:6px}
+  button{background:none;border:0;color:var(--fg);cursor:pointer;padding:7px;border-radius:7px;
+    display:grid;place-items:center;transition:background .15s ease}
+  button:hover{background:rgba(255,255,255,.16)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  svg{width:24px;height:24px;fill:currentColor;display:block}
+  #time{font-size:13px;color:var(--dim);font-variant-numeric:tabular-nums;margin-left:4px;white-space:nowrap}
+  .spacer{flex:1}
+
+  #vol{display:flex;align-items:center}
+  #volslider{width:0;opacity:0;transition:width .2s ease,opacity .2s ease;accent-color:var(--accent);
+    height:4px;cursor:pointer}
+  #vol:hover #volslider,#vol:focus-within #volslider{width:82px;opacity:1;margin:0 6px}
+
+  select{background:rgba(0,0,0,.82);color:var(--fg);border:1px solid rgba(255,255,255,.28);
+    border-radius:6px;padding:5px 8px;font-size:13px;cursor:pointer}
+
+  /* Spinner shows ONLY on a real `waiting` event, never on ordinary seeks. */
+  #spin{position:absolute;inset:0;display:none;place-items:center;pointer-events:none}
+  #spin.on{display:grid}
+  #spin i{width:52px;height:52px;border:3px solid rgba(255,255,255,.22);
+    border-top-color:var(--fg);border-radius:50%;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  #toast{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    background:rgba(0,0,0,.82);padding:12px 20px;border-radius:9px;font-size:15px;
+    opacity:0;transition:opacity .2s ease;pointer-events:none}
+  #toast.on{opacity:1}
+  #err{position:absolute;inset:0;display:none;place-items:center;text-align:center;padding:28px}
+  #err.on{display:grid}
+  #err p{color:var(--dim);margin-top:8px;font-size:14px;max-width:46ch}
+  @media (max-width:640px){#time{font-size:12px}svg{width:21px;height:21px}#top,#bottom{padding-inline:14px}}
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="v" playsinline preload="metadata"></video>
+
+  <div id="spin"><i></i></div>
+  <div id="toast"></div>
+  <div id="err"><div><strong>Playback failed</strong><p id="errmsg"></p></div></div>
+
+  <div id="ui">
+    <div id="top">
+      <button id="back" title="Back"><svg viewBox="0 0 24 24"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z"/></svg></button>
+      <div id="title">Loading…</div>
+    </div>
+
+    <div id="bottom">
+      <div id="bar">
+        <div id="rail">
+          <div id="buf"></div><div id="play"></div><div id="knob"></div>
+        </div>
+        <div id="hover">0:00</div>
+      </div>
+      <div id="row">
+        <button id="pp" title="Play/Pause (space)"><svg id="ppi" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></button>
+        <button id="rw" title="Back 10s (←)"><svg viewBox="0 0 24 24"><path d="M12.5 8V4l-5 5 5 5V10a5 5 0 1 1-5 5H6a6.5 6.5 0 1 0 6.5-7z"/></svg></button>
+        <button id="ff" title="Forward 10s (→)"><svg viewBox="0 0 24 24"><path d="M11.5 8V4l5 5-5 5v-4a5 5 0 1 0 5 5H18a6.5 6.5 0 1 1-6.5-7z"/></svg></button>
+        <div id="vol">
+          <button id="mute" title="Mute (m)"><svg id="muti" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/></svg></button>
+          <input id="volslider" type="range" min="0" max="1" step="0.01" value="1" title="Volume">
+        </div>
+        <div id="time">0:00 / 0:00</div>
+        <div class="spacer"></div>
+        <select id="q" title="Quality">
+          <option value="auto">Auto</option>
+          <option value="1080">1080p</option>
+          <option value="720">720p</option>
+          <option value="480">480p</option>
+          <option value="360">360p</option>
+        </select>
+        <button id="pip" title="Picture in picture"><svg viewBox="0 0 24 24"><path d="M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z"/></svg></button>
+        <button id="fs" title="Fullscreen (f)"><svg id="fsi" viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+const $ = (s) => document.querySelector(s);
+const v = $('#v');
+const qs = new URLSearchParams(location.search);
+const rel = qs.get('rel') || '';
+const token = localStorage.getItem('nexus_token') || qs.get('token') || '';
+
+if (!rel) { fail('No "rel" parameter — nothing to play.'); }
+
+$('#title').textContent = decodeURIComponent(rel.split('/').pop() || 'Nexus Player')
+  .replace(/\.[a-z0-9]+$/i, '').replace(/[._]/g, ' ');
+
+const auth = (u) => token ? `${u}${u.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : u;
+const hlsUrl = (q) => auth(`/api/media/hls/playlist.m3u8?rel=${encodeURIComponent(rel)}${q !== 'auto' ? `&quality=${q}` : ''}`);
+
+function fail(msg) { $('#errmsg').textContent = msg; $('#err').classList.add('on'); $('#spin').classList.remove('on'); }
+function fmt(t) {
+  if (!isFinite(t) || t < 0) t = 0;
+  const h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = Math.floor(t % 60);
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`;
+}
+let toastTimer;
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), 900);
+}
+
+// ── HLS attach ────────────────────────────────────────────────────────────
+// hls.js is reused from the app's own compiled bundle; /vendor/hls.js is a
+// stable alias the server resolves to whatever hashed chunk is on disk.
+let hls = null, quality = 'auto';
+async function attach(q, resumeAt) {
+  quality = q;
+  const at = resumeAt ?? v.currentTime ?? 0;
+  const wasPlaying = !v.paused;
+  if (hls) { try { hls.destroy(); } catch {} hls = null; }
+
+  if (v.canPlayType('application/vnd.apple.mpegurl')) {   // Safari plays HLS natively
+    v.src = hlsUrl(q);
+  } else {
+    let Hls;
+    try { Hls = (await import('/vendor/hls.js')).default; }
+    catch { return fail('Could not load the HLS engine.'); }
+    if (!Hls.isSupported()) return fail('This browser cannot play HLS.');
+    hls = new Hls({
+      // Buffer generously: segments are cheap to build now, and a deep buffer
+      // is what stops a slow cold seek from turning into a visible stall.
+      maxBufferLength: 60, maxMaxBufferLength: 180, backBufferLength: 30,
+      fragLoadingTimeOut: 60000, manifestLoadingTimeOut: 30000,
+      xhrSetup: (xhr, url) => { if (token && !url.includes('token=')) xhr.open('GET', auth(url), true); },
+    });
+    hls.on(Hls.Events.ERROR, (_e, d) => {
+      if (!d?.fatal) return;
+      if (d.type === Hls.ErrorTypes.NETWORK_ERROR) return hls.startLoad();
+      if (d.type === Hls.ErrorTypes.MEDIA_ERROR) return hls.recoverMediaError();
+      fail(d.details || 'Fatal playback error.');
+    });
+    hls.loadSource(hlsUrl(q));
+    hls.attachMedia(v);
+  }
+  if (at > 0) {
+    const seek = () => { v.currentTime = at; v.removeEventListener('loadedmetadata', seek); };
+    v.addEventListener('loadedmetadata', seek);
+  }
+  if (wasPlaying) v.play().catch(() => {});
+}
+
+// ── Scrubber ──────────────────────────────────────────────────────────────
+// The bar updates instantly while dragging but the video is only told to seek
+// on release. Seeking on every pointermove would fire a request per pixel.
+const bar = $('#bar'), rail = $('#rail');
+let dragging = false, dragTo = 0;
+
+const ratio = (ev) => {
+  const r = rail.getBoundingClientRect();
+  return Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
+};
+function paint(cur, dur) {
+  const pct = dur > 0 ? (cur / dur) * 100 : 0;
+  $('#play').style.width = pct + '%';
+  $('#knob').style.left = pct + '%';
+  $('#time').textContent = `${fmt(cur)} / ${fmt(dur)}`;
+}
+bar.addEventListener('pointerdown', (e) => {
+  if (!isFinite(v.duration)) return;
+  dragging = true; bar.classList.add('dragging'); bar.setPointerCapture(e.pointerId);
+  dragTo = ratio(e) * v.duration; paint(dragTo, v.duration);
+});
+bar.addEventListener('pointermove', (e) => {
+  if (!isFinite(v.duration)) return;
+  const t = ratio(e) * v.duration;
+  const h = $('#hover'); h.textContent = fmt(t);
+  h.style.left = (ratio(e) * rail.getBoundingClientRect().width) + 'px';
+  if (dragging) { dragTo = t; paint(dragTo, v.duration); }
+});
+const endDrag = () => {
+  if (!dragging) return;
+  dragging = false; bar.classList.remove('dragging');
+  v.currentTime = dragTo;          // one seek, on release
+};
+bar.addEventListener('pointerup', endDrag);
+bar.addEventListener('pointercancel', endDrag);
+
+// ── Transport ─────────────────────────────────────────────────────────────
+const PLAY = 'M8 5v14l11-7z', PAUSE = 'M6 5h4v14H6zm8 0h4v14h-4z';
+const toggle = () => v.paused ? v.play().catch(() => {}) : v.pause();
+$('#pp').onclick = toggle;
+v.addEventListener('click', toggle);
+$('#rw').onclick = () => { v.currentTime = Math.max(0, v.currentTime - 10); toast('−10s'); };
+$('#ff').onclick = () => { v.currentTime = Math.min(v.duration || 1e9, v.currentTime + 10); toast('+10s'); };
+$('#back').onclick = () => history.length > 1 ? history.back() : (location.href = '/');
+
+v.addEventListener('play',  () => $('#ppi').setAttribute('d', PAUSE));
+v.addEventListener('pause', () => $('#ppi').setAttribute('d', PLAY));
+v.addEventListener('timeupdate', () => { if (!dragging) paint(v.currentTime, v.duration || 0); });
+v.addEventListener('durationchange', () => paint(v.currentTime, v.duration || 0));
+v.addEventListener('progress', () => {
+  if (!v.buffered.length || !isFinite(v.duration)) return;
+  // Show the buffered range that actually contains the playhead.
+  let end = 0;
+  for (let i = 0; i < v.buffered.length; i++) {
+    if (v.buffered.start(i) <= v.currentTime && v.currentTime <= v.buffered.end(i)) { end = v.buffered.end(i); break; }
+  }
+  $('#buf').style.width = ((end / v.duration) * 100) + '%';
+});
+
+// Spinner strictly follows `waiting`/`playing` — a seek that resolves from
+// buffer never flashes it, which is what made the old player feel broken.
+v.addEventListener('waiting',  () => $('#spin').classList.add('on'));
+v.addEventListener('playing',  () => $('#spin').classList.remove('on'));
+v.addEventListener('canplay',  () => $('#spin').classList.remove('on'));
+v.addEventListener('error',    () => fail('The video element reported an error.'));
+
+// ── Volume ────────────────────────────────────────────────────────────────
+const MUTED = 'M16.5 12A4.5 4.5 0 0 0 14 8v2.18l2.45 2.45c.03-.2.05-.41.05-.63zM3 9v6h4l5 5v-6.73L4.27 5 3 6.27 6.73 9H3z';
+const LOUD  = 'M3 9v6h4l5 5V4L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z';
+const slider = $('#volslider');
+slider.oninput = () => { v.volume = +slider.value; v.muted = +slider.value === 0; };
+$('#mute').onclick = () => { v.muted = !v.muted; toast(v.muted ? 'Muted' : 'Unmuted'); };
+v.addEventListener('volumechange', () => {
+  $('#muti').setAttribute('d', (v.muted || v.volume === 0) ? MUTED : LOUD);
+  slider.value = v.muted ? 0 : v.volume;
+  try { localStorage.setItem('nexus_player_volume', String(v.volume)); } catch {}
+});
+try {
+  const sv = localStorage.getItem('nexus_player_volume');
+  if (sv !== null) { v.volume = Math.min(1, Math.max(0, +sv)); slider.value = v.volume; }
+} catch {}
+
+// ── Quality / PiP / fullscreen ────────────────────────────────────────────
+$('#q').onchange = (e) => { toast(e.target.value === 'auto' ? 'Auto quality' : e.target.value + 'p'); attach(e.target.value); };
+$('#pip').onclick = async () => {
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await v.requestPictureInPicture();
+  } catch { toast('Picture-in-picture unavailable'); }
+};
+const EXPAND = 'M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z';
+const SHRINK = 'M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z';
+$('#fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('#stage').requestFullscreen().catch(() => {});
+document.addEventListener('fullscreenchange', () =>
+  $('#fsi').setAttribute('d', document.fullscreenElement ? SHRINK : EXPAND));
+
+// ── Auto-hide controls ────────────────────────────────────────────────────
+const ui = $('#ui'), stage = $('#stage');
+let hideTimer;
+function wake() {
+  ui.classList.add('show'); stage.classList.remove('idle');
+  clearTimeout(hideTimer);
+  hideTimer = setTimeout(() => {
+    if (v.paused || dragging) return;           // never hide while paused
+    ui.classList.remove('show'); stage.classList.add('idle');
+  }, 3000);
+}
+['pointermove','pointerdown','keydown'].forEach((e) => document.addEventListener(e, wake));
+v.addEventListener('pause', wake);
+wake();
+
+// ── Keyboard ──────────────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const k = e.key.toLowerCase();
+  const jump = (d) => { v.currentTime = Math.min(v.duration || 1e9, Math.max(0, v.currentTime + d)); toast((d > 0 ? '+' : '') + d + 's'); };
+  if (k === ' ' || k === 'k') { e.preventDefault(); toggle(); }
+  else if (k === 'arrowright') jump(10);
+  else if (k === 'arrowleft')  jump(-10);
+  else if (k === 'l') jump(30);
+  else if (k === 'j') jump(-30);
+  else if (k === 'arrowup')   { e.preventDefault(); v.volume = Math.min(1, v.volume + .05); toast('Vol ' + Math.round(v.volume * 100) + '%'); }
+  else if (k === 'arrowdown') { e.preventDefault(); v.volume = Math.max(0, v.volume - .05); toast('Vol ' + Math.round(v.volume * 100) + '%'); }
+  else if (k === 'f') $('#fs').click();
+  else if (k === 'm') $('#mute').click();
+  else if (k === 'escape' && document.fullscreenElement) document.exitFullscreen();
+});
+
+// ── Resume position ───────────────────────────────────────────────────────
+let lastSaved = 0;
+v.addEventListener('timeupdate', () => {
+  if (!token || !isFinite(v.duration) || v.paused) return;
+  if (Date.now() - lastSaved < 10000) return;       // at most once every 10s
+  lastSaved = Date.now();
+  fetch('/api/media/progress', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ rel, position: Math.floor(v.currentTime), duration: Math.floor(v.duration) }),
+  }).catch(() => {});
+});
+
+(async () => {
+  let resume = 0;
+  if (token) {
+    try {
+      const r = await fetch(`/api/media/progress?rel=${encodeURIComponent(rel)}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) { const d = await r.json(); resume = Number(d?.position ?? d?.progress ?? 0) || 0; }
+    } catch {}
+  }
+  if (resume > 30) toast('Resuming at ' + fmt(resume));
+  await attach('auto', resume);
+})();
+</script>
+</body>
+</html>

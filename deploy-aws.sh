@@ -112,6 +112,16 @@ certs() {
 }
 
 # ── Lifecycle ────────────────────────────────────────────────────────────────
+# Redis must answer before the app is considered up; the app degrades badly if
+# its queue backend is missing and the failure looks like an app bug.
+check_redis() {
+  if docker exec nexus-redis redis-cli ping 2>/dev/null | grep -q PONG; then
+    c_ok "redis responding"
+  else
+    c_bad "redis not responding"; return 1
+  fi
+}
+
 wait_healthy() {
   c_info "Waiting for the app to report healthy"
   for _ in $(seq 1 60); do
@@ -132,6 +142,7 @@ up() {
   c_info "Starting services"
   $COMPOSE up -d
   wait_healthy
+  check_redis || true
   c_ok "NexusEmu is up at https://${DOMAIN}"
 }
 

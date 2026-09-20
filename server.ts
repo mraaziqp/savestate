@@ -4512,7 +4512,8 @@ async function startServer() {
 
   const COMPRESS_MIN_BYTES = 1 * 1024 * 1024 * 1024; // below this, re-encoding isn't worth the time/risk
   const COMPRESS_SCRATCH_DIR = path.join(os.tmpdir(), "nexus-compress-scratch");
-  const VAAPI_DEVICE = "/dev/dri/renderD128";
+  // Shared by the archival compressor below and the live streaming transcoder.
+  const VAAPI_DEVICE = process.env.NEXUS_VAAPI_DEVICE ?? "/dev/dri/renderD128";
 
   async function probeMedia(absPath: string): Promise<{ codec: string | null; duration: number | null }> {
     try {
@@ -10449,6 +10450,249 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch (e: any) {
       log("ERROR", `heal-paths failed: ${e?.message ?? e}`);
       res.status(500).json({ error: e?.message ?? String(e), partial: report });
+    }
+  });
+
+  // ── Cloud Survivor Audit ──────────────────────────────────────────────────
+  // Which of the files lost with the media drive actually survived in Google
+  // Drive? Rather than asking the Drive API once per row — 10k+ calls, certain
+  // to hit rate limits — this indexes the Drive mount once and matches in
+  // memory. Files are matched on basename, then confirmed on size when the
+  // database knows one, so two different rips of the same episode don't get
+  // confused for each other.
+  type CloudIndex = { byName: Map<string, { path: string; size: number }[]>; files: number; builtAt: number };
+  let _cloudIndex: CloudIndex | null = null;
+
+  async function buildCloudIndex(force = false): Promise<CloudIndex> {
+    if (_cloudIndex && !force && Date.now() - _cloudIndex.builtAt < 15 * 60_000) return _cloudIndex;
+    const byName = new Map<string, { path: string; size: number }[]>();
+    let files = 0;
+    const roots = [NEXUS_GDRIVE_ROOT, NEXUS_GDRIVE_LEGACY].filter((r) => existsSync(r));
+
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > 8) return;
+      let entries: any[];
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { await walk(full, depth + 1); continue; }
+        if (!e.isFile()) continue;
+        let size = 0;
+        try { size = (await stat(full)).size; } catch { /* listing is enough */ }
+        const k = e.name.toLowerCase();
+        const arr = byName.get(k);
+        if (arr) arr.push({ path: full, size }); else byName.set(k, [{ path: full, size }]);
+        files++;
+      }
+    };
+    for (const r of roots) await walk(r, 0);
+    _cloudIndex = { byName, files, builtAt: Date.now() };
+    log("INFO", `Cloud index built: ${files} file(s) across ${roots.length} root(s)`, "recovery");
+    return _cloudIndex;
+  }
+
+  /** Look a database path up in the cloud index. Size is confirmed when known. */
+  function findInCloud(idx: CloudIndex, dbPath: string, knownSize = 0) {
+    const base = path.basename(String(dbPath).replace(/\\/g, "/")).toLowerCase();
+    const hits = idx.byName.get(base);
+    if (!hits || hits.length === 0) return null;
+    if (knownSize > 0) {
+      const exact = hits.find((h) => h.size === knownSize);
+      if (exact) return exact;
+      // A name match with a different size is a different encode of the same
+      // title. Report it, but do not silently repoint the row at it.
+      return { ...hits[0], sizeMismatch: true } as any;
+    }
+    return hits[0];
+  }
+
+  app.post("/api/recovery/reconcile-cloud", async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+
+    const apply = req.body?.apply === true;
+    const started = Date.now();
+
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS recovery_audit (
+          id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          source      TEXT NOT NULL,          -- table.column the row came from
+          row_ref     TEXT NOT NULL,          -- primary key / ctid of that row
+          title       TEXT DEFAULT '',
+          old_path    TEXT NOT NULL,
+          cloud_path  TEXT,
+          status      TEXT NOT NULL,          -- recovered | missing_media | size_mismatch | ok
+          size_bytes  BIGINT DEFAULT 0,
+          checked_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_recovery_audit_status ON recovery_audit(status);
+      `);
+      if (apply) await pool.query("TRUNCATE recovery_audit");
+
+      const idx = await buildCloudIndex(true);
+      const report: any = {
+        mode: apply ? "apply" : "dry-run",
+        cloudFilesIndexed: idx.files,
+        sources: {} as Record<string, any>,
+      };
+
+      const cfg = await getVaultConfig();
+      const romRoot = String(cfg?.root_path ?? "");
+
+      // (source label, rows[{ref,title,p,size}])
+      const batches: { label: string; rows: any[] }[] = [];
+
+      const q = async (label: string, sql: string) => {
+        try { batches.push({ label, rows: (await pool.query(sql)).rows }); }
+        catch (e: any) { report.sources[label] = { error: e?.message ?? String(e) }; }
+      };
+      await q("music_tracks.abs_path",
+        `SELECT id AS ref, title, abs_path AS p, file_size AS size FROM music_tracks
+          WHERE abs_path IS NOT NULL AND abs_path <> ''`);
+      await q("games.relative_path",
+        `SELECT id AS ref, title, relative_path AS p, 0 AS size FROM games
+          WHERE relative_path IS NOT NULL AND relative_path <> ''`);
+      await q("media_watch_progress.rel_path",
+        `SELECT ctid::text AS ref, '' AS title, rel_path AS p, 0 AS size FROM media_watch_progress
+          WHERE rel_path IS NOT NULL AND rel_path <> ''`);
+
+      const writes: any[][] = [];
+      for (const b of batches) {
+        const out = { scanned: 0, ok: 0, recovered: 0, missing: 0, sizeMismatch: 0, samples: [] as any[] };
+        for (const r of b.rows) {
+          out.scanned++;
+          const raw = String(r.p);
+          // ROM rows are relative to the vault root; the others are absolute.
+          const abs = raw.startsWith("/") || /^[a-zA-Z]:/.test(raw)
+            ? raw
+            : path.resolve(romRoot, raw.replace(/^\.\//, ""));
+
+          let status: string, cloudPath: string | null = null;
+          if (existsSync(abs)) {
+            // Already resolvable. If it resolves INTO the Drive mount it is
+            // already cloud-backed; if it resolves locally that is fine too.
+            status = "ok"; out.ok++;
+          } else {
+            const hit: any = findInCloud(idx, abs, Number(r.size) || 0);
+            if (hit && hit.sizeMismatch) { status = "size_mismatch"; cloudPath = hit.path; out.sizeMismatch++; }
+            else if (hit)               { status = "recovered";     cloudPath = hit.path; out.recovered++; }
+            else                        { status = "missing_media"; out.missing++; }
+          }
+          if (out.samples.length < 5 && status !== "ok") {
+            out.samples.push({ title: r.title || path.basename(abs), from: abs, cloud: cloudPath, status });
+          }
+          if (apply && status !== "ok") {
+            writes.push([b.label, String(r.ref), String(r.title ?? ""), abs, cloudPath, status, Number(r.size) || 0]);
+          }
+        }
+        report.sources[b.label] = out;
+      }
+
+      if (apply && writes.length) {
+        // Chunked multi-row inserts: one round trip per 500 rows instead of
+        // 10k+ individual statements against a remote Neon instance.
+        for (let i = 0; i < writes.length; i += 500) {
+          const chunk = writes.slice(i, i + 500);
+          const vals: any[] = [];
+          const ph = chunk.map((w, j) => {
+            vals.push(...w);
+            const b = j * 7;
+            return `($${b+1},$${b+2},$${b+3},$${b+4},$${b+5},$${b+6},$${b+7})`;
+          }).join(",");
+          await pool.query(
+            `INSERT INTO recovery_audit (source,row_ref,title,old_path,cloud_path,status,size_bytes)
+             VALUES ${ph}`, vals);
+        }
+
+        // Repoint the rows we can actually prove, and flag the ones we cannot.
+        const rec = writes.filter((w) => w[5] === "recovered");
+        for (const w of rec) {
+          if (w[0] === "music_tracks.abs_path") {
+            await pool.query("UPDATE music_tracks SET abs_path=$1 WHERE id=$2", [w[4], w[1]]).catch(() => {});
+          } else if (w[0] === "media_watch_progress.rel_path") {
+            await pool.query("UPDATE media_watch_progress SET rel_path=$1 WHERE ctid=$2", [w[4], w[1]]).catch(() => {});
+          }
+        }
+        const missingGameIds = writes.filter((w) => w[0] === "games.relative_path" && w[5] === "missing_media").map((w) => w[1]);
+        for (let i = 0; i < missingGameIds.length; i += 500) {
+          await pool.query(
+            "UPDATE games SET sync_status='missing_media' WHERE id = ANY($1::text[])",
+            [missingGameIds.slice(i, i + 500)],
+          ).catch(() => {});
+        }
+        report.rowsRepointed = rec.length;
+        report.gamesFlaggedMissing = missingGameIds.length;
+      }
+
+      report.elapsedMs = Date.now() - started;
+      report.note = apply
+        ? "Audit stored in recovery_audit; recovered rows repointed at Drive."
+        : 'Nothing written. POST again with {"apply":true} to commit.';
+      res.json(report);
+    } catch (e: any) {
+      log("ERROR", `reconcile-cloud failed: ${e?.message ?? e}`, "recovery");
+      res.status(500).json({ error: e?.message ?? String(e) });
+    }
+  });
+
+  // Stored audit, for the Recovery Report screen.
+  app.get("/api/recovery/report", async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const status = String(req.query.status ?? "").trim();
+    const limit = Math.min(1000, Math.max(1, parseInt(String(req.query.limit ?? "200"), 10) || 200));
+    try {
+      const totals = await pool.query(
+        "SELECT status, count(*)::int n, COALESCE(sum(size_bytes),0)::bigint bytes FROM recovery_audit GROUP BY status");
+      const rows = await pool.query(
+        status
+          ? `SELECT source,title,old_path,cloud_path,status,size_bytes,checked_at FROM recovery_audit
+              WHERE status=$1 ORDER BY title LIMIT ${limit}`
+          : `SELECT source,title,old_path,cloud_path,status,size_bytes,checked_at FROM recovery_audit
+              ORDER BY status, title LIMIT ${limit}`,
+        status ? [status] : []);
+      res.json({ totals: totals.rows, rows: rows.rows });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? String(e), hint: "Run POST /api/recovery/reconcile-cloud first" });
+    }
+  });
+
+  // ── Standalone pages (no build step) ──────────────────────────────────────
+  // The Vite sources were lost with the media drive, so these are plain HTML
+  // served straight from public/. They must be registered before the SPA
+  // catch-all further down, which would otherwise answer with index.html.
+  const PUBLIC_PAGES = path.join(process.cwd(), "public");
+
+  app.get("/player", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(PUBLIC_PAGES, "player.html"));
+  });
+  app.get("/recovery", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(PUBLIC_PAGES, "recovery.html"));
+  });
+
+  // Stable alias for hls.js. The library is only present as a content-hashed
+  // chunk inside the compiled bundle (it is not in node_modules on this host),
+  // and the standalone player cannot hardcode a hash that a future build would
+  // change, so the filename is resolved at request time.
+  let _hlsChunk: string | null = null;
+  app.get("/vendor/hls.js", (_req, res) => {
+    try {
+      if (!_hlsChunk) {
+        const dir = path.join(process.cwd(), "dist", "assets");
+        const hit = readdirSync(dir).find((f) => /^hls-.*\.js$/.test(f));
+        if (!hit) return res.status(404).type("text/plain").send("hls.js chunk not found");
+        _hlsChunk = path.join(dir, hit);
+      }
+      res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+      res.sendFile(_hlsChunk);
+    } catch (e: any) {
+      res.status(500).type("text/plain").send(String(e?.message ?? e));
     }
   });
 
@@ -17707,76 +17951,31 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const videoFmt = await probeVideoFormat(target);
     const isH264_8bit = (videoFmt.codec === "h264" || videoFmt.codec === "avc1") && !videoFmt.is10Bit;
 
-    // Determine target width & quality parameters without upscaling
-    let targetWidth = videoFmt.width > 0 ? videoFmt.width : 1920;
-    let crf = "23";
-    let maxrate = "4M";
-
-    if (quality === "2160") {
-      targetWidth = Math.min(3840, videoFmt.width > 0 ? videoFmt.width : 3840);
-      crf = "21";
-      maxrate = "12M";
-    } else if (quality === "1080") {
-      targetWidth = Math.min(1920, videoFmt.width > 0 ? videoFmt.width : 1920);
-      crf = "23";
-      maxrate = "5M";
-    } else if (quality === "720") {
-      targetWidth = Math.min(1280, videoFmt.width > 0 ? videoFmt.width : 1280);
-      crf = "24";
-      maxrate = "3M";
-    } else if (quality === "480") {
-      targetWidth = Math.min(854, videoFmt.width > 0 ? videoFmt.width : 854);
-      crf = "26";
-      maxrate = "1.5M";
-    } else if (quality === "360") {
-      targetWidth = Math.min(640, videoFmt.width > 0 ? videoFmt.width : 640);
-      crf = "28";
-      maxrate = "800k";
-    } else {
-      // "auto" quality
-      if (videoFmt.width > 0) {
-        targetWidth = Math.min(1920, videoFmt.width);
-        if (targetWidth <= 720) {
-          maxrate = "2M";
-        } else if (targetWidth <= 1280) {
-          maxrate = "3.5M";
-        } else {
-          maxrate = "5M";
-        }
-      }
-    }
+    // Quality tiers live in qualityLadder() so the fMP4 and HLS paths cannot
+    // drift apart; audio bitrate comes from the same table.
+    const _lad = qualityLadder(quality, videoFmt.width);
+    const targetWidth = _lad.width;
 
     const needsVideoTranscode = !isH264_8bit || quality !== "auto";
 
+    const useHw = needsVideoTranscode ? await hwEncodeAvailable() : false;
+    const encA = videoEncodeArgs({
+      hw: useHw, quality, srcWidth: videoFmt.width, srcHeight: videoFmt.height,
+    });
+
     const ffmpegArgs = [
       "-hide_banner", "-loglevel", "error",
+      ...(needsVideoTranscode ? encA.pre : []),
       ...(startSec > 0 ? ["-ss", String(startSec)] : []),
       "-i", target,
       "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
     ];
 
     if (needsVideoTranscode) {
-      const bufsizeVal = `${Math.round((parseFloat(maxrate) || 4) * 2)}M`;
-      // "superfast" rather than "ultrafast". Measured on this machine against a
-      // 1080p x265 source, same CRF 23 and the same 3.5M cap, 20s of video:
-      //     ultrafast  9,549,034 bytes   9.74s  (2.05x realtime)
-      //     superfast  8,827,589 bytes  12.92s  (1.55x realtime)
-      //     veryfast   8,026,833 bytes  14.58s  (1.37x realtime)
-      // Uncapped — i.e. what the picture actually looks like at a given CRF —
-      // the gap is far wider: 14.1MB / 8.8MB / 6.6MB for identical quality.
-      // ultrafast throws away roughly half the compression efficiency, which
-      // over a tunnel is the difference between a clean picture and a smeared
-      // one. superfast keeps a comfortable margin above realtime (1.55x) so a
-      // stream still cannot fall behind playback; veryfast was rejected because
-      // 1.37x leaves too little headroom once several people are watching.
-      ffmpegArgs.push(
-        "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-        "-threads", "0",
-        "-g", "50", "-keyint_min", "25",
-        "-vf", `scale='min(iw,${targetWidth})':-2`, "-pix_fmt", "yuv420p",
-        "-crf", crf, "-maxrate", maxrate, "-bufsize", bufsizeVal
-      );
-    } else {
+      ffmpegArgs.push(...encA.post);
+    }
+    if (!needsVideoTranscode) {
+      // Already H.264 8-bit: remuxing costs nothing, so never re-encode it.
       ffmpegArgs.push("-c:v", "copy");
     }
 
@@ -17788,7 +17987,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ? `frag_keyframe+empty_moov+default_base_moof`
       : `frag_keyframe+empty_moov`;
 
-    const audioBitrate = (quality === '2160' || quality === '1080' || quality === '720') ? '192k' : '160k';
+    const audioBitrate = _lad.abr;
 
     // Most of this library is already AAC, and re-encoding AAC to AAC costs CPU
     // on every single stream while quietly losing a generation of quality for
@@ -18042,6 +18241,120 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // seek is just a request for a different segment. Nothing restarts, and
   // position is exact because every segment carries its real timestamp
   // (-output_ts_offset).
+  // ── Hardware video transcoding (VAAPI) ──────────────────────────────────
+  //
+  // Why this exists: this library is ~76% HEVC 10-bit in Matroska with AC3/E-AC3
+  // audio, none of which a browser can play. Every one of those files has to be
+  // transcoded live. Doing that in software (libx264 superfast) measured 3.2x
+  // realtime at 323% CPU — 3.2 of 8 cores for ONE viewer. The HLS path builds a
+  // segment and prefetches two more, so a single person watching could ask for
+  // three concurrent encodes and saturate the machine. That saturation, not the
+  // network, is what produced the endless spinner and the slow, erratic seeks.
+  //
+  // Measured on this host (Iris Xe / Tiger Lake), 60s of 1080p HEVC 10-bit:
+  //     libx264 superfast   18.81s wall   323% CPU   (3.2x realtime)
+  //     VAAPI hw decode+enc  6.78s wall    63% CPU   (8.9x realtime)
+  // Same work at a fifth of the CPU, which turns ~2 concurrent streams into ~10.
+  //
+  // The driver here (Intel iHD, low-power encode entrypoint) supports CQP rate
+  // control only — VBR and CBR both fail at encoder init, so quality tiers map
+  // to qp values rather than bitrates.
+  let _hwEncodeAvailable: boolean | null = null;
+
+  /** Probe once, at first use: does a real VAAPI H.264 encode actually run? */
+  async function hwEncodeAvailable(): Promise<boolean> {
+    if (_hwEncodeAvailable !== null) return _hwEncodeAvailable;
+    if (process.env.NEXUS_DISABLE_HW_TRANSCODE === "1") {
+      _hwEncodeAvailable = false;
+      log("INFO", "Hardware transcoding disabled by NEXUS_DISABLE_HW_TRANSCODE", "media");
+      return false;
+    }
+    if (!existsSync(VAAPI_DEVICE)) {
+      _hwEncodeAvailable = false;
+      log("INFO", `No VAAPI render node at ${VAAPI_DEVICE} — using software transcoding`, "media");
+      return false;
+    }
+    // A device node can exist and still be unusable (no permission, no driver,
+    // a container without the group). Only a real encode proves it.
+    _hwEncodeAvailable = await new Promise<boolean>((resolve) => {
+      const probe = spawn(FFMPEG_BIN, [
+        "-hide_banner", "-loglevel", "error",
+        "-vaapi_device", VAAPI_DEVICE,
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1",
+        "-vf", "format=nv12,hwupload",
+        "-c:v", "h264_vaapi", "-f", "null", "-",
+      ], { stdio: ["ignore", "ignore", "ignore"] });
+      const timer = setTimeout(() => { try { probe.kill("SIGKILL"); } catch {} resolve(false); }, 20_000);
+      probe.on("error", () => { clearTimeout(timer); resolve(false); });
+      probe.on("close", (code) => { clearTimeout(timer); resolve(code === 0); });
+    });
+    log("INFO",
+      _hwEncodeAvailable
+        ? `Hardware transcoding active (VAAPI @ ${VAAPI_DEVICE})`
+        : "VAAPI present but unusable — falling back to software transcoding",
+      "media");
+    return _hwEncodeAvailable;
+  }
+
+  /** Quality tier -> (width cap, software CRF, hardware QP, audio bitrate). */
+  function qualityLadder(quality: string, srcWidth: number) {
+    const w = srcWidth > 0 ? srcWidth : 1920;
+    switch (quality) {
+      case "2160": return { width: Math.min(3840, w), crf: "21", qp: "22", abr: "192k", maxrate: "12M" };
+      case "1080": return { width: Math.min(1920, w), crf: "23", qp: "22", abr: "192k", maxrate: "5M"  };
+      case "720":  return { width: Math.min(1280, w), crf: "24", qp: "24", abr: "192k", maxrate: "3M"  };
+      case "480":  return { width: Math.min(854,  w), crf: "26", qp: "26", abr: "160k", maxrate: "1.5M"};
+      case "360":  return { width: Math.min(640,  w), crf: "28", qp: "28", abr: "160k", maxrate: "800k"};
+      default:     return { width: Math.min(1920, w), crf: "23", qp: "23", abr: "160k", maxrate: w <= 720 ? "2M" : w <= 1280 ? "3.5M" : "5M" };
+    }
+  }
+
+  /**
+   * Video encode arguments for one transcode.
+   *
+   * Returns the pre-input args separately because VAAPI's hwaccel flags MUST
+   * precede -i, while the codec and filter args follow it.
+   *
+   * scale_vaapi cannot take -2 for "keep aspect", so the target height is
+   * computed here and rounded to an even number (H.264 requires even dims).
+   */
+  function videoEncodeArgs(opts: {
+    hw: boolean; quality: string; srcWidth: number; srcHeight: number; keyframes?: boolean;
+  }): { pre: string[]; post: string[] } {
+    const lad = qualityLadder(opts.quality, opts.srcWidth);
+    if (!opts.hw) {
+      return {
+        pre: [],
+        post: [
+          "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
+          "-threads", "0",
+          ...(opts.keyframes ? ["-force_key_frames", "expr:gte(t,0)"] : ["-g", "50", "-keyint_min", "25"]),
+          "-vf", `scale='min(iw,${lad.width})':-2`, "-pix_fmt", "yuv420p",
+          "-crf", lad.crf, "-maxrate", lad.maxrate, "-bufsize", `${Math.round((parseFloat(lad.maxrate) || 4) * 2)}M`,
+        ],
+      };
+    }
+    const sw = opts.srcWidth > 0 ? opts.srcWidth : 1920;
+    const sh = opts.srcHeight > 0 ? opts.srcHeight : 1080;
+    const outW = Math.min(lad.width, sw);
+    const outH = Math.max(2, Math.round((sh * outW) / sw / 2) * 2);
+    return {
+      // Full hardware pipeline: the HEVC frame is decoded on the GPU and stays
+      // in GPU memory through scaling and encoding — it never crosses back to
+      // the CPU, which is where the 5x saving comes from.
+      pre: [
+        "-hwaccel", "vaapi",
+        "-hwaccel_device", VAAPI_DEVICE,
+        "-hwaccel_output_format", "vaapi",
+      ],
+      post: [
+        "-vf", `scale_vaapi=w=${outW}:h=${outH}:format=nv12`,
+        "-c:v", "h264_vaapi", "-qp", lad.qp,
+        ...(opts.keyframes ? ["-force_key_frames", "expr:gte(t,0)"] : ["-g", "50"]),
+      ],
+    };
+  }
+
   const HLS_SEGMENT_SECONDS = 6;
   const HLS_CACHE_DIR = path.join(UPLOAD_TEMP_DIR, "..", "hls-cache");
   // One ffmpeg per segment is cheap, but a player that seeks wildly can ask for
@@ -18113,6 +18426,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const audioTrack = Math.max(0, parseInt(String(req.query.audio_track ?? "0"), 10) || 0);
     const key = hlsKey(target, quality, audioTrack, n);
     const cachePath = path.join(HLS_CACHE_DIR, `${key}.ts`);
+    // Used to stop prefetching past the last segment of the file.
+    const _segDur = (await probeVideoFormat(target)).duration
+      || (_mediaDurationCache.get(target)?.duration ?? 0);
+    const count = _segDur > 0 ? Math.ceil(_segDur / HLS_SEGMENT_SECONDS) : Number.MAX_SAFE_INTEGER;
 
     // Seeking backwards, rewatching, or two people on the same episode should
     // not re-encode work already done.
@@ -18144,17 +18461,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           return await readFile(segCache);
         } catch { /* build it */ }
         const segStart = segN * HLS_SEGMENT_SECONDS;
+        const encB = videoEncodeArgs({
+          hw: await hwEncodeAvailable(), quality,
+          srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
+        });
         const args = [
           "-hide_banner", "-loglevel", "error",
+          ...encB.pre,
           "-ss", String(segStart),
           "-i", target,
           "-t", String(HLS_SEGMENT_SECONDS),
           "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
-          "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-          "-threads", "0",
-          "-force_key_frames", "expr:gte(t,0)",
-          "-vf", `scale='min(iw,${targetWidth})':-2`, "-pix_fmt", "yuv420p",
-          "-crf", "23",
+          ...encB.post,
           "-af", "aresample=async=1:first_pts=0",
           "-c:a", "aac", "-b:a", "160k",
           "-output_ts_offset", String(segStart),
@@ -18191,12 +18509,20 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // them one after another — measured at 5-8s to resume. Warming them here
     // turns the follow-up requests into cache hits (~40ms) so only the first
     // segment costs real time. Capped at 2 so scrubbing cannot pile up ffmpegs.
+    // Widened from 2 to 5 on 2026-09-20. The old figure was chosen when a
+    // segment cost ~9.5s to build (the VFS cache was off and ffmpeg spent the
+    // whole time waiting on Google Drive), so prefetching more would have piled
+    // up encodes faster than they drained. With hardware encoding and the VFS
+    // cache a segment costs ~0.7s, so five of them is ~3.5s of work to stay
+    // ~30s ahead of the player — the margin that keeps a seek from stalling.
+    const PREFETCH_SEGMENTS = Number(process.env.NEXUS_HLS_PREFETCH ?? 5);
     const prefetchAhead = (from: number) => {
-      for (let i = 1; i <= 2; i++) {
+      for (let i = 1; i <= PREFETCH_SEGMENTS; i++) {
         const nn = from + i;
+        if (nn >= count) break;             // past the end of the film
         const kk = hlsKey(target, quality, audioTrack, nn);
         if (hlsInFlight.has(kk)) continue;
-        if (hlsInFlight.size >= 4) break;   // server is already busy enough
+        if (hlsInFlight.size >= 8) break;   // server is already busy enough
         void buildSegment(nn).catch(() => { /* speculative — failure is not an error */ });
       }
     };
@@ -18205,7 +18531,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // continuing to watch stays ahead of the player.
     if (servedFromCache) {
       res.setHeader("Content-Type", "video/mp2t");
-      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
       res.sendFile(cachePath);
       prefetchAhead(n);
       return;
@@ -18214,23 +18540,24 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try {
       let pending = hlsInFlight.get(key);
       if (!pending) {
+        const encC = videoEncodeArgs({
+          hw: await hwEncodeAvailable(), quality,
+          srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
+        });
         pending = (async () => {
           const args = [
             "-hide_banner", "-loglevel", "error",
             // -ss BEFORE -i is the fast seek: ffmpeg jumps in the container
             // rather than decoding from zero, which is what makes building an
             // arbitrary segment cheap no matter how far into the film it is.
+            ...encC.pre,
             "-ss", String(startSec),
             "-i", target,
             "-t", String(HLS_SEGMENT_SECONDS),
             "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
-            "-c:v", "libx264", "-preset", "superfast", "-tune", "zerolatency",
-            "-threads", "0",
             // Every segment must begin on a keyframe or players cannot switch
-            // into it cleanly mid-stream.
-            "-force_key_frames", "expr:gte(t,0)",
-            "-vf", `scale='min(iw,${targetWidth})':-2`, "-pix_fmt", "yuv420p",
-            "-crf", "23",
+            // into it cleanly mid-stream (keyframes: true, above).
+            ...encC.post,
             "-af", "aresample=async=1:first_pts=0",
             "-c:a", "aac", "-b:a", "160k",
             // Carries the segment's true position, so the player's clock is the
@@ -18265,7 +18592,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
       const buf = await pending;
       res.setHeader("Content-Type", "video/mp2t");
-      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
       res.send(buf);
       prefetchAhead(n);
     } catch (e: any) {

@@ -14,6 +14,9 @@ services:
     # Never published directly — nginx terminates TLS and proxies in.
     expose:
       - "3000"
+    depends_on:
+      redis:
+        condition: service_healthy
     env_file:
       - .env.production
     environment:
@@ -22,6 +25,17 @@ services:
       NEXUS_CLOUD_FIRST: "1"
       NEXUS_STREAM_ONLY: "1"
       NEXUS_DISABLE_LOCAL_SCAN: "1"
+      REDIS_URL: redis://redis:6379
+      # No /dev/dri in a stock EC2 instance, so the container must transcode in
+      # software unless you run a GPU instance and pass the render node through
+      # (see the note under the `devices:` key below).
+      NEXUS_DISABLE_HW_TRANSCODE: "${NEXUS_DISABLE_HW_TRANSCODE:-1}"
+    # Uncomment on a GPU/VT-capable instance to get the same 5x CPU saving the
+    # laptop gets from VAAPI. Requires /dev/dri to exist on the host.
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - video
     # Stateless: the only writable paths are in-memory and vanish on restart.
     read_only: true
     tmpfs:
@@ -59,8 +73,39 @@ services:
       options: { max-size: "10m", max-file: "3" }
     networks: [nexusnet]
 
+  # Redis backs the browser-gaming concurrency queue and the AwehChat
+  # connection pools. It is a cache and a coordination point, never a system of
+  # record — everything durable lives in Neon or Google Drive — so an eviction
+  # policy is correct here and losing the volume costs nothing but warm state.
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly no
+      --save ""
+    # Never published: only the app container talks to it, and an exposed Redis
+    # with no auth is one of the fastest ways to lose a box.
+    expose:
+      - "6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis-data:/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    networks: [nexusnet]
+
 volumes:
   certbot-webroot:
+  redis-data:
 
 networks:
   nexusnet:
