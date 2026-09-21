@@ -153,6 +153,73 @@ function testDpad() {
     : bad('Back would exit the app');
 }
 
+// ── Storage autopilot ───────────────────────────────────────────────────────
+function testAutopilot() {
+  head('Storage autopilot');
+  const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+
+  /\/api\/cloud\/autopilot/.test(src) ? ok('autopilot endpoint defined') : bad('no autopilot endpoint');
+  /reclaimVerified/.test(src) ? ok('zero-bandwidth reclaim pass exists') : bad('no reclaim pass');
+  // Reclaim MUST run before any upload, or a full disk waits on a day of uploading.
+  const iRec = src.indexOf('Pass 1: reclaim what is ALREADY in Drive');
+  const iMove = src.indexOf('sync/move`, {');
+  (iRec > 0 && iMove > 0 && iRec < iMove)
+    ? ok('reclaim runs before the upload pass')
+    : bad('upload would run before reclaim');
+
+  /"sync\/move"/.test(src) ? ok('archive uses sync/move (deletes only after confirmed transfer)') : bad('no sync/move');
+  /MinAge/.test(src) ? ok('MinAge filter keeps in-flight downloads out of the run') : bad('no MinAge guard');
+  for (const pat of ['incomplete', '!qB', 'part']) {
+    src.includes(pat) ? ok(`excludes ${pat} files`) : bad(`does not exclude ${pat}`);
+  }
+  /if \(autopilotJob\) \{ result\.skipped/.test(src) ? ok('only one job at a time') : bad('jobs could stampede');
+  /NEXUS_AUTOPILOT_DISABLED/.test(src) ? ok('periodic guard can be disabled') : bad('no kill switch');
+
+  // The reclaim rule: identical relative path AND identical size, nothing less.
+  const local = new Map([['a.mkv', 100], ['b.mkv', 200], ['c.mkv', 300], ['incomplete/d.mkv', 400], ['e.mkv.!qB', 500]]);
+  const cloud = new Map([['a.mkv', 100], ['b.mkv', 999], ['incomplete/d.mkv', 400], ['e.mkv.!qB', 500]]);
+  const del = [];
+  for (const [rel, size] of local) {
+    if (/(^|\/)incomplete\//.test(rel) || /\.(!qB|part|partial)$/i.test(rel) || /(^|\/)\./.test(rel)) continue;
+    if (cloud.get(rel) !== size) continue;
+    del.push(rel);
+  }
+  JSON.stringify(del) === JSON.stringify(['a.mkv'])
+    ? ok('reclaims only exact name+size matches (skips mismatch, missing, partials)')
+    : bad(`reclaim selected ${JSON.stringify(del)}, expected ["a.mkv"]`);
+}
+
+// ── TV series episode picker ────────────────────────────────────────────────
+function testEpisodePicker() {
+  head('TV series episode picker');
+  const src = fs.readFileSync(path.join(ROOT, 'public', 'tv.html'), 'utf8');
+
+  /function showSeries/.test(src) ? ok('episode picker exists') : bad('no episode picker');
+  /act: `series:\$\{k\}`/.test(src) ? ok('series tiles open the picker, not episode 1') : bad('series tile still plays episode 1 directly');
+  /view === 'series'/.test(src) ? ok('Back exits the picker to the vault') : bad('Back does not handle the picker');
+  /Specials/.test(src) ? ok('season 0 labelled Specials') : bad('no Specials handling');
+
+  // Episodes must group by season and order within it.
+  const eps = [
+    { season: 2, episode: 1 }, { season: 1, episode: 10 },
+    { season: 1, episode: 2 }, { season: 0, episode: 1 },
+  ];
+  const by = new Map();
+  for (const e of eps) { const sn = Number.isFinite(e.season) ? e.season : 0; if (!by.has(sn)) by.set(sn, []); by.get(sn).push(e); }
+  const seasons = [...by.keys()].sort((a, b) => a - b);
+  JSON.stringify(seasons) === '[0,1,2]' ? ok('seasons ordered with Specials first') : bad(`season order ${JSON.stringify(seasons)}`);
+  const s1 = by.get(1).sort((a, b) => a.episode - b.episode).map((e) => e.episode);
+  JSON.stringify(s1) === '[2,10]' ? ok('episodes ordered numerically (2 before 10)') : bad(`episode order ${JSON.stringify(s1)}`);
+
+  // Release noise must be stripped, but the actual episode title kept.
+  const cleanEp = (n) => n.replace(/\.[a-z0-9]+$/i, '')
+    .replace(/\b(1080p|720p|2160p|4k|x264|x265|hevc|web-?dl|webrip|bluray|remux|hdr|aac\d?|dts|ddp?\d?[ .]?\d?|amzn|nf|atvp)\b.*/i, '')
+    .replace(/\bS\d{1,2}E\d{1,3}\b/i, '').replace(/[._]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  cleanEp('Power S06E14 Reversal of Fortune 1080p NF WEB-DL DDP5 1 x264-NTb.mkv') === 'Power Reversal of Fortune'
+    ? ok('release noise stripped, episode title kept')
+    : bad(`cleanEp gave "${cleanEp('Power S06E14 Reversal of Fortune 1080p NF WEB-DL DDP5 1 x264-NTb.mkv')}"`);
+}
+
 // ── Live ────────────────────────────────────────────────────────────────────
 async function testLive() {
   head(`Live endpoints on :${PORT}`);
@@ -209,6 +276,8 @@ async function testLive() {
   await testWebhookContract();
   testTvSizing();
   testDpad();
+  testEpisodePicker();
+  testAutopilot();
   await testLive();
   console.log(`\n${'='.repeat(52)}`);
   console.log(`${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}`);

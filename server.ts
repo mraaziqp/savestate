@@ -9024,6 +9024,10 @@ async function startServer() {
         log("INFO",
           `Arr ingest (${why}): ${batch.length} new file(s), library now ${scanned.length} item(s)`,
           "arr");
+        // An import is exactly when local disk has just grown, so this is the
+        // right moment to check pressure. runAutopilot() no-ops when there is
+        // still headroom, so this is cheap on a healthy host.
+        await runAutopilot().catch(() => {});
       } catch (e: any) {
         log("ERROR", `Arr ingest scan failed: ${e?.message ?? e}`, "arr");
       }
@@ -10423,6 +10427,227 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return res.status(502).json({ error: "rclone daemon unreachable — is nexus-rclone-rcd running?" });
     }
   });
+
+  // ── Storage autopilot ─────────────────────────────────────────────────────
+  // Cloud-first only works if local disk actually drains. Downloads land on the
+  // NVMe, and with the media drive gone there is no second disk to spill onto —
+  // when / fills, Postgres, qBittorrent and the server all fail together. This
+  // archives finished downloads to Drive and frees the local copy.
+  //
+  // rclone's sync/move is the right primitive: it uploads what is missing,
+  // skips what already matches, and only unlinks a source file after that
+  // file's transfer is confirmed. A crash mid-run leaves files in one place or
+  // the other, never neither.
+  const AUTOPILOT_SOURCE = process.env.NEXUS_AUTOPILOT_SOURCE ?? path.join(NEXUS_HOME, "nexus-downloads");
+  const AUTOPILOT_REMOTE = process.env.NEXUS_AUTOPILOT_REMOTE ?? "gdrive:NexusArchive/downloads";
+  // Act while there is still room to work in, not once the disk is already full.
+  const AUTOPILOT_MIN_FREE_GB = Number(process.env.NEXUS_AUTOPILOT_MIN_FREE_GB ?? 80);
+  const AUTOPILOT_TARGET_FREE_GB = Number(process.env.NEXUS_AUTOPILOT_TARGET_FREE_GB ?? 150);
+
+  let autopilotJob: { id: number; startedAt: number; source: string; remote: string } | null = null;
+  let autopilotLast: any = null;
+
+  /**
+   * Delete local files that are byte-for-byte already present in the cloud.
+   *
+   * Same safety rule as /api/cloud/reclaim: a file is only unlinked when the
+   * cloud listing has an entry at the same relative path AND the same size.
+   * Anything that does not match exactly is left alone — a partial upload is
+   * never treated as done.
+   */
+  async function reclaimVerified(localDir: string, remoteSpec: string) {
+    if (!isReclaimable(localDir)) throw new Error(`Path not reclaimable: ${localDir}`);
+    const colon = remoteSpec.indexOf(":");
+    const [local, cloud] = await Promise.all([
+      listFiles(localDir, ""),
+      listFiles(remoteSpec.slice(0, colon + 1), remoteSpec.slice(colon + 1)),
+    ]);
+
+    let freed = 0, deleted = 0, skipped = 0;
+    for (const [rel, size] of local) {
+      // Never touch anything still being written.
+      if (/(^|\/)incomplete\//.test(rel) || /\.(!qB|part|partial)$/i.test(rel) || /(^|\/)\./.test(rel)) { skipped++; continue; }
+      if (cloud.get(rel) !== size) { skipped++; continue; }
+      const abs = path.resolve(localDir, rel);
+      if (!abs.startsWith(path.resolve(localDir) + path.sep)) { skipped++; continue; }
+      try { await unlink(abs); deleted++; freed += size; } catch { skipped++; }
+    }
+    return { deleted, skipped, freedBytes: freed, freedGb: Math.round(freed / 1e9) };
+  }
+
+  async function diskFreeGb(p: string): Promise<number> {
+    try { const st = await statfs(p); return (st.bavail * st.bsize) / 1e9; } catch { return -1; }
+  }
+
+  /**
+   * Archive finished downloads to Drive.
+   *
+   * MinAge keeps qBittorrent's in-flight writes out of the run: a file still
+   * being written has a recent mtime, and moving it would corrupt the torrent.
+   * The incomplete/ directory and partial-file suffixes are excluded outright.
+   */
+  async function runAutopilot(opts: { force?: boolean; dryRun?: boolean } = {}) {
+    const freeGb = await diskFreeGb(NEXUS_HOME);
+    const result: any = { source: AUTOPILOT_SOURCE, remote: AUTOPILOT_REMOTE, freeGb: Math.round(freeGb) };
+
+    if (autopilotJob) { result.skipped = "a run is already in progress"; result.jobId = autopilotJob.id; return result; }
+    if (!opts.force && freeGb > AUTOPILOT_MIN_FREE_GB) {
+      result.skipped = `${Math.round(freeGb)} GB free is above the ${AUTOPILOT_MIN_FREE_GB} GB threshold`;
+      return result;
+    }
+    if (!existsSync(AUTOPILOT_SOURCE)) { result.error = `source missing: ${AUTOPILOT_SOURCE}`; return result; }
+
+    // ── Pass 1: reclaim what is ALREADY in Drive ──────────────────────────
+    // This costs no bandwidth at all — the bytes are already uploaded, the
+    // local copy is simply redundant. On this host that was 130 GB of the
+    // 235 GB in downloads, so doing it before any upload is the difference
+    // between freeing space in seconds and freeing it over a day of uploading.
+    if (!opts.dryRun) {
+      const rec = await reclaimVerified(AUTOPILOT_SOURCE, AUTOPILOT_REMOTE).catch((e) => ({
+        error: String(e?.message ?? e), freedGb: 0, deleted: 0,
+      }));
+      result.reclaimed = rec;
+      const afterGb = await diskFreeGb(NEXUS_HOME);
+      result.freeGbAfterReclaim = Math.round(afterGb);
+      if (afterGb >= AUTOPILOT_TARGET_FREE_GB) {
+        // Target met without moving a single byte over the network.
+        result.done = "target reached by reclaim alone";
+        log("INFO",
+          `Storage autopilot: reclaimed ${(rec as any).freedGb ?? 0} GB already in Drive — ${Math.round(afterGb)} GB free, no upload needed`,
+          "cloud");
+        return result;
+      }
+    }
+
+    const rcAuth = getRcAuth();
+    if (!rcAuth) { result.error = "Transfer daemon not configured (~/.config/rclone/rcd.env missing)"; return result; }
+
+    const params: any = {
+      srcFs: AUTOPILOT_SOURCE,
+      dstFs: AUTOPILOT_REMOTE,
+      _async: true,
+      _filter: {
+        // 30 minutes of quiet is a strong signal qBittorrent has finished.
+        MinAge: process.env.NEXUS_AUTOPILOT_MIN_AGE ?? "30m",
+        ExcludeRule: [
+          "incomplete/**", "**/incomplete/**",
+          "*.!qB", "**/*.!qB",
+          "*.part", "**/*.part",
+          "*.partial", "**/*.partial",
+          ".*", "**/.*",
+        ],
+      },
+    };
+
+    if (opts.dryRun) {
+      // Report what would move without touching anything.
+      const v = await fetch(`${RC_ADDR}/operations/size`, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: rcAuth },
+        body: JSON.stringify({ fs: AUTOPILOT_SOURCE, remote: "", _filter: params._filter }),
+      }).then((r) => r.json()).catch(() => null);
+      result.dryRun = true;
+      result.wouldMove = v ? { files: v.count, bytes: v.bytes, gb: Math.round((v.bytes ?? 0) / 1e9) } : null;
+      return result;
+    }
+
+    try {
+      const r = await fetch(`${RC_ADDR}/sync/move`, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: rcAuth },
+        body: JSON.stringify(params),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || body.jobid === undefined) {
+        result.error = body.error ?? `rclone returned ${r.status}`;
+        return result;
+      }
+      autopilotJob = { id: body.jobid, startedAt: Date.now(), source: AUTOPILOT_SOURCE, remote: AUTOPILOT_REMOTE };
+      result.started = true;
+      result.jobId = body.jobid;
+      log("INFO", `Storage autopilot started (job ${body.jobid}) — ${Math.round(freeGb)} GB free`, "cloud");
+      return result;
+    } catch {
+      result.error = "rclone daemon unreachable — is nexus-rclone-rcd running?";
+      return result;
+    }
+  }
+
+  /** Poll the active job so the UI (and the log) learn when it finishes. */
+  async function pollAutopilot() {
+    if (!autopilotJob) return null;
+    const rcAuth = getRcAuth();
+    if (!rcAuth) return null;
+    try {
+      const st = await fetch(`${RC_ADDR}/job/status`, {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: rcAuth },
+        body: JSON.stringify({ jobid: autopilotJob.id }),
+      }).then((r) => r.json());
+      if (st.finished) {
+        const freeGb = await diskFreeGb(NEXUS_HOME);
+        autopilotLast = {
+          jobId: autopilotJob.id, success: st.success, error: st.error || null,
+          durationSec: Math.round((Date.now() - autopilotJob.startedAt) / 1000),
+          freeGbAfter: Math.round(freeGb), finishedAt: new Date().toISOString(),
+        };
+        log(st.success ? "INFO" : "ERROR",
+          `Storage autopilot ${st.success ? "finished" : "failed"} — ${Math.round(freeGb)} GB free${st.error ? ` (${st.error})` : ""}`,
+          "cloud");
+        autopilotJob = null;
+      }
+      return st;
+    } catch { return null; }
+  }
+
+  app.post("/api/cloud/autopilot", express.json(), async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    // mode:"reclaim" runs ONLY the zero-bandwidth pass and never uploads.
+    if (req.body?.mode === "reclaim") {
+      const before = await diskFreeGb(NEXUS_HOME);
+      const rec = await reclaimVerified(AUTOPILOT_SOURCE, AUTOPILOT_REMOTE)
+        .catch((e) => ({ error: String(e?.message ?? e) }));
+      const after = await diskFreeGb(NEXUS_HOME);
+      return res.json({
+        mode: "reclaim", ...rec,
+        freeGbBefore: Math.round(before), freeGbAfter: Math.round(after),
+      });
+    }
+    res.json(await runAutopilot({ force: req.body?.force === true, dryRun: req.body?.dryRun === true }));
+  });
+
+  app.get("/api/cloud/autopilot", async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const st = await pollAutopilot();
+    const freeGb = await diskFreeGb(NEXUS_HOME);
+    res.json({
+      freeGb: Math.round(freeGb),
+      thresholdGb: AUTOPILOT_MIN_FREE_GB,
+      targetGb: AUTOPILOT_TARGET_FREE_GB,
+      underPressure: freeGb >= 0 && freeGb < AUTOPILOT_MIN_FREE_GB,
+      running: !!autopilotJob,
+      job: autopilotJob ? { ...autopilotJob, status: st } : null,
+      last: autopilotLast,
+      source: AUTOPILOT_SOURCE,
+      remote: AUTOPILOT_REMOTE,
+    });
+  });
+
+  // Periodic guard. Only acts under pressure, and only ever one job at a time,
+  // so this cannot stampede if a run is slow.
+  if (process.env.NEXUS_AUTOPILOT_DISABLED !== "1") {
+    setInterval(() => {
+      void (async () => {
+        await pollAutopilot();
+        if (autopilotJob) return;
+        const freeGb = await diskFreeGb(NEXUS_HOME);
+        if (freeGb >= 0 && freeGb < AUTOPILOT_MIN_FREE_GB) {
+          await runAutopilot().catch(() => {});
+        }
+      })();
+    }, 30 * 60 * 1000).unref?.();
+  }
 
   // ── Cloud overview (single poll for the whole Cloud hub) ─────
   // One endpoint for disk usage + cloud quota + upload job, so the UI makes a

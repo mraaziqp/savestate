@@ -186,8 +186,10 @@ document.addEventListener('mouseover', (e) => {
 // most complained-about TV behaviour.
 function goBack() {
   const cur = el(focusKey);
+  // Inside a series, Back leaves the episode list before it leaves the section.
+  if (view === 'series') { openSeries = null; show('media'); return; }
   if (cur && !cur.classList.contains('navitem')) {
-    setFocus(`nav:${view}`);
+    setFocus(`nav:${view === 'series' ? 'media' : view}`);
     return;
   }
   if (view !== 'media') { show('media'); return; }
@@ -256,7 +258,7 @@ function tiles(list, { wide = false } = {}) {
 
 async function show(v) {
   view = v;
-  $$('.navitem').forEach((n) => n.classList.toggle('active', n.dataset.nav === v));
+  $$('.navitem').forEach((n) => n.classList.toggle('active', n.dataset.nav === (v === 'series' ? 'media' : v)));
   const rows = $('#rows');
   rows.innerHTML = '<div id="empty">Loading…</div>';
 
@@ -280,9 +282,11 @@ async function show(v) {
       const mv = movies.map((m) => ({
         title: clean(m.name), artTitle: clean(m.name), icon:'🎬', act:`play:${m.relPath}`,
       }));
+      // Keep the episode lists around so the picker does not re-fetch.
+      seriesIndex = bySeries;
       const sv = [...bySeries.entries()].map(([k, eps]) => ({
         title: k, sub: `${eps.length} episode${eps.length>1?'s':''}`, icon:'📺',
-        act: `play:${eps.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode))[0].relPath}`,
+        act: `series:${k}`,
       }));
       rows.innerHTML =
         (sv.length ? `<div class="rowtitle">Series</div>${tiles(sv)}` : '') +
@@ -371,6 +375,52 @@ async function show(v) {
   setFocus(first ? first.dataset.fk : `nav:${v}`);
 }
 
+// ── Series episode picker ─────────────────────────────────────────────────
+// A flat grid of 138 episodes is unusable with a remote, so episodes are
+// grouped by season and the season row is what you navigate first.
+let seriesIndex = new Map();
+let openSeries = null;
+
+function showSeries(name) {
+  const eps = seriesIndex.get(name);
+  if (!eps || !eps.length) return;
+  openSeries = name;
+  view = 'series';
+  $('#title').textContent = name;
+
+  const bySeason = new Map();
+  for (const e of eps) {
+    const sn = Number.isFinite(e.season) ? e.season : 0;
+    if (!bySeason.has(sn)) bySeason.set(sn, []);
+    bySeason.get(sn).push(e);
+  }
+  const seasons = [...bySeason.keys()].sort((a, b) => a - b);
+  $('#count').textContent = `${eps.length} episodes · ${seasons.length} season${seasons.length > 1 ? 's' : ''}`;
+
+  let html = '';
+  for (const sn of seasons) {
+    const list = bySeason.get(sn).sort((a, b) => (a.episode ?? 0) - (b.episode ?? 0));
+    html += `<div class="rowtitle">${sn === 0 ? 'Specials' : 'Season ' + sn}</div>` + tiles(
+      list.map((e) => ({
+        title: e.episode != null ? `Episode ${e.episode}` : e.name,
+        sub: cleanEp(e.name),
+        icon: '▶', act: `play:${e.relPath}`,
+      })), { wide: true });
+  }
+  $('#rows').innerHTML = html;
+  $$('#rows .tile').forEach((t, i) => (t.dataset.fk = `t:${i}`));
+  const first = $$('#rows [data-fk]')[0];
+  setFocus(first ? first.dataset.fk : 'nav:media');
+}
+
+/** Strip release noise so an episode row reads as a title, not a filename. */
+function cleanEp(n) {
+  return n.replace(/\.[a-z0-9]+$/i, '')
+    .replace(/\b(1080p|720p|2160p|4k|x264|x265|hevc|web-?dl|webrip|bluray|remux|hdr|aac\d?|dts|ddp?\d?[ .]?\d?|amzn|nf|atvp)\b.*/i, '')
+    .replace(/\bS\d{1,2}E\d{1,3}\b/i, '')
+    .replace(/[._]/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
 // ── Activation ────────────────────────────────────────────────────────────
 document.addEventListener('click', (e) => {
   const nav = e.target.closest('.navitem');
@@ -378,6 +428,7 @@ document.addEventListener('click', (e) => {
   const tile = e.target.closest('.tile');
   if (!tile) return;
   const act = tile.dataset.act || '';
+  if (act.startsWith('series:')) return showSeries(act.slice(7));
   if (act.startsWith('play:'))  location.href = `/player?rel=${encodeURIComponent(act.slice(5))}`;
   else if (act.startsWith('open:')) location.href = act.slice(5);
   else if (act.startsWith('game:')) location.href = `/?game=${encodeURIComponent(act.slice(5))}`;
