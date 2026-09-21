@@ -18949,10 +18949,52 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   // ── Video format & capability probing ────────────────────────────────────
   const _videoFormatCache = new Map<string, { codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number; ts: number }>();
+
+  // ── Persistent probe cache ────────────────────────────────────────────────
+  // probeVideoFormat() runs ffprobe against a file on the Google Drive mount,
+  // which measured ~2.3s. It was cached in memory only, so the first play of
+  // any title after a restart paid that again — and the HLS playlist cannot be
+  // written until it returns, so it sat directly in front of playback.
+  //
+  // Keyed by path + size + mtime: if a file is replaced the key changes and the
+  // stale entry is simply never read.
+  const PROBE_CACHE_FILE = path.join(PERSIST_DIR, "probe-cache.json");
+  let _probeDisk: Record<string, any> = {};
+  let _probeDirty = false;
+
+  (async () => {
+    try { _probeDisk = JSON.parse(await readFile(PROBE_CACHE_FILE, "utf8")); }
+    catch { _probeDisk = {}; }
+    const n = Object.keys(_probeDisk).length;
+    if (n) log("INFO", `Probe cache loaded: ${n} file(s)`, "media");
+  })();
+
+  async function probeCacheKey(target: string): Promise<string | null> {
+    try {
+      const st = await stat(target);
+      return `${target}|${st.size}|${Math.round(st.mtimeMs)}`;
+    } catch { return null; }
+  }
+
+  // Batched: a library scan can touch hundreds of files, and rewriting the
+  // whole map per hit would thrash the disk for no benefit.
+  setInterval(() => {
+    if (!_probeDirty) return;
+    _probeDirty = false;
+    void writeFile(PROBE_CACHE_FILE, JSON.stringify(_probeDisk)).catch(() => {});
+  }, 20_000).unref?.();
   async function probeVideoFormat(target: string) {
     const EMPTY_FMT = { codec: "", pixFmt: "", width: 0, height: 0, is10Bit: false, duration: 0, audioCodec: "", audioChannels: 0 };
     const cached = _videoFormatCache.get(target);
     if (cached && Date.now() - cached.ts < 3_600_000) return cached;
+
+    const ck = await probeCacheKey(target);
+    if (ck && _probeDisk[ck]) {
+      const hit = { ..._probeDisk[ck], ts: Date.now() };
+      _videoFormatCache.set(target, hit);
+      if (hit.duration > 0) _mediaDurationCache.set(target, { duration: hit.duration, ts: Date.now() });
+      return hit;
+    }
     try {
       const { execFile } = await import("child_process");
       const fmt = await new Promise<{ codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number }>((resolve) => {
@@ -18988,6 +19030,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       });
       _videoFormatCache.set(target, { ...fmt, ts: Date.now() });
       if (fmt.duration > 0) _mediaDurationCache.set(target, { duration: fmt.duration, ts: Date.now() });
+      // Only persist a probe that actually produced something usable; caching a
+      // failure would make it permanent.
+      if (ck && fmt.duration > 0) { _probeDisk[ck] = fmt; _probeDirty = true; }
       return fmt;
     } catch {
       return { codec: "", pixFmt: "", width: 0, height: 0, is10Bit: false, duration: 0, audioCodec: "", audioChannels: 0 };
@@ -19364,12 +19409,27 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   function qualityLadder(quality: string, srcWidth: number) {
     const w = srcWidth > 0 ? srcWidth : 1920;
     switch (quality) {
-      case "2160": return { width: Math.min(3840, w), crf: "21", qp: "22", abr: "192k", maxrate: "12M" };
-      case "1080": return { width: Math.min(1920, w), crf: "23", qp: "22", abr: "192k", maxrate: "5M"  };
-      case "720":  return { width: Math.min(1280, w), crf: "24", qp: "24", abr: "192k", maxrate: "3M"  };
-      case "480":  return { width: Math.min(854,  w), crf: "26", qp: "26", abr: "160k", maxrate: "1.5M"};
-      case "360":  return { width: Math.min(640,  w), crf: "28", qp: "28", abr: "160k", maxrate: "800k"};
-      default:     return { width: Math.min(1920, w), crf: "23", qp: "23", abr: "160k", maxrate: w <= 720 ? "2M" : w <= 1280 ? "3.5M" : "5M" };
+      // QP values lowered across the board on 2026-09-21. They were inherited
+      // from the software-encoder era when every extra bit cost CPU the host
+      // did not have. VAAPI encodes at ~9x realtime using 0.6 of a core, so the
+      // constraint now is bandwidth, not compute — and at 1080p the difference
+      // between qp 23 and qp 19 is clearly visible in dark and detailed scenes,
+      // which is exactly where this library lives (x265 10-bit film sources).
+      //
+      // A lower QP means a bigger file. Measured at 1080p: qp 23 ~= 2.7 Mbit/s,
+      // qp 19 ~= 5-6 Mbit/s. Comfortable over LAN and over the tunnel.
+      case "2160": return { width: Math.min(3840, w), crf: "19", qp: "20", abr: "256k", maxrate: "20M" };
+      case "1080": return { width: Math.min(1920, w), crf: "20", qp: "19", abr: "256k", maxrate: "10M" };
+      case "720":  return { width: Math.min(1280, w), crf: "21", qp: "21", abr: "192k", maxrate: "6M"  };
+      case "480":  return { width: Math.min(854,  w), crf: "24", qp: "24", abr: "160k", maxrate: "2.5M"};
+      case "360":  return { width: Math.min(640,  w), crf: "27", qp: "27", abr: "128k", maxrate: "1M"  };
+      // "auto" keeps the source resolution and sits one step below the explicit
+      // 1080p tier. Measured on a dense live-action source, qp 19 produced
+      // 10.4 Mbit/s and qp 23 produced 5.8; qp 21 lands near 7-8, which is a
+      // clear improvement on the old default while leaving headroom for the
+      // Cloudflare tunnel and for more than one viewer. Anyone who wants the
+      // maximum can pick 1080p explicitly in the quality menu.
+      default:     return { width: Math.min(1920, w), crf: "21", qp: "21", abr: "192k", maxrate: w <= 720 ? "3M" : w <= 1280 ? "5M" : "8M" };
     }
   }
 
@@ -19426,8 +19486,113 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // shared rather than duplicated.
   const hlsInFlight = new Map<string, Promise<Buffer>>();
 
+  // ── Fast-start segment map ────────────────────────────────────────────
+  // Uniform 6s segments meant the player could not draw a frame until a whole
+  // 6s segment had been encoded — measured at 2.2s of work before anything
+  // appeared, on top of the playlist call. HLS permits variable EXTINF, so the
+  // first few segments are short: playback starts after ~0.7s of encoding and
+  // the longer segments that follow keep the per-segment overhead low for the
+  // rest of the film.
+  const HLS_FAST_START_COUNT = 3;    // how many short segments at the head
+  const HLS_FAST_START_SECONDS = 2;  // their length
+
+  /** Start time and duration of segment n, honouring the fast-start head. */
+  function segmentBounds(n: number, total: number): { start: number; dur: number } {
+    const headSpan = HLS_FAST_START_COUNT * HLS_FAST_START_SECONDS;
+    const start = n < HLS_FAST_START_COUNT
+      ? n * HLS_FAST_START_SECONDS
+      : headSpan + (n - HLS_FAST_START_COUNT) * HLS_SEGMENT_SECONDS;
+    const nominal = n < HLS_FAST_START_COUNT ? HLS_FAST_START_SECONDS : HLS_SEGMENT_SECONDS;
+    return { start, dur: Math.max(0, Math.min(nominal, total - start)) };
+  }
+
+  /** How many segments a file of this duration produces. */
+  function segmentCount(total: number): number {
+    const headSpan = HLS_FAST_START_COUNT * HLS_FAST_START_SECONDS;
+    if (total <= headSpan) return Math.ceil(total / HLS_FAST_START_SECONDS);
+    return HLS_FAST_START_COUNT + Math.ceil((total - headSpan) / HLS_SEGMENT_SECONDS);
+  }
+
+  // v2: the segment map changed, so previously cached .ts files describe
+  // different time ranges and must not be reused.
   const hlsKey = (target: string, quality: string, audioTrack: number, n: number) =>
-    `${crypto.createHash("sha1").update(`${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
+    `${crypto.createHash("sha1").update(`v2|${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
+
+  // ── Prewarm ───────────────────────────────────────────────────────────────
+  // Even with the probe cached and short head segments, the very first segment
+  // of a cold title costs ~2.7s — almost all of it rclone fetching the opening
+  // chunk from Drive, not encoding (ffmpeg sits at single-digit CPU for it).
+  //
+  // That cost cannot be removed, only moved. Browsing a library means dwelling
+  // on a title for a second or two before committing, so starting the work at
+  // focus time hides the whole thing behind the user's own decision. Fire and
+  // forget: the response says "started", not "done".
+  const prewarmed = new Map<string, number>();
+  app.post("/api/media/prewarm", express.json(), async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    const rel = String(req.body?.rel ?? req.query.rel ?? "").trim();
+    if (!rel) return res.status(400).json({ error: "rel required" });
+    const target = resolveMediaTarget(rel);
+    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+
+    // One prewarm per title per minute, however many times focus lands on it.
+    const last = prewarmed.get(target) ?? 0;
+    if (Date.now() - last < 60_000) return res.json({ ok: true, alreadyWarm: true });
+    prewarmed.set(target, Date.now());
+
+    res.json({ ok: true, started: true });
+
+    // Everything below happens after the response is sent.
+    void (async () => {
+      try {
+        const fmt = await probeVideoFormat(target);          // populates the probe cache
+        const quality = String(req.body?.quality ?? "auto");
+        const audioTrack = Math.max(0, parseInt(String(req.body?.audio_track ?? "0"), 10) || 0);
+        const total = fmt.duration || 0;
+        if (!(total > 0)) return;
+
+        // Just the fast-start head: enough for playback to begin instantly,
+        // not so much that idle browsing encodes the whole library.
+        for (let n = 0; n < HLS_FAST_START_COUNT; n++) {
+          const key = hlsKey(target, quality, audioTrack, n);
+          const cachePath = path.join(HLS_CACHE_DIR, `${key}.ts`);
+          try { await fsAccess(cachePath); continue; } catch { /* build it */ }
+          const sb = segmentBounds(n, total);
+          if (sb.dur <= 0) break;
+          const enc = videoEncodeArgs({
+            hw: await hwEncodeAvailable(), quality,
+            srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
+          });
+          const args = [
+            "-hide_banner", "-loglevel", "error",
+            ...enc.pre,
+            "-ss", String(sb.start), "-i", target, "-t", String(sb.dur),
+            "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
+            ...enc.post,
+            "-af", "aresample=async=1:first_pts=0",
+            "-c:a", "aac", "-b:a", "160k",
+            "-output_ts_offset", String(sb.start),
+            "-muxdelay", "0", "-muxpreload", "0",
+            "-f", "mpegts", "pipe:1",
+          ];
+          const chunks: Buffer[] = [];
+          await new Promise<void>((resolve) => {
+            const ff = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+            ff.stdout.on("data", (d: Buffer) => chunks.push(d));
+            ff.on("error", () => resolve());
+            ff.on("close", () => resolve());
+          });
+          if (!chunks.length) break;
+          await mkdir(HLS_CACHE_DIR, { recursive: true });
+          const tmp = `${cachePath}.${process.pid}.part`;
+          await writeFile(tmp, Buffer.concat(chunks));
+          await renameFile(tmp, cachePath);
+        }
+        log("INFO", `Prewarmed ${path.basename(target)}`, "media");
+      } catch { /* speculative work — a failure just means the normal path runs */ }
+    })();
+  });
 
   app.get("/api/media/hls/playlist.m3u8", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
@@ -19450,7 +19615,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const quality = String(req.query.quality ?? "auto");
     const audioTrack = Math.max(0, parseInt(String(req.query.audio_track ?? "0"), 10) || 0);
     const token = String(req.query.token ?? "");
-    const count = Math.ceil(duration / HLS_SEGMENT_SECONDS);
+    const count = segmentCount(duration);
 
     const qs = (n: number) => {
       const u = new URLSearchParams({
@@ -19463,13 +19628,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const out: string[] = [
       "#EXTM3U",
       "#EXT-X-VERSION:3",
+      // TARGETDURATION must be >= the longest EXTINF, not the shortest.
       `#EXT-X-TARGETDURATION:${HLS_SEGMENT_SECONDS}`,
       "#EXT-X-MEDIA-SEQUENCE:0",
       "#EXT-X-PLAYLIST-TYPE:VOD",
+      "#EXT-X-INDEPENDENT-SEGMENTS",
     ];
     for (let i = 0; i < count; i++) {
-      const segLen = Math.min(HLS_SEGMENT_SECONDS, duration - i * HLS_SEGMENT_SECONDS);
-      out.push(`#EXTINF:${segLen.toFixed(3)},`);
+      const { dur } = segmentBounds(i, duration);
+      if (dur <= 0) break;
+      out.push(`#EXTINF:${dur.toFixed(3)},`);
       out.push(`/api/media/hls/segment.ts?${qs(i)}`);
     }
     out.push("#EXT-X-ENDLIST");
@@ -19493,7 +19661,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // Used to stop prefetching past the last segment of the file.
     const _segDur = (await probeVideoFormat(target)).duration
       || (_mediaDurationCache.get(target)?.duration ?? 0);
-    const count = _segDur > 0 ? Math.ceil(_segDur / HLS_SEGMENT_SECONDS) : Number.MAX_SAFE_INTEGER;
+    const count = _segDur > 0 ? segmentCount(_segDur) : Number.MAX_SAFE_INTEGER;
 
     // Seeking backwards, rewatching, or two people on the same episode should
     // not re-encode work already done.
@@ -19512,7 +19680,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     else if (quality === "360") targetWidth = Math.min(640, targetWidth);
     else targetWidth = Math.min(1920, targetWidth);
 
-    const startSec = n * HLS_SEGMENT_SECONDS;
+    const _totalDur = _segDur;
+    const { start: startSec, dur: thisDur } = segmentBounds(n, _totalDur || Number.MAX_SAFE_INTEGER);
 
     const buildSegment = (segN: number): Promise<Buffer> => {
       const segKey = hlsKey(target, quality, audioTrack, segN);
@@ -19524,7 +19693,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           await fsAccess(segCache);
           return await readFile(segCache);
         } catch { /* build it */ }
-        const segStart = segN * HLS_SEGMENT_SECONDS;
+        const sb = segmentBounds(segN, _totalDur || Number.MAX_SAFE_INTEGER);
+        const segStart = sb.start;
         const encB = videoEncodeArgs({
           hw: await hwEncodeAvailable(), quality,
           srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
@@ -19534,7 +19704,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           ...encB.pre,
           "-ss", String(segStart),
           "-i", target,
-          "-t", String(HLS_SEGMENT_SECONDS),
+          "-t", String(sb.dur),
           "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
           ...encB.post,
           "-af", "aresample=async=1:first_pts=0",
@@ -19617,7 +19787,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             ...encC.pre,
             "-ss", String(startSec),
             "-i", target,
-            "-t", String(HLS_SEGMENT_SECONDS),
+            "-t", String(thisDur),
             "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
             // Every segment must begin on a keyframe or players cannot switch
             // into it cleanly mid-stream (keyframes: true, above).
@@ -20560,8 +20730,6 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       // -ss before -i rebases output timestamps to 0, so add the window offset.
       cuts.push(WINDOW_START + Number(m[2]));
     }
-    if (cuts.length < 2) return null;
-
     // A title sequence runs roughly 20s-2min. Take the first pair of cuts whose
     // spacing fits that, which is the sequence fenced between them.
     for (let i = 0; i < cuts.length - 1; i++) {
@@ -20570,7 +20738,49 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return { startMs: Math.round(cuts[i] * 1000), endMs: Math.round(cuts[i + 1] * 1000), source: 'blackframe' };
       }
     }
+
+    // Tier 3 — single-cut fallback.
+    //
+    // Plenty of rips fade out of the title sequence but not into it, leaving
+    // exactly one black frame. Measured on Malcolm in the Middle S01E01: one
+    // cut at 52.5s and nothing else, so the pair test above found nothing and
+    // the episode got no markers at all.
+    //
+    // A lone cut in the plausible window is almost always the END of the
+    // intro, which is the only value that actually matters — the button exists
+    // to jump there. The start is only used to decide when to offer it, so it
+    // is backed off by a typical title length rather than guessed precisely.
+    if (cuts.length === 1) {
+      const end = cuts[0];
+      if (end >= 20 && end <= 200) {
+        const start = Math.max(WINDOW_START, end - 40);
+        return { startMs: Math.round(start * 1000), endMs: Math.round(end * 1000), source: 'blackframe-single' };
+      }
+    }
     return null;
+  }
+
+  /**
+   * Tier 4 — borrow markers from a sibling episode.
+   *
+   * A title sequence is identical across a season, so an episode that resists
+   * detection can reuse a neighbour's timings. This is what makes the feature
+   * work across a whole series instead of the handful of episodes that happen
+   * to have clean black frames or embedded chapters.
+   *
+   * Only borrows from a file in the SAME directory, which for every rip in this
+   * library means the same season of the same show.
+   */
+  async function borrowIntroFromSibling(absPath: string, cache: Record<string, any>) {
+    const dir = path.dirname(absPath);
+    const candidates = Object.entries(cache).filter(([rel, v]) =>
+      v && typeof v === 'object' && v.endMs > v.startMs && path.dirname(resolveMediaTarget(rel)) === dir);
+    if (!candidates.length) return null;
+    // Prefer a marker that was directly detected over one already borrowed, so
+    // a mistake cannot propagate through a whole season.
+    const best = candidates.find(([, v]) => !String(v.source ?? '').startsWith('sibling')) ?? candidates[0];
+    const v: any = best[1];
+    return { startMs: v.startMs, endMs: v.endMs, source: `sibling:${v.source ?? 'unknown'}` };
   }
 
   app.get('/api/media/intro-markers', async (req, res) => {
@@ -20588,7 +20798,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try { await fsAccess(target); } catch { return res.status(404).json({ error: 'Media file not found' }); }
 
     try {
-      const found = await detectIntroMarkers(target);
+      let found = await detectIntroMarkers(target);
+      if (!found) found = await borrowIntroFromSibling(target, cache);
       cache[rel] = found;               // null is cached too — never rescan a miss
       void saveIntroCache();
       return res.json(found ? { found: true, ...found } : { found: false });

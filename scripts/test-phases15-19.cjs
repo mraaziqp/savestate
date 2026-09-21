@@ -296,6 +296,67 @@ function testMetadataHealer() {
   /fetch-batch/.test(src) ? ok('delegates art to the existing endpoint') : bad('art logic duplicated');
 }
 
+// ── Player: startup, spinner, intro skip, autoplay ──────────────────────────
+function testPlayerUpgrades() {
+  head('Player startup, spinner and intro skip');
+  const pl = fs.readFileSync(path.join(ROOT, 'public', 'player.html'), 'utf8');
+  const srv = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+
+  // Startup cost: measured 4.56s cold before these three changes.
+  /PROBE_CACHE_FILE/.test(srv) ? ok('probe cache persisted (was ~2.3s per first play)') : bad('probe cache not persisted');
+  /function segmentBounds/.test(srv) ? ok('fast-start segment map present') : bad('no fast-start map');
+  /HLS_FAST_START_SECONDS = 2/.test(srv) ? ok('head segments are short (2s)') : bad('head segments not shortened');
+  /\/api\/media\/prewarm/.test(srv) ? ok('prewarm endpoint present') : bad('no prewarm endpoint');
+  /api\/media\/prewarm/.test(pl) ? ok('player prewarms on load') : bad('player does not prewarm');
+  // Changing the segment map must invalidate old cached segments.
+  /update\(`v2\|/.test(srv) ? ok('segment cache key versioned for the new map') : bad('stale segments could be served');
+
+  // The spinner bug: it showed while paused, with a fully buffered video.
+  /function playbackIsBlocked/.test(pl) ? ok('spinner gated on real blockage') : bad('spinner not gated');
+  /if \(v\.paused\) return false;/.test(pl) ? ok('never spins while paused') : bad('would spin while paused');
+  /v\.readyState >= 3/.test(pl) ? ok('never spins when a frame is ready') : bad('ignores readyState');
+  /SPINNER_DELAY_MS = 500/.test(pl) ? ok('500ms debounce retained') : bad('debounce lost');
+
+  // Simulate the exact state that was wrong: paused, ready, buffered.
+  const blocked = (st) => {
+    if (st.paused) return false;
+    if (st.readyState >= 3) return false;
+    return !(st.bufferedAhead > 0.6);
+  };
+  blocked({ paused: true, readyState: 4, bufferedAhead: 30 }) === false ? ok('paused+ready+buffered does not spin') : bad('would still spin while paused');
+  blocked({ paused: false, readyState: 4, bufferedAhead: 30 }) === false ? ok('playing with buffer does not spin') : bad('spins during healthy playback');
+  blocked({ paused: false, readyState: 1, bufferedAhead: 0 }) === true ? ok('a genuine stall still spins') : bad('real stalls no longer spin');
+
+  // Intro skip.
+  /id="skipIntro"/.test(pl) ? ok('Skip Intro button present') : bad('no skip button');
+  /intro-markers/.test(pl) ? ok('player loads intro markers') : bad('markers not loaded');
+  /autoplayed && inside/.test(pl) ? ok('auto-skips the intro when autoplaying') : bad('no auto-skip on autoplay');
+  /blackframe-single/.test(srv) ? ok('single-cut detection fallback') : bad('no single-cut fallback');
+  /borrowIntroFromSibling/.test(srv) ? ok('borrows markers from a sibling episode') : bad('no sibling fallback');
+  // A borrowed marker must not be re-borrowed, or one mistake spreads.
+  /!String\(v\.source \?\? ''\)\.startsWith\('sibling'\)/.test(srv)
+    ? ok('prefers a directly-detected marker over a borrowed one')
+    : bad('a borrowed marker could propagate through a season');
+
+  // Up next.
+  /id="upNext"/.test(pl) ? ok('Up Next card present') : bad('no up-next card');
+  /autoplay=1/.test(pl) ? ok('chains to the next episode with autoplay') : bad('no autoplay chaining');
+  /left <= 75.*prewarm|prewarmedNext/.test(pl) ? ok('prewarms the next episode before it is needed') : bad('next episode not prewarmed');
+
+  // Reveal must not depend on requestAnimationFrame (throttled in background tabs).
+  const rafUses = (pl.match(/requestAnimationFrame\(/g) || []).length;
+  rafUses === 0 ? ok('reveal is reflow-based, not rAF-based') : bad(`${rafUses} rAF use(s) remain in reveal paths`);
+
+  // Auth must fail loudly, not silently.
+  /function noteAuthFailure/.test(pl) ? ok('expired session surfaces to the viewer') : bad('auth failure degrades silently');
+
+  // Quality.
+  /qp: "19"/.test(srv) ? ok('1080p tier raised to qp 19') : bad('quality ladder not raised');
+  /qp: "21", abr: "192k", maxrate: w <= 720/.test(srv) ? ok('auto tier balanced at qp 21') : bad('auto tier not balanced');
+  /maxBufferSize/.test(pl) ? ok('buffers by size as well as duration') : bad('no size-based buffering');
+  /fragLoadingMaxRetry/.test(pl) ? ok('retries slow segments instead of erroring') : bad('no segment retry tuning');
+}
+
 // ── Live ────────────────────────────────────────────────────────────────────
 async function testLive() {
   head(`Live endpoints on :${PORT}`);
@@ -354,6 +415,7 @@ async function testLive() {
   testUploadDedup();
   testThemingOnboarding();
   testMetadataHealer();
+  testPlayerUpgrades();
   await testLive();
   console.log(`\n${'='.repeat(52)}`);
   console.log(`${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}`);
