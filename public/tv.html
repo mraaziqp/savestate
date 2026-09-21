@@ -16,36 +16,60 @@
 :root{
   --u: 0.0521vw;              /* 1u = 1px at 1920 wide; scales to any panel */
   --sidebar: 88px; --sidebar-open: 300px;
-  --bg:#07090d; --panel:#11151d; --line:#222a38;
-  --fg:#f2f5fa; --dim:#8b96ab; --accent:#4d7cff; --focus:#fff;
   --pad: calc(40 * var(--u));
   --safe: 3vh;                /* TV overscan: many sets crop ~2-3% of edges */
+
+  /* Semantic tokens. Everything below references these, never a raw colour,
+     so a theme is a token swap rather than a hunt through the stylesheet. */
+  --bg-primary:#07090d; --bg-surface:#11151d; --border-subtle:#222a38;
+  --text-primary:#f2f5fa; --text-muted:#8b96ab;
+  --accent:#4d7cff; --accent-contrast:#04101f; --focus-ring:#fff;
+}
+
+/* Midnight Gamer — the default. Neon accent on near-black. */
+:root[data-theme="midnight"]{
+  --bg-primary:#07090d; --bg-surface:#11151d; --border-subtle:#222a38;
+  --text-primary:#f2f5fa; --text-muted:#8b96ab;
+  --accent:#4d7cff; --accent-contrast:#04101f; --focus-ring:#fff;
+}
+/* Cinematic Theater — true black, so an OLED panel draws no light around the
+   picture and nothing glows in a dark room. */
+:root[data-theme="theater"]{
+  --bg-primary:#000000; --bg-surface:#0a0a0a; --border-subtle:#1c1c1c;
+  --text-primary:#ededed; --text-muted:#7d7d7d;
+  --accent:#e50914; --accent-contrast:#ffffff; --focus-ring:#ffffff;
+}
+/* Clean Light — for a bright room or a desk monitor. */
+:root[data-theme="light"]{
+  --bg-primary:#f6f8fc; --bg-surface:#ffffff; --border-subtle:#dde3ec;
+  --text-primary:#111826; --text-muted:#5b6678;
+  --accent:#2563eb; --accent-contrast:#ffffff; --focus-ring:#111826;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+html,body{height:100%;overflow:hidden;background:var(--bg-primary);color:var(--text-primary);
   font:calc(17 * var(--u))/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 body{display:flex;padding:var(--safe)}
 
 /* ── Mini sidebar: icons only, expands on focus ─────────────────────────── */
-#side{width:var(--sidebar);flex:0 0 auto;background:var(--panel);border:1px solid var(--line);
+#side{width:var(--sidebar);flex:0 0 auto;background:var(--bg-surface);border:1px solid var(--border-subtle);
   border-radius:calc(18 * var(--u));display:flex;flex-direction:column;gap:calc(8 * var(--u));
   padding:calc(16 * var(--u)) calc(12 * var(--u));transition:width .22s ease;overflow:hidden}
 #side.open{width:var(--sidebar-open)}
 .navitem{display:flex;align-items:center;gap:calc(18 * var(--u));white-space:nowrap;
   padding:calc(14 * var(--u)) calc(14 * var(--u));border-radius:calc(12 * var(--u));
-  color:var(--dim);cursor:pointer;border:calc(3 * var(--u)) solid transparent}
+  color:var(--text-muted);cursor:pointer;border:calc(3 * var(--u)) solid transparent}
 .navitem .ico{flex:0 0 auto;width:calc(30 * var(--u));height:calc(30 * var(--u));display:grid;place-items:center}
 .navitem svg{width:100%;height:100%;fill:currentColor}
 .navitem .lbl{opacity:0;transition:opacity .18s ease;font-weight:600}
 #side.open .navitem .lbl{opacity:1}
-.navitem.active{color:var(--fg);background:rgba(77,124,255,.16)}
-.navitem.focused{color:#04101f;background:var(--focus);border-color:var(--focus)}
+.navitem.active{color:var(--text-primary);background:color-mix(in srgb, var(--accent) 18%, transparent)}
+.navitem.focused{color:var(--accent-contrast);background:var(--focus-ring);border-color:var(--focus-ring)}
 
 /* ── Main ───────────────────────────────────────────────────────────────── */
 #main{flex:1;min-width:0;display:flex;flex-direction:column;padding-left:var(--pad);overflow:hidden}
 #head{display:flex;align-items:baseline;gap:calc(20 * var(--u));margin-bottom:calc(18 * var(--u))}
 h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
-#count{color:var(--dim);font-size:calc(17 * var(--u))}
+#count{color:var(--text-muted);font-size:calc(17 * var(--u))}
 #rows{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;scroll-behavior:smooth}
 #rows::-webkit-scrollbar{display:none}
 .rowtitle{font-size:calc(22 * var(--u));font-weight:700;margin:calc(20 * var(--u)) 0 calc(12 * var(--u))}
@@ -53,28 +77,51 @@ h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
 /* Strict grid: fixed column count per breakpoint, so D-pad up/down always
    lands on a predictable neighbour instead of wherever reflow put it. */
 .grid{display:grid;grid-template-columns:repeat(var(--cols,6),1fr);gap:calc(22 * var(--u))}
-.tile{position:relative;border-radius:calc(12 * var(--u));overflow:hidden;background:var(--panel);
+.tile{position:relative;border-radius:calc(12 * var(--u));overflow:hidden;background:var(--bg-surface);
   border:calc(4 * var(--u)) solid transparent;cursor:pointer;
   transition:transform .16s ease,border-color .16s ease}
-.tile .art{width:100%;aspect-ratio:2/3;background:#161b25 center/cover no-repeat;display:grid;place-items:center}
+.tile .art{width:100%;aspect-ratio:2/3;background:var(--bg-primary) center/cover no-repeat;display:grid;place-items:center}
 .tile.wide .art{aspect-ratio:16/9}
 .tile .art span{font-size:calc(34 * var(--u));opacity:.34}
 .tile .cap{padding:calc(10 * var(--u)) calc(12 * var(--u));font-size:calc(15 * var(--u));
   font-weight:600;line-height:1.3;height:calc(58 * var(--u));overflow:hidden}
-.tile .sub{color:var(--dim);font-size:calc(13 * var(--u));font-weight:500}
-.tile.focused{border-color:var(--focus);transform:scale(1.07);z-index:5;
-  box-shadow:0 calc(14 * var(--u)) calc(40 * var(--u)) rgba(0,0,0,.72)}
+.tile .sub{color:var(--text-muted);font-size:calc(13 * var(--u));font-weight:500}
+.tile.focused{border-color:var(--focus-ring);transform:scale(1.05);z-index:5;outline:calc(3 * var(--u)) solid color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow:0 calc(14 * var(--u)) calc(44 * var(--u)) rgba(0,0,0,.78),
+              0 0 calc(30 * var(--u)) color-mix(in srgb, var(--accent) 45%, transparent)}
 .tile.missing{opacity:.42}
-.badge{position:absolute;top:calc(8 * var(--u));right:calc(8 * var(--u));background:rgba(0,0,0,.82);
+.badge{position:absolute;top:calc(8 * var(--u));right:calc(8 * var(--u));background:var(--bg-surface);border:1px solid var(--border-subtle);color:var(--text-primary);
   padding:calc(3 * var(--u)) calc(9 * var(--u));border-radius:999px;font-size:calc(12 * var(--u));font-weight:700}
 
-#empty{color:var(--dim);padding:calc(40 * var(--u)) 0;font-size:calc(19 * var(--u))}
-#hint{position:fixed;bottom:var(--safe);right:var(--safe);color:var(--dim);
-  font-size:calc(14 * var(--u));background:rgba(0,0,0,.6);padding:calc(8 * var(--u)) calc(14 * var(--u));
+#empty{color:var(--text-muted);padding:calc(40 * var(--u)) 0;font-size:calc(19 * var(--u))}
+#hint{position:fixed;bottom:var(--safe);right:var(--safe);color:var(--text-muted);
+  font-size:calc(14 * var(--u));background:var(--bg-surface);border:1px solid var(--border-subtle);padding:calc(8 * var(--u)) calc(14 * var(--u));
   border-radius:calc(9 * var(--u))}
 
 /* Column counts tuned so a poster is never smaller than ~10% of screen width
    — below that, titles are unreadable from a sofa. */
+/* ── Onboarding + theme picker ──────────────────────────────────────────── */
+#welcome{position:fixed;inset:0;background:color-mix(in srgb, var(--bg-primary) 88%, transparent);
+  display:grid;place-items:center;z-index:50}
+#welcome[hidden]{display:none}
+#welcome .card{background:var(--bg-surface);border:1px solid var(--border-subtle);
+  border-radius:calc(20 * var(--u));padding:calc(46 * var(--u));max-width:min(86vw, calc(900 * var(--u)));text-align:center}
+#welcome h2{font-size:calc(40 * var(--u));margin-bottom:calc(10 * var(--u))}
+#welcome p{color:var(--text-muted);font-size:calc(18 * var(--u));margin-bottom:calc(30 * var(--u))}
+.choices{display:grid;grid-template-columns:1fr 1fr;gap:calc(22 * var(--u))}
+.choice{background:var(--bg-primary);border:calc(4 * var(--u)) solid transparent;
+  border-radius:calc(14 * var(--u));padding:calc(30 * var(--u));cursor:pointer;transition:transform .16s ease,border-color .16s ease}
+.choice.focused{border-color:var(--focus-ring);transform:scale(1.05);
+  box-shadow:0 0 calc(30 * var(--u)) color-mix(in srgb, var(--accent) 45%, transparent)}
+.choice .big{font-size:calc(56 * var(--u))}
+.choice .t{font-size:calc(24 * var(--u));font-weight:700;margin-top:calc(8 * var(--u))}
+.choice .d{color:var(--text-muted);font-size:calc(15 * var(--u));margin-top:calc(4 * var(--u))}
+#themeToast{position:fixed;top:var(--safe);left:50%;transform:translateX(-50%);
+  background:var(--bg-surface);border:1px solid var(--border-subtle);color:var(--text-primary);
+  padding:calc(10 * var(--u)) calc(22 * var(--u));border-radius:calc(10 * var(--u));
+  font-size:calc(17 * var(--u));opacity:0;transition:opacity .2s ease;pointer-events:none;z-index:60}
+#themeToast.on{opacity:1}
+
 @media (min-width:2000px){ .grid{--cols:8} }
 @media (max-width:1400px){ .grid{--cols:5} }
 @media (max-width:1000px){ .grid{--cols:4} }
@@ -94,7 +141,27 @@ h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
   <div id="head"><h1 id="title">Media Vault</h1><div id="count"></div></div>
   <div id="rows"><div id="empty">Loading…</div></div>
 </div>
-<div id="hint">↑↓←→ move · OK select · Back returns</div>
+<div id="themeToast"></div>
+<div id="hint">↑↓←→ move · OK select · Back returns · T theme</div>
+
+<!-- Onboarding: asked once, then remembered. Reorders the sidebar so the thing
+     you came for is the first thing the D-pad lands on. -->
+<div id="welcome" hidden>
+  <div class="card">
+    <h2>What brings you to Nexus?</h2>
+    <p>This just decides what shows up first. You can change it any time.</p>
+    <div class="choices">
+      <div class="choice" data-fk="w:movies" data-intent="movies">
+        <div class="big">🎬</div><div class="t">Movies &amp; TV</div>
+        <div class="d">Open in the Media Vault</div>
+      </div>
+      <div class="choice" data-fk="w:games" data-intent="games">
+        <div class="big">🎮</div><div class="t">Retro Gaming</div>
+        <div class="d">Open in the Emulation Hub</div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 const $  = (s) => document.querySelector(s);
@@ -102,6 +169,47 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 const token = localStorage.getItem('nexus_token') || new URLSearchParams(location.search).get('token') || '';
 const H = token ? { Authorization: `Bearer ${token}` } : {};
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ── Theme ─────────────────────────────────────────────────────────────────
+// Stored per device: the TV in the lounge and the laptop want different
+// answers, and this is a display preference, not account data.
+const THEMES = [
+  { id: 'midnight', name: 'Midnight Gamer' },
+  { id: 'theater',  name: 'Cinematic Theater' },
+  { id: 'light',    name: 'Clean Light' },
+];
+function applyTheme(id) {
+  document.documentElement.setAttribute('data-theme', id);
+  try { localStorage.setItem('nexus_theme', id); } catch {}
+}
+function cycleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'midnight';
+  const next = THEMES[(THEMES.findIndex((t) => t.id === cur) + 1) % THEMES.length];
+  applyTheme(next.id);
+  const el = document.getElementById('themeToast');
+  el.textContent = next.name; el.classList.add('on');
+  clearTimeout(cycleTheme._t);
+  cycleTheme._t = setTimeout(() => el.classList.remove('on'), 1100);
+}
+(function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem('nexus_theme'); } catch {}
+  applyTheme(THEMES.some((t) => t.id === saved) ? saved : 'midnight');
+})();
+
+// ── Intent ────────────────────────────────────────────────────────────────
+function savedIntent() { try { return localStorage.getItem('nexus_intent'); } catch { return null; } }
+function setIntent(v) { try { localStorage.setItem('nexus_intent', v); } catch {} }
+
+/** Put the section the user came for first, so the D-pad lands on it. */
+function applyIntentOrder() {
+  const intent = savedIntent();
+  if (intent !== 'games') return;                 // movies-first is the default
+  const side = document.getElementById('side');
+  const games = side.querySelector('[data-nav="games"]');
+  const media = side.querySelector('[data-nav="media"]');
+  if (games && media) side.insertBefore(games, media);
+}
 
 // ── Spatial navigation ────────────────────────────────────────────────────
 // Written directly rather than pulling in a library: the frontend has no build
@@ -170,6 +278,8 @@ window.addEventListener('keydown', (e) => {
     case 40: e.preventDefault(); move('down');  break;
     case 13: case 32:                                  // OK / Enter / Space
       e.preventDefault(); el(focusKey)?.click(); break;
+    case 84:                                           // 'T' — cycle theme
+      e.preventDefault(); cycleTheme(); break;
     default: return;
   }
 }, true);   // capture: beat any page-level handler that would scroll first
@@ -185,6 +295,9 @@ document.addEventListener('mouseover', (e) => {
 // exit the app — the old build fell out to the launcher, which is the single
 // most complained-about TV behaviour.
 function goBack() {
+  // While onboarding is up there is nowhere to go back to — the choice has to
+  // be made, and it is two options with an obvious default.
+  if (!document.getElementById('welcome').hidden) return;
   const cur = el(focusKey);
   // Inside a series, Back leaves the episode list before it leaves the section.
   if (view === 'series') { openSeries = null; show('media'); return; }
@@ -423,6 +536,14 @@ function cleanEp(n) {
 
 // ── Activation ────────────────────────────────────────────────────────────
 document.addEventListener('click', (e) => {
+  const choice = e.target.closest('.choice');
+  if (choice) {
+    setIntent(choice.dataset.intent);
+    document.getElementById('welcome').hidden = true;
+    applyIntentOrder();
+    show(choice.dataset.intent === 'games' ? 'games' : 'media');
+    return;
+  }
   const nav = e.target.closest('.navitem');
   if (nav) return show(nav.dataset.nav);
   const tile = e.target.closest('.tile');
@@ -435,7 +556,16 @@ document.addEventListener('click', (e) => {
 });
 
 $$('.navitem').forEach((n) => (n.dataset.fk = `nav:${n.dataset.nav}`));
-show('media');
+
+const intent = savedIntent();
+if (!intent) {
+  const w = document.getElementById('welcome');
+  w.hidden = false;
+  setFocus('w:movies');
+} else {
+  applyIntentOrder();
+  show(intent === 'games' ? 'games' : 'media');
+}
 </script>
 </body>
 </html>

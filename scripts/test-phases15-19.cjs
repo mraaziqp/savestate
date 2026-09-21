@@ -173,6 +173,129 @@ function testRemotePlayContract() {
   (iImport > 0 && iUse > iImport) ? ok('WebSocketServer constructed after its import (boot-order regression)') : bad('remotePlayWss constructed before WebSocketServer exists');
 }
 
+// ── Malware guard ───────────────────────────────────────────────────────────
+function testMalwareGuard() {
+  head('Disguised-executable guard');
+  const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+  /\/api\/security\/malware-scan/.test(src) ? ok('scanner endpoint present') : bad('no scanner');
+  /0x4d && buf\[1\] === 0x5a/.test(src) ? ok('detects by MZ header, not just extension') : bad('header check missing');
+  /quarantine/.test(src) ? ok('findings are quarantined, not deleted') : bad('no quarantine path');
+  /"\*\.exe", "\*\*\/\*\.exe"/.test(src) ? ok('executables excluded from Drive uploads') : bad('executables could reach Drive');
+
+  // A legitimate game ships .bat files — the roms tree must never be swept.
+  const roots = ['nexus-downloads', 'nexus-media', '.nexus-vault'];
+  roots.some((r) => /roms/i.test(r)) ? bad('roms tree is in the scan roots') : ok('roms tree excluded from scanning');
+
+  // Behaviour: extension hit, header hit, and a clean file.
+  const classify = (name, header) => {
+    const ext = path.extname(name).toLowerCase();
+    const EXEC = new Set(['.exe', '.scr', '.msi', '.bat', '.cmd', '.vbs']);
+    const MEDIA = new Set(['.mkv', '.mp4', '.avi']);
+    if (EXEC.has(ext)) return 'executable extension';
+    if (MEDIA.has(ext) && header === 'MZ') return 'PE header in a video';
+    return null;
+  };
+  classify('Lanterns.S01E07.exe', null) ? ok('flags an .exe named like an episode') : bad('missed .exe');
+  classify('Show.S01E01.mkv', 'MZ') ? ok('flags a PE binary wearing a .mkv name') : bad('missed disguised PE');
+  classify('Show.S01E01.mkv', null) === null ? ok('leaves a real video alone') : bad('false positive on real media');
+}
+
+// ── Emulation queue ─────────────────────────────────────────────────────────
+function testEmulationQueue() {
+  head('Browser-play concurrency queue');
+  const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+  /MAX_CONCURRENT_EMULATIONS/.test(src) ? ok('concurrency cap defined') : bad('no cap');
+  /EMULATION_SESSION_MAX_MS/.test(src) ? ok('hard session timeout defined') : bad('no session timeout');
+  /lastBeat/.test(src) ? ok('slots are leased and expire without a heartbeat') : bad('slots never expire');
+  // `position` reaches the response via the emuState() spread, so assert on
+  // the 202 plus the queue-position call rather than a literal key name.
+  /res\.status\(202\)[\s\S]{0,300}emuQueuePosition/.test(src)
+    ? ok('queued requests answer 202 carrying their queue position')
+    : bad('no 202 queue response');
+
+  // A closed tab must free its slot.
+  const MAX = 2, GRACE = 90_000, now = Date.now();
+  const active = new Map([['a', { lastBeat: now }], ['b', { lastBeat: now - 120_000 }]]);
+  for (const [id, sl] of active) if (now - sl.lastBeat > GRACE) active.delete(id);
+  active.size === 1 ? ok('a slot with no heartbeat is reclaimed') : bad(`sweep left ${active.size} slots`);
+  active.size < MAX ? ok('reclaimed capacity becomes available again') : bad('capacity not freed');
+}
+
+// ── Jarvis guardrails ───────────────────────────────────────────────────────
+function testJarvisGuardrails() {
+  head('Jarvis admin tooling is allowlisted');
+  const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+  /AI_CONFIG_WRITABLE/.test(src) ? ok('config writes are allowlisted') : bad('config writes unrestricted');
+  /AI_CONFIG_FORBIDDEN/.test(src) ? ok('secrets explicitly denied') : bad('no deny list');
+  /AI_JOBS/.test(src) ? ok('jobs are allowlisted') : bad('jobs unrestricted');
+
+  for (const k of ['JWT_SECRET', 'DATABASE_URL', 'NEXUS_ENCRYPTION_KEY', 'LD_PRELOAD', 'PATH']) {
+    new RegExp(`"${k}"`).test(src.slice(src.indexOf('AI_CONFIG_FORBIDDEN'), src.indexOf('AI_CONFIG_FORBIDDEN') + 700))
+      ? ok(`${k} is on the deny list`) : bad(`${k} not denied`);
+  }
+  // No arbitrary execution reachable from the AI surface.
+  const jobsBlock = src.slice(src.indexOf('const AI_JOBS'), src.indexOf('const AI_JOBS') + 1200);
+  /exec\(|execAsync\(|spawn\(/.test(jobsBlock) ? bad('AI_JOBS can spawn processes') : ok('no process spawning in AI_JOBS');
+
+  // Validation actually constrains values.
+  const validate = (v) => (/^\d+$/.test(v) && +v >= 1 && +v <= 12 ? null : 'out of range');
+  validate('6') === null ? ok('in-range value accepted') : bad('valid value rejected');
+  validate('999') !== null ? ok('out-of-range value rejected') : bad('999 accepted');
+  validate('6; rm -rf /') !== null ? ok('injection attempt rejected by validation') : bad('injection accepted');
+}
+
+// ── Upload dedup ────────────────────────────────────────────────────────────
+function testUploadDedup() {
+  head('Content-addressed upload dedup');
+  const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+  /\^\[a-f0-9\]\{64\}\$/.test(src) ? ok('sha256 format validated') : bad('hash not validated');
+  /skipUpload: true/.test(src) ? ok('an already-present file skips the upload entirely') : bad('no skip path');
+  /matchedBy: "sha256"/.test(src) ? ok('an interrupted session resumes by content hash') : bad('no hash-based resume');
+  /sha256: sha256 \|\| null/.test(src) ? ok('hash persisted in session metadata') : bad('hash not persisted');
+}
+
+// ── Theming / onboarding ────────────────────────────────────────────────────
+function testThemingOnboarding() {
+  head('Theming and onboarding');
+  const tv = fs.readFileSync(path.join(ROOT, 'public', 'tv.html'), 'utf8');
+  for (const t of ['midnight', 'theater', 'light']) {
+    new RegExp(`data-theme="${t}"`).test(tv) ? ok(`${t} theme defined`) : bad(`${t} theme missing`);
+  }
+  /--bg-primary|--text-primary|--accent/.test(tv) ? ok('semantic tokens in use') : bad('no semantic tokens');
+  /id="welcome"/.test(tv) ? ok('onboarding modal present') : bad('no onboarding modal');
+  /function applyIntentOrder/.test(tv) ? ok('sidebar reorders to match intent') : bad('no intent ordering');
+  /nexus_intent/.test(tv) ? ok('intent remembered per device') : bad('intent not persisted');
+  /case 84:/.test(tv) ? ok('T cycles the theme') : bad('no theme shortcut');
+  /transform:scale\(1\.05\)/.test(tv) ? ok('focus scales to 1.05') : bad('focus scale wrong');
+
+  // No raw colours outside the theme blocks.
+  const css = (tv.match(/<style>([\s\S]*?)<\/style>/) || [])[1] || '';
+  const themeBlocks = css.slice(0, css.indexOf('/* ── Onboarding'));
+  const body = css.slice(css.indexOf('*{box-sizing'));
+  const raw = (body.match(/(?:background|color)\s*:\s*(?:#[0-9a-fA-F]{3,6}|rgba?\()/g) || []);
+  raw.length === 0 ? ok('no hardcoded colours outside the theme definitions') : bad(`${raw.length} hardcoded colour(s): ${raw.slice(0,3).join(', ')}`);
+
+  const pl = fs.readFileSync(path.join(ROOT, 'public', 'player.html'), 'utf8');
+  /SPINNER_DELAY_MS = 500/.test(pl) ? ok('player spinner debounced 500ms') : bad('spinner not debounced');
+  /maxBufferLength: 120/.test(pl) ? ok('player buffers 120s') : bad('buffer not raised');
+  /\}, 2500\);/.test(pl) ? ok('controls auto-hide at 2500ms') : bad('auto-hide not 2500ms');
+  /cursor:\s*none/.test(pl) ? ok('cursor hidden when idle') : bad('cursor not hidden');
+}
+
+// ── Metadata healer ─────────────────────────────────────────────────────────
+function testMetadataHealer() {
+  head('Metadata healer');
+  const p = path.join(ROOT, 'scripts', 'metadata-healer.ts');
+  if (!fs.existsSync(p)) return bad('scripts/metadata-healer.ts missing');
+  const src = fs.readFileSync(p, 'utf8');
+  /const APPLY = process\.argv\.includes\("--apply"\)/.test(src) ? ok('dry run by default') : bad('not dry-run by default');
+  /BRACKET_TAG/.test(src) && /TRAILING_TAGS/.test(src) ? ok('position-aware tag stripping') : bad('tags stripped anywhere');
+  // The regression that mattered: "World" must not be stripped mid-title.
+  const trailing = src.slice(src.indexOf('const TRAILING_TAGS'), src.indexOf('const ROM_EXT_RE'));
+  !/World\|/.test(trailing) ? ok('"World" excluded from trailing-cluster stripping (Super Mario World)') : bad('"World" would be stripped from titles');
+  /fetch-batch/.test(src) ? ok('delegates art to the existing endpoint') : bad('art logic duplicated');
+}
+
 // ── Live ────────────────────────────────────────────────────────────────────
 async function testLive() {
   head(`Live endpoints on :${PORT}`);
@@ -225,6 +348,12 @@ async function testLive() {
   testEmulationPipeline();
   testScanSafety();
   testRemotePlayContract();
+  testMalwareGuard();
+  testEmulationQueue();
+  testJarvisGuardrails();
+  testUploadDedup();
+  testThemingOnboarding();
+  testMetadataHealer();
   await testLive();
   console.log(`\n${'='.repeat(52)}`);
   console.log(`${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}`);

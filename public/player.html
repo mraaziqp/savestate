@@ -5,10 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Nexus Player</title>
 <style>
+  /* Same semantic tokens as the TV UI so the two surfaces stay in step.
+     The player deliberately keeps a black stage in every theme — a light
+     surround changes how the picture itself reads. */
   :root{
     --bg:#000; --fg:#fff; --dim:rgba(255,255,255,.62); --accent:#e50914;
     --track:rgba(255,255,255,.28); --buffered:rgba(255,255,255,.48);
   }
+  :root[data-theme="midnight"]{ --accent:#4d7cff; }
+  :root[data-theme="theater"] { --accent:#e50914; }
+  :root[data-theme="light"]   { --accent:#2563eb; --dim:rgba(255,255,255,.7); }
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%;background:var(--bg);color:var(--fg);
     font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
@@ -124,6 +130,12 @@
 <script type="module">
 const $ = (s) => document.querySelector(s);
 const v = $('#v');
+
+// Honour the theme chosen on the TV UI (same device, same preference).
+try {
+  const t = localStorage.getItem('nexus_theme');
+  if (t) document.documentElement.setAttribute('data-theme', t);
+} catch {}
 const qs = new URLSearchParams(location.search);
 const rel = qs.get('rel') || '';
 const token = localStorage.getItem('nexus_token') || qs.get('token') || '';
@@ -168,7 +180,9 @@ async function attach(q, resumeAt) {
     hls = new Hls({
       // Buffer generously: segments are cheap to build now, and a deep buffer
       // is what stops a slow cold seek from turning into a visible stall.
-      maxBufferLength: 60, maxMaxBufferLength: 180, backBufferLength: 30,
+      // 120s forward buffer: segments cost ~0.7s to build now, so buying a
+      // deeper cushion is cheap and absorbs a slow cold seek entirely.
+      maxBufferLength: 120, maxMaxBufferLength: 240, backBufferLength: 60,
       fragLoadingTimeOut: 60000, manifestLoadingTimeOut: 30000,
       xhrSetup: (xhr, url) => { if (token && !url.includes('token=')) xhr.open('GET', auth(url), true); },
     });
@@ -247,11 +261,26 @@ v.addEventListener('progress', () => {
   $('#buf').style.width = ((end / v.duration) * 100) + '%';
 });
 
-// Spinner strictly follows `waiting`/`playing` — a seek that resolves from
-// buffer never flashes it, which is what made the old player feel broken.
-v.addEventListener('waiting',  () => $('#spin').classList.add('on'));
-v.addEventListener('playing',  () => $('#spin').classList.remove('on'));
-v.addEventListener('canplay',  () => $('#spin').classList.remove('on'));
+// Spinner only after a SUSTAINED stall. `waiting` fires constantly during
+// normal HLS segment changes and on every seek, so showing it immediately made
+// the player look broken even while playback was fine. 500ms is long enough
+// that a segment boundary never trips it, short enough that a real stall still
+// feels acknowledged.
+const SPINNER_DELAY_MS = 500;
+let spinTimer = null;
+function spinnerOn() {
+  if (spinTimer) return;
+  spinTimer = setTimeout(() => { spinTimer = null; $('#spin').classList.add('on'); }, SPINNER_DELAY_MS);
+}
+function spinnerOff() {
+  if (spinTimer) { clearTimeout(spinTimer); spinTimer = null; }
+  $('#spin').classList.remove('on');
+}
+v.addEventListener('waiting',  spinnerOn);
+v.addEventListener('stalled',  spinnerOn);
+v.addEventListener('playing',  spinnerOff);
+v.addEventListener('canplay',  spinnerOff);
+v.addEventListener('seeked',   spinnerOff);
 v.addEventListener('error',    () => fail('The video element reported an error.'));
 
 // ── Volume ────────────────────────────────────────────────────────────────
@@ -293,7 +322,7 @@ function wake() {
   hideTimer = setTimeout(() => {
     if (v.paused || dragging) return;           // never hide while paused
     ui.classList.remove('show'); stage.classList.add('idle');
-  }, 3000);
+  }, 2500);
 }
 ['pointermove','pointerdown','keydown'].forEach((e) => document.addEventListener(e, wake));
 v.addEventListener('pause', wake);

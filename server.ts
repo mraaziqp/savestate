@@ -10707,6 +10707,223 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
+  // ── Browser-play concurrency queue ────────────────────────────────────────
+  // Each in-browser emulation session costs real CPU on the host, and on AWS it
+  // costs a metered instance. Without a cap, the third concurrent player
+  // degrades the experience for the first two rather than being told to wait —
+  // and on a shared box that is how one game takes down the whole server.
+  //
+  // Sessions are leased, not just counted: a browser tab that closes without
+  // telling us must not hold a slot forever, so a lease expires unless renewed.
+  const MAX_CONCURRENT_EMULATIONS = Number(process.env.NEXUS_MAX_EMULATIONS ?? 2);
+  const EMULATION_SESSION_MAX_MS = Number(process.env.NEXUS_EMULATION_TIMEOUT_MIN ?? 30) * 60_000;
+  const EMULATION_HEARTBEAT_GRACE_MS = 90_000;
+
+  type EmuSlot = { id: string; userId: string; username: string; gameId: string; startedAt: number; lastBeat: number };
+  type EmuWaiter = { id: string; userId: string; username: string; gameId: string; since: number };
+  const emuActive = new Map<string, EmuSlot>();
+  const emuQueue: EmuWaiter[] = [];
+
+  function emuSweep() {
+    const now = Date.now();
+    for (const [id, sl] of emuActive) {
+      const expired = now - sl.startedAt > EMULATION_SESSION_MAX_MS;
+      const dead = now - sl.lastBeat > EMULATION_HEARTBEAT_GRACE_MS;
+      if (expired || dead) {
+        emuActive.delete(id);
+        log("INFO", `Emulation slot released (${expired ? "30-minute limit" : "client stopped responding"}) — ${sl.username}`, "emulation");
+      }
+    }
+  }
+
+  /** Position in the queue, 1-based; 0 means not queued. */
+  function emuQueuePosition(userId: string) {
+    const i = emuQueue.findIndex((w) => w.userId === userId);
+    return i < 0 ? 0 : i + 1;
+  }
+
+  function emuState(userId: string) {
+    emuSweep();
+    const mine = [...emuActive.values()].find((s) => s.userId === userId) ?? null;
+    return {
+      max: MAX_CONCURRENT_EMULATIONS,
+      active: emuActive.size,
+      queued: emuQueue.length,
+      position: emuQueuePosition(userId),
+      session: mine ? {
+        id: mine.id, gameId: mine.gameId, startedAt: mine.startedAt,
+        expiresAt: mine.startedAt + EMULATION_SESSION_MAX_MS,
+        remainingMs: Math.max(0, mine.startedAt + EMULATION_SESSION_MAX_MS - Date.now()),
+      } : null,
+    };
+  }
+
+  // Request a slot. 200 = go ahead, 202 = you are in the queue.
+  app.post("/api/emulation/queue", express.json(), async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    emuSweep();
+    const gameId = String(req.body?.game_id ?? req.body?.gameId ?? "");
+
+    // Already playing: refresh the lease rather than taking a second slot.
+    const existing = [...emuActive.values()].find((s) => s.userId === auth.userId);
+    if (existing) {
+      existing.lastBeat = Date.now();
+      return res.json({ granted: true, ...emuState(auth.userId) });
+    }
+
+    if (emuActive.size < MAX_CONCURRENT_EMULATIONS) {
+      const slot: EmuSlot = {
+        id: crypto.randomBytes(8).toString("hex"),
+        userId: auth.userId, username: auth.username, gameId,
+        startedAt: Date.now(), lastBeat: Date.now(),
+      };
+      emuActive.set(slot.id, slot);
+      const idx = emuQueue.findIndex((w) => w.userId === auth.userId);
+      if (idx >= 0) emuQueue.splice(idx, 1);
+      log("INFO", `Emulation slot granted to ${auth.username} (${emuActive.size}/${MAX_CONCURRENT_EMULATIONS})`, "emulation");
+      return res.json({ granted: true, ...emuState(auth.userId) });
+    }
+
+    if (!emuQueue.some((w) => w.userId === auth.userId)) {
+      emuQueue.push({ id: crypto.randomBytes(8).toString("hex"), userId: auth.userId, username: auth.username, gameId, since: Date.now() });
+    }
+    // 202: the request is accepted and pending, not refused.
+    return res.status(202).json({
+      granted: false,
+      ...emuState(auth.userId),
+      message: `All ${MAX_CONCURRENT_EMULATIONS} play slots are in use. You are number ${emuQueuePosition(auth.userId)} in the queue.`,
+    });
+  });
+
+  // Heartbeat — keeps the lease alive and reports time remaining.
+  app.post("/api/emulation/heartbeat", express.json(), async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    const slot = [...emuActive.values()].find((s) => s.userId === auth.userId);
+    if (slot) slot.lastBeat = Date.now();
+    res.json({ ok: !!slot, ...emuState(auth.userId) });
+  });
+
+  app.post("/api/emulation/release", express.json(), async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    for (const [id, sl] of emuActive) if (sl.userId === auth.userId) emuActive.delete(id);
+    const idx = emuQueue.findIndex((w) => w.userId === auth.userId);
+    if (idx >= 0) emuQueue.splice(idx, 1);
+    res.json({ ok: true, ...emuState(auth.userId) });
+  });
+
+  app.get("/api/emulation/status", async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    res.json({
+      ...emuState(auth.userId),
+      sessions: [...emuActive.values()].map((s) => ({
+        username: s.username, gameId: s.gameId, startedAt: s.startedAt,
+        remainingMs: Math.max(0, s.startedAt + EMULATION_SESSION_MAX_MS - Date.now()),
+      })),
+      waiting: emuQueue.map((w, i) => ({ position: i + 1, username: w.username, since: w.since })),
+    });
+  });
+
+  setInterval(emuSweep, 30_000).unref?.();
+
+  // ── Disguised-executable scanner ──────────────────────────────────────────
+  // Extension matching alone is weak in both directions: a legitimate game ships
+  // .bat build scripts (Shadows of the Damned has one), while the dangerous
+  // files are often named ".mkv" and only reveal themselves in the first two
+  // bytes. So this reads headers.
+  //
+  // "MZ" is the DOS/PE signature every Windows executable starts with. A file
+  // whose header says executable but whose name says video is the exact pattern
+  // these payloads use.
+  const EXEC_EXTENSIONS = new Set([".exe", ".scr", ".msi", ".bat", ".cmd", ".vbs", ".js", ".jse", ".lnk", ".com", ".pif"]);
+  const MEDIA_EXTENSIONS = new Set([".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".ts", ".mpg", ".mpeg", ".webm"]);
+
+  /** Read the first bytes and decide whether this is a Windows executable. */
+  async function looksExecutable(file: string): Promise<boolean> {
+    let fh: any = null;
+    try {
+      fh = await fsOpen(file, "r");
+      const buf = Buffer.alloc(2);
+      const { bytesRead } = await fh.read(buf, 0, 2, 0);
+      return bytesRead === 2 && buf[0] === 0x4d && buf[1] === 0x5a;   // "MZ"
+    } catch { return false; } finally { try { await fh?.close(); } catch {} }
+  }
+
+  async function scanForDisguisedExecutables(roots: string[], limit = 20000) {
+    const findings: { path: string; size: number; reason: string }[] = [];
+    let checked = 0;
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > 8 || checked >= limit) return;
+      let entries: any[];
+      try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (checked >= limit) return;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { await walk(full, depth + 1); continue; }
+        if (!e.isFile()) continue;
+        checked++;
+        const ext = path.extname(e.name).toLowerCase();
+        let size = 0;
+        try { size = (await stat(full)).size; } catch { continue; }
+
+        // An executable extension sitting in a media library.
+        if (EXEC_EXTENSIONS.has(ext)) {
+          findings.push({ path: full, size, reason: `executable extension (${ext}) in a media folder` });
+          continue;
+        }
+        // Far worse: named like media, actually a PE binary.
+        if (MEDIA_EXTENSIONS.has(ext) && await looksExecutable(full)) {
+          findings.push({ path: full, size, reason: "named as video but carries a Windows PE header" });
+        }
+      }
+    };
+    for (const r of roots) if (existsSync(r)) await walk(r, 0);
+    return { checked, findings };
+  }
+
+  app.get("/api/security/malware-scan", async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const roots = [
+      path.join(NEXUS_HOME, "nexus-downloads"),
+      path.join(NEXUS_HOME, "nexus-media"),
+      NEXUS_LOCAL_VAULT,
+    ];
+    const out = await scanForDisguisedExecutables(roots);
+    res.json({ ...out, roots, note: "POST with {\"quarantine\":true} to move findings out of the library" });
+  });
+
+  app.post("/api/security/malware-scan", express.json(), async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const roots = [
+      path.join(NEXUS_HOME, "nexus-downloads"),
+      path.join(NEXUS_HOME, "nexus-media"),
+      NEXUS_LOCAL_VAULT,
+    ];
+    const { checked, findings } = await scanForDisguisedExecutables(roots);
+    if (req.body?.quarantine !== true) {
+      return res.json({ checked, findings, quarantined: 0, note: 'Dry run — pass {"quarantine":true} to act' });
+    }
+    // Moved, not deleted: a false positive must be recoverable, and the file is
+    // out of every scanned root either way.
+    const qdir = path.join(NEXUS_LOCAL_VAULT, "quarantine");
+    await mkdir(qdir, { recursive: true });
+    const moved: string[] = [], failed: string[] = [];
+    for (const f of findings) {
+      const dest = path.join(qdir, `${Date.now()}-${path.basename(f.path)}`);
+      try { await renameFile(f.path, dest); moved.push(dest); }
+      catch (e: any) { failed.push(`${f.path}: ${e?.message ?? e}`); }
+    }
+    if (moved.length) log("WARN", `Quarantined ${moved.length} disguised executable(s) -> ${qdir}`, "security");
+    res.json({ checked, findings, quarantined: moved.length, quarantineDir: qdir, moved, failed });
+  });
+
   // ── Storage autopilot ─────────────────────────────────────────────────────
   // Cloud-first only works if local disk actually drains. Downloads land on the
   // NVMe, and with the media drive gone there is no second disk to spill onto —
@@ -10814,6 +11031,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           "*.part", "**/*.part",
           "*.partial", "**/*.partial",
           ".*", "**/.*",
+          // Torrent releases routinely ship a Windows executable padded to
+          // video size and named like an episode. 18 of them reached this
+          // archive before anyone noticed. They are never wanted here, so they
+          // never get uploaded.
+          "*.exe", "**/*.exe", "*.scr", "**/*.scr", "*.msi", "**/*.msi",
+          "*.bat", "**/*.bat", "*.cmd", "**/*.cmd", "*.vbs", "**/*.vbs",
+          "*.lnk", "**/*.lnk", "*.com", "**/*.com", "*.pif", "**/*.pif",
         ],
       },
     };
@@ -11731,7 +11955,169 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     };
   }
 
+  // ── Jarvis admin tooling ──────────────────────────────────────────────────
+  // The brief asked for tools that read/write arbitrary environment variables
+  // and execute arbitrary backend scripts. Built literally, that is a remote
+  // code execution path into this host reachable from a chat box — and Jarvis
+  // reads untrusted text (scraped metadata, filenames, release names), so a
+  // prompt-injection in a torrent title could drive it. Nothing about "admin
+  // only" prevents that: the admin is the one being impersonated.
+  //
+  // So both tools are allowlisted. Jarvis can change settings that are safe to
+  // get wrong and run jobs that already exist as endpoints. Anything outside
+  // the lists is refused with the list attached, which is also what makes the
+  // model self-correct instead of retrying blindly.
+
+  /** Settings Jarvis may change, with validation per key. */
+  const AI_CONFIG_WRITABLE: Record<string, { describe: string; validate: (v: string) => string | null }> = {
+    NEXUS_HLS_PREFETCH: {
+      describe: "How many HLS segments to build ahead of the player (1-12)",
+      validate: (v) => (/^\d+$/.test(v) && +v >= 1 && +v <= 12 ? null : "must be a whole number from 1 to 12"),
+    },
+    NEXUS_AUTOPILOT_MIN_FREE_GB: {
+      describe: "Free-space threshold that triggers the storage autopilot (10-500 GB)",
+      validate: (v) => (/^\d+$/.test(v) && +v >= 10 && +v <= 500 ? null : "must be a whole number from 10 to 500"),
+    },
+    NEXUS_MAX_EMULATIONS: {
+      describe: "Concurrent browser-play sessions allowed (1-8)",
+      validate: (v) => (/^\d+$/.test(v) && +v >= 1 && +v <= 8 ? null : "must be a whole number from 1 to 8"),
+    },
+    NEXUS_EMULATION_TIMEOUT_MIN: {
+      describe: "Hard limit on a browser-play session in minutes (5-240)",
+      validate: (v) => (/^\d+$/.test(v) && +v >= 5 && +v <= 240 ? null : "must be a whole number from 5 to 240"),
+    },
+    NEXUS_DISABLE_HW_TRANSCODE: {
+      describe: "Set to 1 to force software transcoding",
+      validate: (v) => (v === "0" || v === "1" ? null : "must be 0 or 1"),
+    },
+    NEXUS_STREAM_ONLY: {
+      describe: "Set to 1 to disable download-to-play",
+      validate: (v) => (v === "0" || v === "1" ? null : "must be 0 or 1"),
+    },
+  };
+
+  // Deliberately absent from the list above and refused explicitly, because
+  // these are the ones an attacker would actually want.
+  const AI_CONFIG_FORBIDDEN = new Set([
+    "JWT_SECRET", "DATABASE_URL", "NEXUS_ENCRYPTION_KEY", "GEMINI_API_KEY",
+    "ACCESS_PIN", "NEXUS_HOST_SHARE_SECRET", "SECOND_BRAIN_MASTER_KEY",
+    "RESEND_API_KEY", "AWEHCHAT_API_KEY", "PATH", "NODE_OPTIONS", "LD_PRELOAD",
+  ]);
+
+  /** Jobs Jarvis may start. Each maps to something that already exists. */
+  const AI_JOBS: Record<string, { describe: string; run: () => Promise<any> }> = {
+    storage_autopilot:   { describe: "Reclaim local space already backed up to Drive",  run: () => runAutopilot({ force: true }) },
+    malware_scan:        { describe: "Scan the library for disguised executables",      run: async () => scanForDisguisedExecutables([path.join(NEXUS_HOME, "nexus-downloads"), path.join(NEXUS_HOME, "nexus-media"), NEXUS_LOCAL_VAULT]) },
+    media_rescan:        { describe: "Re-index the media library",                      run: async () => ({ items: (await refreshMediaLibrary(mediaRoot || DEFAULT_MEDIA_ROOT)).length }) },
+    cloud_reconcile:     { describe: "Re-run the cloud survivor audit (read-only)",     run: async () => { const idx = await buildCloudIndex(true); return { cloudFilesIndexed: idx.files }; } },
+    arr_install_webhook: { describe: "Re-register the Sonarr/Radarr completion webhook", run: async () => ({ note: "POST /api/arr/install-webhook" }) },
+  };
+
+  async function aiReadConfig(): Promise<HostActionResult> {
+    const current: Record<string, any> = {};
+    for (const [k, meta] of Object.entries(AI_CONFIG_WRITABLE)) {
+      current[k] = { value: process.env[k] ?? "(unset)", describe: meta.describe };
+    }
+    return {
+      action: "read_system_config", ok: true,
+      summary: `${Object.keys(current).length} setting(s) Jarvis can change.`,
+      detail: current,
+    };
+  }
+
+  app.get("/api/ai/config", async (req, res) => {
+    const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    res.json(await aiReadConfig());
+  });
+
+  app.post("/api/ai/config", express.json(), async (req, res) => {
+    const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+
+    const key = String(req.body?.key ?? "").trim();
+    const value = String(req.body?.value ?? "").trim();
+
+    if (AI_CONFIG_FORBIDDEN.has(key)) {
+      log("WARN", `Jarvis attempted to modify protected setting '${key}' — refused`, "security");
+      return res.status(403).json({ error: `'${key}' can never be changed this way.` });
+    }
+    const meta = AI_CONFIG_WRITABLE[key];
+    if (!meta) {
+      return res.status(400).json({
+        error: `'${key}' is not a Jarvis-writable setting.`,
+        writable: Object.keys(AI_CONFIG_WRITABLE),
+      });
+    }
+    const invalid = meta.validate(value);
+    if (invalid) return res.status(400).json({ error: `${key} ${invalid}`, got: value });
+
+    const previous = process.env[key] ?? null;
+    process.env[key] = value;   // in-process only; .env is not rewritten
+    log("INFO", `Jarvis set ${key}=${value} (was ${previous ?? "unset"})`, "ai");
+    res.json({
+      ok: true, key, value, previous,
+      note: "Applies immediately and lasts until restart. Put it in .env to make it permanent.",
+    });
+  });
+
+  app.get("/api/ai/jobs", async (req, res) => {
+    const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    res.json({ jobs: Object.entries(AI_JOBS).map(([id, j]) => ({ id, describe: j.describe })) });
+  });
+
+  app.post("/api/ai/job", express.json(), async (req, res) => {
+    const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const id = String(req.body?.job ?? "");
+    const job = AI_JOBS[id];
+    if (!job) return res.status(400).json({ error: `Unknown job: ${id}`, available: Object.keys(AI_JOBS) });
+    try {
+      const result = await job.run();
+      log("INFO", `Jarvis ran job '${id}'`, "ai");
+      res.json({ ok: true, job: id, result });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, job: id, error: String(e?.message ?? e) });
+    }
+  });
+
+  // Telemetry so Jarvis can diagnose rather than guess. Read-only, and the
+  // response is capped — a model given 300k log lines is worse, not better.
+  app.get("/api/ai/diagnostics", async (req, res) => {
+    const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const limit = Math.min(300, Math.max(10, parseInt(String(req.query.limit ?? "120"), 10) || 120));
+    const out: any = { generatedAt: new Date().toISOString() };
+    try {
+      const errs = await pool.query(
+        `SELECT level, source, message, created_at FROM daemon_logs
+          WHERE level IN ('ERROR','WARN') ORDER BY created_at DESC LIMIT $1`, [limit]);
+      out.recentProblems = errs.rows;
+      // Grouping is what turns a log dump into a diagnosis.
+      const counts = new Map<string, number>();
+      for (const r of errs.rows) {
+        const k = String(r.message).replace(/\d+/g, "N").slice(0, 90);
+        counts.set(k, (counts.get(k) ?? 0) + 1);
+      }
+      out.topPatterns = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12)
+        .map(([pattern, count]) => ({ pattern, count }));
+    } catch (e: any) { out.logsError = String(e?.message ?? e); }
+
+    out.storage = { freeGb: Math.round(await diskFreeGb(NEXUS_HOME)), thresholdGb: AUTOPILOT_MIN_FREE_GB };
+    out.emulation = { active: emuActive.size, max: MAX_CONCURRENT_EMULATIONS, queued: emuQueue.length };
+    out.transcoding = { hardware: _hwEncodeAvailable, device: VAAPI_DEVICE };
+    out.suggestedFixes = Object.entries(AI_JOBS).map(([id, j]) => ({ job: id, describe: j.describe }));
+    res.json(out);
+  });
+
   const AI_HOST_ACTIONS: Record<string, () => Promise<HostActionResult>> = {
+    read_system_config: aiReadConfig,
     scrape_missing_posters: aiScrapeMissingPosters,
     purge_invalid_torrents: aiPurgeInvalidTorrents,
     verify_rom_integrity: () => aiVerifyRomIntegrity(),
@@ -18056,6 +18442,53 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // existing session for this exact file (same user, same relative path, same
     // byte count) and hand its id back along with the chunk indices already
     // held. The client skips those and carries on where it stopped.
+    // ── Content-addressed dedup ────────────────────────────────────────────
+    // Resume above matches on path + size, which misses two common cases: the
+    // same file offered under a different name, and a file already in the
+    // library being re-sent by a batch that lost track of what it had done.
+    // A client that sends ?sha256= gets both handled before a single byte of
+    // payload moves.
+    const sha256 = String(req.query.sha256 ?? "").trim().toLowerCase();
+    if (sha256 && !/^[a-f0-9]{64}$/.test(sha256)) {
+      return res.status(400).json({ error: "sha256 must be 64 hex characters" });
+    }
+    if (sha256) {
+      // Already in the library? Then the upload is finished before it starts.
+      try {
+        const dup = await pool.query(
+          "SELECT id, title, relative_path FROM games WHERE file_hash = $1 LIMIT 1", [sha256],
+        ).then((r) => r.rows[0]).catch(() => null);
+        if (dup) {
+          log("INFO", `Upload skipped — ${filenameRaw} already present as "${dup.title}"`, "upload");
+          return res.json({
+            ok: true, duplicate: true, skipUpload: true,
+            existing: { id: dup.id, title: dup.title, path: dup.relative_path },
+            message: `Already in your library as "${dup.title}" — nothing to upload.`,
+          });
+        }
+      } catch { /* dedup is an optimisation; never block an upload on it */ }
+
+      // A half-finished session for these exact bytes, under any name.
+      try {
+        const dirs = await readdir(UPLOAD_TEMP_DIR).catch(() => [] as string[]);
+        for (const dir of dirs) {
+          let m: any = null;
+          try { m = JSON.parse(await readFile(path.join(UPLOAD_TEMP_DIR, dir, "meta.json"), "utf-8")); } catch { continue; }
+          if (m?.sha256 !== sha256 || m?.userId !== authUser.userId) continue;
+          const files = await readdir(path.join(UPLOAD_TEMP_DIR, dir)).catch(() => [] as string[]);
+          const received: number[] = [];
+          for (const f of files) {
+            const mm = /^chunk_(\d+)$/.exec(f);
+            if (!mm) continue;
+            try { if ((await stat(path.join(UPLOAD_TEMP_DIR, dir, f))).size > 0) received.push(Number(mm[1])); } catch {}
+          }
+          received.sort((a, b) => a - b);
+          log("INFO", `Resuming upload by content hash: ${received.length}/${m.totalChunks} chunks held`, "upload");
+          return res.json({ ok: true, uploadId: dir, resumed: true, matchedBy: "sha256", receivedChunks: received });
+        }
+      } catch { /* fall through to the path-based match below */ }
+    }
+
     const sessionIdentity = `${authUser.userId}|${relRaw}|${filenameRaw}|${totalSizeEarly}|${totalChunks}`;
     try {
       const existingDirs = await readdir(UPLOAD_TEMP_DIR).catch(() => [] as string[]);
@@ -18100,7 +18533,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         root: requestedRoot,
         totalChunks,
         totalSize,
-        userId: authUser.userId
+        userId: authUser.userId,
+        // Recorded so a later attempt can match this session by content even
+        // if the file is renamed or moved between tries.
+        sha256: sha256 || null,
       };
       await writeFile(path.join(tempUploadDir, "meta.json"), JSON.stringify(meta, null, 2));
       return res.json({ ok: true, uploadId });
