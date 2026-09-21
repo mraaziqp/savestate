@@ -21,6 +21,92 @@ import chokidar from "chokidar";
 import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 
+// ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
+// Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
+// tokens — were stored as plaintext in .nexus-data/*.json and in Neon. Anyone
+// with a copy of a backup, or read access to the database, had the keys.
+//
+// GCM rather than CBC because these values are read back and used verbatim:
+// the auth tag makes tampering detectable instead of silently yielding a
+// corrupted key. A random 12-byte IV per value means encrypting the same key
+// twice never produces the same ciphertext.
+//
+// The key is derived with scrypt from NEXUS_ENCRYPTION_KEY, falling back to
+// JWT_SECRET so an existing deployment keeps working without new config. That
+// fallback is why rotating JWT_SECRET also invalidates stored secrets — call
+// that out rather than let it surprise someone.
+// ── Emulator BIOS requirements ──────────────────────────────────────────────
+// Shared by the launch interceptor and the readiness dashboard. Previously this
+// table lived inside the readiness endpoint, so the launch path had no idea a
+// platform needed a BIOS at all — a PS1 game with no BIOS launched RetroArch,
+// which died on its own with nothing useful surfaced to the player.
+//
+// "anyOf": regional variants are interchangeable, so any one of them satisfies
+// the requirement. "required: false" means the core boots without it.
+const REQUIRED_BIOS: Record<string, { anyOf: string[]; required: boolean; label: string }> = {
+  ps1:    { anyOf: ["scph5501.bin", "scph5500.bin", "scph5502.bin", "scph1001.bin"], required: true,  label: "PlayStation" },
+  ps2:    { anyOf: ["scph70012.bin", "scph39001.bin", "scph30004r.bin"],             required: true,  label: "PlayStation 2" },
+  saturn: { anyOf: ["saturn_bios.bin", "sega_101.bin", "mpr-17933.bin"],             required: true,  label: "Saturn" },
+  nds:    { anyOf: ["bios7.bin"],                                                    required: true,  label: "Nintendo DS" },
+  segacd: { anyOf: ["bios_cd_u.bin", "bios_cd_e.bin", "bios_cd_j.bin"],              required: true,  label: "Sega CD" },
+  gba:    { anyOf: ["gba_bios.bin"],                                                 required: false, label: "Game Boy Advance" },
+};
+
+const SECRET_ENC_PREFIX = "enc:v1:";
+let _secretKey: Buffer | null = null;
+
+function secretKey(): Buffer {
+  if (_secretKey) return _secretKey;
+  const material = process.env.NEXUS_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "";
+  if (!material) {
+    throw new Error("No NEXUS_ENCRYPTION_KEY or JWT_SECRET — refusing to store secrets unencrypted");
+  }
+  // Fixed salt: the key must be derivable identically on every boot, and the
+  // material is already high-entropy, so a per-value salt would buy nothing
+  // here but would break decryption across restarts.
+  _secretKey = crypto.scryptSync(material, "nexus-secret-v1", 32);
+  return _secretKey;
+}
+
+/** Encrypt a secret for storage. Empty input stays empty. */
+function encryptSecret(plain: string | null | undefined): string {
+  const v = String(plain ?? "");
+  if (!v) return "";
+  if (v.startsWith(SECRET_ENC_PREFIX)) return v;   // already encrypted
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv("aes-256-gcm", secretKey(), iv);
+  const enc = Buffer.concat([c.update(v, "utf8"), c.final()]);
+  const tag = c.getAuthTag();
+  return SECRET_ENC_PREFIX + [iv.toString("base64"), tag.toString("base64"), enc.toString("base64")].join(".");
+}
+
+/**
+ * Decrypt a stored secret.
+ *
+ * A value without the prefix is returned as-is: existing rows were written in
+ * plaintext and must keep working until they are rewritten. That is what makes
+ * this migration transparent rather than a flag day.
+ */
+function decryptSecret(stored: string | null | undefined): string {
+  const v = String(stored ?? "");
+  if (!v || !v.startsWith(SECRET_ENC_PREFIX)) return v;
+  try {
+    const [ivB, tagB, dataB] = v.slice(SECRET_ENC_PREFIX.length).split(".");
+    const d = crypto.createDecipheriv("aes-256-gcm", secretKey(), Buffer.from(ivB, "base64"));
+    d.setAuthTag(Buffer.from(tagB, "base64"));
+    return Buffer.concat([d.update(Buffer.from(dataB, "base64")), d.final()]).toString("utf8");
+  } catch {
+    // Wrong key or tampered payload. Returning "" makes the caller behave as
+    // "not configured" rather than sending a corrupted key to a third party.
+    return "";
+  }
+}
+
+/** True when a value is already stored encrypted. */
+function isEncryptedSecret(v: string | null | undefined): boolean {
+  return String(v ?? "").startsWith(SECRET_ENC_PREFIX);
+}
+
 // ── Drive Recovery Layer (added 2026-09-20) ─────────────────────────────────
 // "/media/moh/EMULATION dRIVE" was physically destroyed. Every hardcoded
 // reference to that mount point has been replaced by the OS-agnostic paths
@@ -6163,24 +6249,64 @@ async function startServer() {
         }).catch(() => {});
       }
 
-      // Prune stale entries that no longer exist on disk so counts stay accurate.
+      // Entries whose file was not seen in this scan.
+      //
+      // This used to DELETE them outright, which was safe only while every ROM
+      // lived on one always-present local disk. It is catastrophic now: the
+      // library is cloud-first and most ROM files were lost with the media
+      // drive, so a single scan wiped 8,651 rows — every title, box art,
+      // playtime and rating — and cascaded into user_game_progress,
+      // user_achievements, user_favorites and user_ratings. The metadata is the
+      // valuable part and it is NOT recoverable from the files, which is
+      // exactly backwards from what the old behaviour assumed.
+      //
+      // Default is now to FLAG rather than delete. A missing file means the
+      // title needs re-downloading, not that the user never owned it. Pass
+      // { prune: true } to really delete.
       const scannedIds = roms.map((r) => crypto.createHash("md5").update(r.relativePath).digest("hex"));
-      let removed = 0;
+      const hardPrune = (req.body as any)?.prune === true;
+      let removed = 0, flagged = 0;
       if (dbConnected && pool) {
         try {
-          const del = await pool.query(
-            "DELETE FROM games WHERE NOT (id = ANY($1::text[]))",
-            [scannedIds]
-          );
-          removed = Number(del.rowCount ?? 0);
+          if (hardPrune) {
+            const del = await pool.query(
+              "DELETE FROM games WHERE NOT (id = ANY($1::text[]))",
+              [scannedIds]
+            );
+            removed = Number(del.rowCount ?? 0);
+            log("WARN", `Hard prune removed ${removed} game row(s) — metadata is gone`, "scanner");
+          } else {
+            const upd = await pool.query(
+              `UPDATE games SET sync_status='missing_media', updated_at=NOW()
+                WHERE NOT (id = ANY($1::text[])) AND sync_status IS DISTINCT FROM 'missing_media'`,
+              [scannedIds]
+            );
+            flagged = Number(upd.rowCount ?? 0);
+            // Anything found again is back; clear the flag so it becomes playable.
+            await pool.query(
+              `UPDATE games SET sync_status='synced', updated_at=NOW()
+                WHERE id = ANY($1::text[]) AND sync_status='missing_media'`,
+              [scannedIds]
+            ).catch(() => {});
+          }
         } catch (e) {
-          log("WARN", `Stale game prune failed: ${String(e)}`, "scanner");
+          log("WARN", `Stale game sweep failed: ${String(e)}`, "scanner");
         }
       } else {
-        const before = mem.games.length;
         const keep = new Set(scannedIds);
-        mem.games = mem.games.filter((g) => keep.has(g.id));
-        removed = Math.max(0, before - mem.games.length);
+        if (hardPrune) {
+          const before = mem.games.length;
+          mem.games = mem.games.filter((g) => keep.has(g.id));
+          removed = Math.max(0, before - mem.games.length);
+        } else {
+          for (const g of mem.games) {
+            if (!keep.has(g.id) && (g as any).syncStatus !== 'missing_media') {
+              (g as any).syncStatus = 'missing_media'; flagged++;
+            } else if (keep.has(g.id) && (g as any).syncStatus === 'missing_media') {
+              (g as any).syncStatus = 'synced';
+            }
+          }
+        }
       }
 
       // Write manifest
@@ -6202,9 +6328,9 @@ async function startServer() {
         log("INFO", "nexus-vault.json manifest written", "vault");
       } catch { /* read-only drive */ }
 
-      log("INFO", `Scan complete — ${added.length} new, ${reclassified} reclassified, ${removed} removed`, "scanner");
+      log("INFO", `Scan complete — ${added.length} new, ${reclassified} reclassified, ${flagged} flagged missing, ${removed} removed`, "scanner");
       persistHostStateNow().catch(() => {});
-      res.json({ scanned: roms.length, added: added.length, reclassified, removed, games: added });
+      res.json({ scanned: roms.length, added: added.length, reclassified, flagged, removed, games: added });
     } catch (err) {
       log("ERROR", `Vault scan error: ${err}`, "scanner");
       res.status(500).json({ error: String(err) });
@@ -7054,6 +7180,38 @@ async function startServer() {
     const coreInfo = PLATFORM_CORES[game.platform ?? "unknown"] ?? PLATFORM_CORES.unknown;
     const launchUserId = String((req as any).authPayload?.userId ?? "shared");
 
+    // ── BIOS interceptor ──────────────────────────────────────────────────
+    // A platform that needs a BIOS used to launch anyway and die inside the
+    // emulator, which surfaced as a blank screen or a generic crash. Answer
+    // 202 instead: the launch has not failed, it is waiting on the player to
+    // supply a file. The client pauses its loading screen and shows the
+    // upload prompt, then retries this same call.
+    const biosReq = REQUIRED_BIOS[String(game.platform ?? "").toLowerCase()];
+    if (biosReq?.required) {
+      let present: string[] = [];
+      if (config.bios_path) {
+        present = await readdir(config.bios_path).catch(() => [] as string[]);
+      }
+      const lower = new Set(present.map((f) => f.toLowerCase()));
+      const satisfied = biosReq.anyOf.some((f) => lower.has(f.toLowerCase()));
+      if (!satisfied) {
+        log("INFO", `Launch paused: ${biosReq.label} BIOS missing for "${game.title}"`, "launcher");
+        return res.status(202).json({
+          success: false,
+          requires_action: "upload_bios",
+          platform: game.platform,
+          platform_label: biosReq.label,
+          // Any ONE of these satisfies the requirement.
+          accepted_filenames: biosReq.anyOf,
+          bios_path: config.bios_path || null,
+          upload_url: "/api/emulator/bios/upload",
+          message: config.bios_path
+            ? `${biosReq.label} needs a BIOS file before it can start. Drop in any one of: ${biosReq.anyOf.join(", ")}.`
+            : `${biosReq.label} needs a BIOS file, and no BIOS folder is configured yet. Set one in Vault Manager, then upload any one of: ${biosReq.anyOf.join(", ")}.`,
+        });
+      }
+    }
+
     if (emulatorExe.toLowerCase().includes("retroarch")) {
       // Use snap-aware cores dir instead of path.dirname(exe)/cores
       const coresDir = await getCoresDir();
@@ -7762,6 +7920,35 @@ async function startServer() {
    * Forward gamepad/keyboard input to the running RetroArch process via PowerShell SendKeys.
    * Body: { keys: string[] }  e.g. ["up"], ["a"], ["start"]
    */
+  /**
+   * Deliver emulator keystrokes to whatever is running on the host.
+   *
+   * Extracted from POST /api/stream/input so the Remote Play socket can reuse
+   * the exact same delivery path — two implementations of key mapping would
+   * drift, and the streamed-input path is timing sensitive enough that a
+   * second copy running slightly different xdotool batching would be a real
+   * behavioural difference, not a cosmetic one.
+   */
+  async function deliverRemoteInput(keys: string[]): Promise<{ ok: boolean; error?: string }> {
+    if (!Array.isArray(keys) || keys.length === 0) return { ok: true };
+    if (process.platform === "linux") {
+      if (xdotoolAvailable === null) {
+        xdotoolAvailable = await execAsync("which xdotool").then(() => true).catch(() => false);
+        if (!xdotoolAvailable) log("WARN", "xdotool not found on host — remote input will not work until it's installed", "stream");
+      }
+      if (!xdotoolAvailable) {
+        return { ok: false, error: "xdotool is not installed on the host — remote input can't be delivered. Install it (e.g. `sudo apt install xdotool`) and try again." };
+      }
+      const m: Record<string, string> = { up: "Up", down: "Down", left: "Left", right: "Right", a: "z", b: "x", start: "Return", select: "space" };
+      const xdoKeys = keys.map((k) => m[String(k).toLowerCase()] ?? String(k)).filter(Boolean);
+      if (!xdoKeys.length) return { ok: true };
+      await execAsync(`xdotool key ${xdoKeys.join(" ")}`)
+        .catch((err) => log("WARN", `xdotool keys '${xdoKeys.join(" ")}' failed: ${err}`, "stream"));
+      return { ok: true };
+    }
+    return { ok: true };
+  }
+
   app.post("/api/stream/input", async (req, res) => {
     const { keys } = req.body as { keys: string[] };
     if (!Array.isArray(keys) || keys.length === 0) return res.json({ ok: true });
@@ -7802,29 +7989,101 @@ async function startServer() {
       ].join("; ");
       await execAsync(`powershell -NoProfile -Command "${script}"`, { timeout: 3000 }).catch(() => {});
     } else if (process.platform === "linux") {
-      // Swallowing xdotool failures here used to mean every remote-input
-      // keystroke silently no-op'd forever with no signal to the player
-      // that the host is missing the binary — surface it once instead.
-      if (xdotoolAvailable === null) {
-        xdotoolAvailable = await execAsync("which xdotool").then(() => true).catch(() => false);
-        if (!xdotoolAvailable) log("WARN", "xdotool not found on host — remote input (stream mode) will not work until it's installed", "stream");
-      }
-      if (!xdotoolAvailable) {
-        return res.status(422).json({ ok: false, error: "xdotool is not installed on the host — remote input can't be delivered. Install it (e.g. `sudo apt install xdotool`) and try again." });
-      }
-      const xdoKeys = keys.map((k: string) => {
-        const m: Record<string, string> = { up: "Up", down: "Down", left: "Left", right: "Right", a: "z", b: "x", start: "Return", select: "space" };
-        return m[k] ?? k;
-      });
-      // One xdotool invocation for the whole batch instead of one process
-      // spawn per key — this is a per-frame streamed-input path, and each
-      // separate spawn/exec adds tens of ms that don't parallelize away
-      // since they were previously awaited one at a time.
-      await execAsync(`xdotool key ${xdoKeys.join(" ")}`).catch((err) => log("WARN", `xdotool keys '${xdoKeys.join(" ")}' failed: ${err}`, "stream"));
+      // Single implementation, shared with the Remote Play socket.
+      const r = await deliverRemoteInput(keys);
+      if (!r.ok) return res.status(422).json({ ok: false, error: r.error });
     }
 
     res.json({ ok: true });
   });
+
+  // ── Remote Play ───────────────────────────────────────────────────────────
+  // The client (RemotePlay bundle) expects:
+  //   POST /api/remote-play/start -> { ok, wsUrl, session: { streamFeedUrl } }
+  //   then opens a WebSocket at wsUrl and pushes controller input down it
+  //   POST /api/remote-play/stop  -> fire and forget
+  //
+  // These three were missing entirely — every attempt to start Remote Play hit
+  // the JSON 404 and surfaced as "No such API route". Video already works via
+  // the existing MJPEG feed at /api/stream/feed; what was absent is the session
+  // handshake and the input channel, so that is what this adds. Input is
+  // delivered through deliverRemoteInput(), the same path POST
+  // /api/stream/input uses.
+  type RemotePlaySession = {
+    id: string; userId: string; username: string;
+    startedAt: number; lastSeen: number; sockets: Set<any>;
+  };
+  const remotePlaySessions = new Map<string, RemotePlaySession>();
+  const REMOTE_PLAY_WS_PATH = "/ws/remote-play";
+  // A forgotten tab must not hold a session open forever.
+  const REMOTE_PLAY_IDLE_MS = 10 * 60_000;
+
+  function remotePlaySessionFor(userId: string) {
+    for (const s of remotePlaySessions.values()) if (s.userId === userId) return s;
+    return null;
+  }
+
+  app.post("/api/remote-play/start", express.json(), async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+
+    // Reuse an existing session for this user rather than stacking them up:
+    // reconnecting after a dropped socket is the common case.
+    let session = remotePlaySessionFor(auth.userId);
+    if (!session) {
+      session = {
+        id: crypto.randomBytes(9).toString("hex"),
+        userId: auth.userId, username: auth.username,
+        startedAt: Date.now(), lastSeen: Date.now(), sockets: new Set(),
+      };
+      remotePlaySessions.set(session.id, session);
+      log("INFO", `Remote Play session ${session.id} opened for ${auth.username}`, "stream");
+    } else {
+      session.lastSeen = Date.now();
+    }
+
+    const input = process.platform === "linux"
+      ? (xdotoolAvailable === false ? "unavailable" : "xdotool")
+      : (process.platform === "win32" ? "sendkeys" : "unavailable");
+
+    res.json({
+      ok: true,
+      // Token goes on the query string because the browser WebSocket API
+      // cannot set an Authorization header.
+      wsUrl: `${REMOTE_PLAY_WS_PATH}?session=${encodeURIComponent(session.id)}`,
+      session: {
+        id: session.id,
+        startedAt: session.startedAt,
+        streamFeedUrl: "/api/stream/feed",
+        input,
+      },
+    });
+  });
+
+  app.post("/api/remote-play/stop", express.json(), async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    const session = remotePlaySessionFor(auth.userId);
+    if (session) {
+      for (const ws of session.sockets) { try { ws.close(); } catch { /* already gone */ } }
+      remotePlaySessions.delete(session.id);
+      log("INFO", `Remote Play session ${session.id} closed`, "stream");
+    }
+    res.json({ ok: true });
+  });
+
+  app.get("/api/remote-play/sessions", async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    res.json({
+      sessions: [...remotePlaySessions.values()].map((s) => ({
+        id: s.id, username: s.username,
+        startedAt: s.startedAt, lastSeen: s.lastSeen, sockets: s.sockets.size,
+      })),
+    });
+  });
+
 
   // ── PC GAME LIBRARY (Steam / Epic / GOG / Xbox / Lutris / Heroic) ───────────
 
@@ -8934,15 +9193,36 @@ async function startServer() {
   const ARR_CFG_FILE = path.join(PERSIST_DIR, 'arr-config.json');
   const ARR_CFG_LEGACY_FILE = path.join(LEGACY_PERSIST_DIR, 'arr-config.json');
   type ArrConfig = { radarrUrl: string; radarrApiKey: string; sonarrUrl: string; sonarrApiKey: string };
+  /** Single writer for the Arr config — always encrypts the keys. */
+  async function saveArrConfig(cfg: ArrConfig): Promise<void> {
+    await mkdir(PERSIST_DIR, { recursive: true });
+    await writeFile(ARR_CFG_FILE, JSON.stringify({
+      radarrUrl: cfg.radarrUrl,
+      radarrApiKey: encryptSecret(cfg.radarrApiKey),
+      sonarrUrl: cfg.sonarrUrl,
+      sonarrApiKey: encryptSecret(cfg.sonarrApiKey),
+    }, null, 2), 'utf8');
+  }
+
   async function loadArrConfig(): Promise<ArrConfig | null> {
     try {
       const parsed = JSON.parse(await readFile(ARR_CFG_FILE, 'utf8')) as Partial<ArrConfig>;
-      return {
+      const cfg: ArrConfig = {
         radarrUrl: normalizeServiceUrl(String(parsed.radarrUrl ?? '')),
-        radarrApiKey: String(parsed.radarrApiKey ?? ''),
+        radarrApiKey: decryptSecret(parsed.radarrApiKey),
         sonarrUrl: normalizeServiceUrl(String(parsed.sonarrUrl ?? '')),
-        sonarrApiKey: String(parsed.sonarrApiKey ?? ''),
+        sonarrApiKey: decryptSecret(parsed.sonarrApiKey),
       };
+      // Transparent migration: a file still holding plaintext keys is rewritten
+      // encrypted the first time it is read, so nobody has to run anything.
+      const needsMigration =
+        (cfg.radarrApiKey && !isEncryptedSecret(parsed.radarrApiKey)) ||
+        (cfg.sonarrApiKey && !isEncryptedSecret(parsed.sonarrApiKey));
+      if (needsMigration) {
+        await saveArrConfig(cfg).catch(() => {});
+        log('INFO', 'Encrypted Sonarr/Radarr API keys at rest (were plaintext)', 'security');
+      }
+      return cfg;
     } catch {
       // Portable migration path: keep existing Arr config from legacy APPDATA if present.
       if (ARR_CFG_LEGACY_FILE !== ARR_CFG_FILE) {
@@ -8950,12 +9230,11 @@ async function startServer() {
           const legacy = JSON.parse(await readFile(ARR_CFG_LEGACY_FILE, 'utf8')) as ArrConfig;
           const normalized: ArrConfig = {
             radarrUrl: normalizeServiceUrl(legacy.radarrUrl ?? ''),
-            radarrApiKey: String(legacy.radarrApiKey ?? ''),
+            radarrApiKey: decryptSecret(legacy.radarrApiKey),
             sonarrUrl: normalizeServiceUrl(legacy.sonarrUrl ?? ''),
-            sonarrApiKey: String(legacy.sonarrApiKey ?? ''),
+            sonarrApiKey: decryptSecret(legacy.sonarrApiKey),
           };
-          await mkdir(PERSIST_DIR, { recursive: true });
-          await writeFile(ARR_CFG_FILE, JSON.stringify(normalized, null, 2), 'utf8').catch(() => {});
+          await saveArrConfig(normalized).catch(() => {});
           return normalized;
         } catch {
           return null;
@@ -9152,7 +9431,7 @@ async function startServer() {
         ? body.sonarrApiKey
         : (prev?.sonarrApiKey ?? ''),
     };
-    await writeFile(ARR_CFG_FILE, JSON.stringify(next, null, 2));
+    await saveArrConfig(next);
     const [radarrConnected, sonarrConnected] = await Promise.all([
       pingArr(next.radarrUrl, next.radarrApiKey),
       pingArr(next.sonarrUrl, next.sonarrApiKey),
@@ -15331,13 +15610,6 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const browserBiosFilesLower = new Set(browserBiosFiles.map((f) => f.toLowerCase()));
     // required: at least one of these must be present or the platform can't boot.
     // optional: nice to have (boot logo, RTC) but most cores run fine without it.
-    const REQUIRED_BIOS: Record<string, { anyOf: string[]; required: boolean }> = {
-      ps1:    { anyOf: ["scph5501.bin", "scph5500.bin", "scph5502.bin", "scph1001.bin"], required: true },
-      saturn: { anyOf: ["saturn_bios.bin", "sega_101.bin", "mpr-17933.bin"], required: true },
-      nds:    { anyOf: ["bios7.bin"], required: true },
-      segacd: { anyOf: ["bios_cd_u.bin", "bios_cd_e.bin", "bios_cd_j.bin"], required: true },
-      gba:    { anyOf: ["gba_bios.bin"], required: false },
-    };
     const platformsInLibrary = new Set(mem.games.map((g) => (g.platform ?? "").toLowerCase()));
     const browserBiosPerPlatform: Record<string, { ok: boolean; required: boolean; checkedFor: string[] }> = {};
     for (const [platform, req] of Object.entries(REQUIRED_BIOS)) {
@@ -24613,6 +24885,53 @@ Format as JSON:
 
   // WebSocket — Co-Op signaling, controller input, join approval, WebRTC relay
   const coopWss = new WebSocketServer({ noServer: true });
+
+  // Remote Play input socket. Declared here rather than beside the Remote
+  // Play HTTP routes because WebSocketServer is dynamically imported further
+  // down startServer(); constructing one earlier hits the temporal dead zone
+  // and kills boot with "Cannot access 'WebSocketServer' before initialization".
+  const remotePlayWss = new WebSocketServer({ noServer: true });
+  remotePlayWss.on("connection", (ws: any, req: any) => {
+    const url = new URL(req.url ?? "", "http://localhost");
+    const session = remotePlaySessions.get(String(url.searchParams.get("session") ?? ""));
+    if (!session) { try { ws.close(4004, "Unknown session"); } catch {} return; }
+
+    session.sockets.add(ws);
+    trackWebSocket(ws);
+    try { ws.send(JSON.stringify({ type: "ready", sessionId: session.id })); } catch {}
+
+    ws.on("message", async (raw: any) => {
+      session.lastSeen = Date.now();
+      let msg: any;
+      try { msg = JSON.parse(String(raw)); } catch { return; }
+      if (msg?.type === "ping") { try { ws.send(JSON.stringify({ type: "pong" })); } catch {} return; }
+
+      // Accept both {keys:[...]} and a single {key:"a"} so the shape the
+      // client happens to use does not silently do nothing.
+      const keys: string[] = Array.isArray(msg?.keys) ? msg.keys
+        : (typeof msg?.key === "string" ? [msg.key]
+        : (Array.isArray(msg?.buttons) ? msg.buttons : []));
+      if (!keys.length) return;
+
+      const r = await deliverRemoteInput(keys.map(String));
+      if (!r.ok) { try { ws.send(JSON.stringify({ type: "error", error: r.error })); } catch {} }
+    });
+
+    const drop = () => { session.sockets.delete(ws); };
+    ws.on("close", drop);
+    ws.on("error", drop);
+  });
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [id, s] of remotePlaySessions) {
+      if (s.sockets.size === 0 && now - s.lastSeen > REMOTE_PLAY_IDLE_MS) {
+        remotePlaySessions.delete(id);
+        log("INFO", `Remote Play session ${id} expired (idle)`, "stream");
+      }
+    }
+  }, 60_000).unref?.();
+
   coopWss.on("connection", (ws: any, req: any) => {
     trackWebSocket(ws);
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -25208,6 +25527,8 @@ Format as JSON:
       wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
     } else if (pathname === "/ws/coop") {
       coopWss.handleUpgrade(req, socket, head, ws => coopWss.emit("connection", ws, req));
+    } else if (pathname === REMOTE_PLAY_WS_PATH) {
+      remotePlayWss.handleUpgrade(req, socket, head, ws => remotePlayWss.emit("connection", ws, req));
     } else {
       socket.destroy();
     }
