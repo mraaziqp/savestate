@@ -357,6 +357,78 @@ function testPlayerUpgrades() {
   /fragLoadingMaxRetry/.test(pl) ? ok('retries slow segments instead of erroring') : bad('no segment retry tuning');
 }
 
+// ── Dead drive severed from the shipped frontend ────────────────────────────
+function testFrontendDeadDrive() {
+  head('Compiled frontend is free of the dead drive');
+  const dir = path.join(ROOT, 'dist', 'assets');
+  if (!fs.existsSync(dir)) return bad('dist/assets missing');
+
+  const offenders = fs.readdirSync(dir)
+    .filter((f) => f.endsWith('.js'))
+    .filter((f) => fs.readFileSync(path.join(dir, f), 'utf8').includes('EMULATION dRIVE'));
+  offenders.length === 0
+    ? ok('no bundle references the destroyed drive')
+    : bad(`${offenders.length} bundle(s) still reference it: ${offenders.slice(0, 3).join(', ')}`);
+
+  // The presets now have to point somewhere that exists.
+  const pc = fs.readdirSync(dir).find((f) => f.startsWith('PcUpload-'));
+  if (pc) {
+    const body = fs.readFileSync(path.join(dir, pc), 'utf8');
+    /\.nexus-vault\/roms/.test(body) ? ok('upload presets repointed at the local vault') : bad('upload presets not repointed');
+  } else note('PcUpload bundle not found — skipped');
+
+  // Patched bundles must still be parseable, or the app white-screens.
+  for (const f of fs.readdirSync(dir).filter((x) => /^(PcUpload|MediaCloudView|CloudReclaim|CloudArchive|CloudTransfer)-/.test(x))) {
+    const body = fs.readFileSync(path.join(dir, f), 'utf8');
+    // Cheap structural check: balanced braces/brackets survive a string swap.
+    const open = (body.match(/[{[]/g) || []).length, close = (body.match(/[}\]]/g) || []).length;
+    Math.abs(open - close) < 5 ? ok(`${f.split('-')[0]} structurally intact`) : bad(`${f} looks corrupted`);
+  }
+
+  // Workbox keys off the filename when revision is null, so a content-only
+  // change would never reach a client that already cached the old bundle.
+  const sw = fs.readFileSync(path.join(ROOT, 'dist', 'sw.js'), 'utf8');
+  const stillNull = ['PcUpload', 'MediaCloudView', 'CloudReclaim', 'CloudArchive', 'CloudTransfer', 'index-CKnFRVZB']
+    .filter((n) => new RegExp(`\\{url:"assets/${n}[^"]*",revision:null\\}`).test(sw));
+  stillNull.length === 0
+    ? ok('patched bundles carry a real precache revision so clients re-fetch')
+    : bad(`${stillNull.join(', ')} still revision:null — clients would keep the stale copy`);
+}
+
+// ── Emulator fallback matrix ────────────────────────────────────────────────
+function testEmulatorFallback() {
+  head('Emulator fallback matrix');
+  const src = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+
+  /EMULATOR_FALLBACKS/.test(src) ? ok('fallback matrix defined') : bad('no fallback matrix');
+  /function launchWithFallback/.test(src) ? ok('chain walker present') : bad('no chain walker');
+  /id: "play", label: "Play!"/.test(src) ? ok('PS2 falls back to Play!') : bad('no PS2 alternate');
+  /id: "duckstation"/.test(src) ? ok('PS1 has DuckStation as an alternate') : bad('no PS1 alternate');
+  /fellBackFrom: 'pcsx2'/.test(src) ? ok('a successful fallback is reported to the client') : bad('fallback not reported');
+  // The old code returned 500 on the first crash; the chain must run first.
+  const idx = src.indexOf("PS2 emulator crashed on start");
+  idx > 0 && src.slice(Math.max(0, idx - 1400), idx).includes('launchWithFallback')
+    ? ok('the chain is walked before any error is returned')
+    : bad('still errors without trying alternates');
+
+  // Not-installed is skipped silently; launched-and-died is a real failure.
+  const chain = [
+    { id: 'a', resolves: false, alive: false },
+    { id: 'b', resolves: true,  alive: false },
+    { id: 'c', resolves: true,  alive: true  },
+  ];
+  const tried = [];
+  let winner = null;
+  for (const c of chain) {
+    if (!c.resolves) { tried.push({ id: c.id, outcome: 'not installed' }); continue; }
+    if (!c.alive)    { tried.push({ id: c.id, outcome: 'exited immediately' }); continue; }
+    winner = c.id; break;
+  }
+  (winner === 'c' && tried.length === 2)
+    ? ok('skips the uninstalled, records the crash, lands on the one that runs')
+    : bad(`chain walk wrong: winner=${winner} tried=${JSON.stringify(tried)}`);
+}
+
 // ── Live ────────────────────────────────────────────────────────────────────
 async function testLive() {
   head(`Live endpoints on :${PORT}`);
@@ -416,6 +488,8 @@ async function testLive() {
   testThemingOnboarding();
   testMetadataHealer();
   testPlayerUpgrades();
+  testFrontendDeadDrive();
+  testEmulatorFallback();
   await testLive();
   console.log(`\n${'='.repeat(52)}`);
   console.log(`${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}`);

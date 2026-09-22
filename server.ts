@@ -6993,7 +6993,120 @@ async function startServer() {
       });
     }
 
-    // ── PS2: use pcsx2 RetroArch core (installed) or standalone PCSX2 ─────
+    // ── Emulator fallback matrix ──────────────────────────────────────────────
+  // A platform usually has more than one emulator that can run it, but the
+  // launch path committed to exactly one and returned a 500 if it failed. PS2
+  // is the clearest case: a pcsx2_libretro core that SIGABRTs on this machine's
+  // OpenGL stack made the game unplayable even though standalone PCSX2 — or
+  // Play! — would have run it.
+  //
+  // Each entry is tried in order and the first that both EXISTS and actually
+  // stays alive wins. A candidate that is simply not installed is skipped
+  // silently; only a candidate that launches and dies counts as a failure
+  // worth reporting.
+  type EmuCandidate = {
+    id: string;
+    label: string;
+    /** Resolve to a spawnable command, or null when this emulator isn't here. */
+    resolve: () => Promise<{ exe: string; args: (rom: string) => string[] } | null>;
+  };
+
+  /** Is a bare command on PATH? Used for emulators installed by a package manager. */
+  const _whichCache = new Map<string, string | null>();
+  async function whichBin(bin: string): Promise<string | null> {
+    if (_whichCache.has(bin)) return _whichCache.get(bin)!;
+    const found = await execAsync(`which ${bin}`)
+      .then((r: any) => String(r.stdout ?? "").trim() || null)
+      .catch(() => null);
+    _whichCache.set(bin, found);
+    return found;
+  }
+
+  /** A flatpak app id that is actually installed. */
+  async function flatpakApp(appId: string): Promise<string | null> {
+    const bin = `/var/lib/flatpak/exports/bin/${appId}`;
+    if (existsSync(bin)) return bin;
+    const userBin = path.join(NEXUS_HOME, ".local/share/flatpak/exports/bin", appId);
+    return existsSync(userBin) ? userBin : null;
+  }
+
+  const EMULATOR_FALLBACKS: Record<string, EmuCandidate[]> = {
+    ps2: [
+      {
+        id: "pcsx2", label: "PCSX2",
+        resolve: async () => {
+          const info = await detectPcsx2Path();
+          if (!info) return null;
+          if (info.isRetroArchCore) {
+            const retro = await detectRetroArchPath();
+            return retro ? { exe: retro, args: (rom) => ["-L", info.path, rom] } : null;
+          }
+          if (info.isWine) return { exe: "wine", args: (rom) => [info.path, "--", "-batch", rom] };
+          return { exe: info.path, args: (rom) => ["-batch", rom] };
+        },
+      },
+      {
+        // Play! is a separate PS2 emulator with a different renderer, so it
+        // often works exactly where the pcsx2 core crashes on driver issues.
+        id: "play", label: "Play!",
+        resolve: async () => {
+          const bin = (await whichBin("Play")) ?? (await whichBin("play")) ?? (await flatpakApp("org.purei.Play"));
+          return bin ? { exe: bin, args: (rom) => ["--disc", rom] } : null;
+        },
+      },
+    ],
+    ps1: [
+      {
+        id: "duckstation", label: "DuckStation",
+        resolve: async () => {
+          const bin = (await whichBin("duckstation-qt")) ?? (await whichBin("duckstation-nogui"))
+            ?? (await flatpakApp("org.duckstation.DuckStation"));
+          return bin ? { exe: bin, args: (rom) => ["-batch", rom] } : null;
+        },
+      },
+    ],
+    gamecube: [
+      {
+        id: "dolphin", label: "Dolphin",
+        resolve: async () => {
+          const bin = await detectDolphinPath();
+          return bin ? { exe: bin, args: (rom) => ["-b", "-e", rom] } : null;
+        },
+      },
+    ],
+  };
+  EMULATOR_FALLBACKS.wii = EMULATOR_FALLBACKS.gamecube;
+
+  /**
+   * Walk a platform's fallback chain and return the first emulator that starts
+   * and stays running. Returns the list of what was tried either way, so a
+   * failure can say something more useful than "it crashed".
+   */
+  async function launchWithFallback(platform: string, romPath: string, spawnEnv: any) {
+    const chain = EMULATOR_FALLBACKS[platform] ?? [];
+    const tried: { id: string; label: string; outcome: string }[] = [];
+    for (const cand of chain) {
+      let resolved: { exe: string; args: (rom: string) => string[] } | null = null;
+      try { resolved = await cand.resolve(); } catch { resolved = null; }
+      if (!resolved) { tried.push({ id: cand.id, label: cand.label, outcome: "not installed" }); continue; }
+      try {
+        const { pid, alive, stderr } = await spawnAndVerify(resolved.exe, resolved.args(romPath), spawnEnv, 3000);
+        if (alive) {
+          if (tried.length) {
+            log("INFO", `Fell back to ${cand.label} for ${platform} after ${tried.map((t) => t.label).join(", ")}`, "launcher");
+          }
+          return { ok: true as const, pid, emulator: cand.id, label: cand.label, tried };
+        }
+        tried.push({ id: cand.id, label: cand.label, outcome: `exited immediately: ${String(stderr).slice(0, 160)}` });
+        log("WARN", `${cand.label} failed to stay running for ${platform}; trying the next option`, "launcher");
+      } catch (e: any) {
+        tried.push({ id: cand.id, label: cand.label, outcome: `spawn failed: ${String(e?.message ?? e).slice(0, 160)}` });
+      }
+    }
+    return { ok: false as const, tried };
+  }
+
+  // ── PS2: use pcsx2 RetroArch core (installed) or standalone PCSX2 ─────
     if ((game.platform ?? '').toLowerCase() === 'ps2') {
       const pcsx2Info = await detectPcsx2Path();
       if (pcsx2Info && romPath) {
@@ -7043,11 +7156,30 @@ async function startServer() {
             } else {
               hint = 'PCSX2 needs a PS2 BIOS dump configured before it can run any game. Open PCSX2 itself (Settings → BIOS) and set a valid BIOS file — a SIGABRT crash with no other output almost always means PCSX2 has none configured yet. Try launching PCSX2 directly (outside NexusEmu) once to confirm it starts cleanly.';
             }
-            // Don't fall through — return a clear error so user sees it
+            // PCSX2 died. Before surfacing an error, walk the rest of the
+            // fallback chain — Play! uses a different renderer and commonly
+            // runs where the pcsx2 core hits this machine's OpenGL crash.
+            const fb = await launchWithFallback('ps2', romPath, spawnEnv);
+            if (fb.ok) {
+              const fbPayload = (req as any).authPayload as any;
+              if (fb.pid) {
+                runningEmulatorPids.set(game_id, {
+                  pid: fb.pid, startedAt: Date.now(),
+                  userId: fbPayload?.userId, title: game.title ?? game_id, platform: 'ps2',
+                });
+              }
+              log('INFO', `PS2 running via ${fb.label} (PID:${fb.pid}) — ${game.title}`, 'launcher');
+              return res.json({
+                success: true, pid: fb.pid, emulator: fb.emulator, mode: 'fallback',
+                fellBackFrom: 'pcsx2', tried: fb.tried,
+              });
+            }
+            // Every option is exhausted — now the error is real.
             return res.status(500).json({
               success: false,
               error: `PS2 emulator crashed on start: ${stderr || 'check BIOS and core'}`,
               hint,
+              tried: fb.tried,
               options: { canDownload: true, canStream: false, canLaunchLocal: false, canPlayInBrowser: false },
             });
           }
