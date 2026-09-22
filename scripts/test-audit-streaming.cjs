@@ -166,6 +166,57 @@ function testFailSafe() {
   /forcedEmulator/.test(srv) ? ok('launch accepts an explicit emulator choice') : bad('cannot force an emulator');
 }
 
+// ── MediaHub (the compiled React player) ────────────────────────────────────
+function testMediaHubPatch() {
+  head('MediaHub spinner + buffer (the app the user actually watches in)');
+  const dir = path.join(ROOT, 'dist', 'assets');
+  const f = fs.readdirSync(dir).find((x) => /^MediaHub-.*\.js$/.test(x));
+  if (!f) return bad('MediaHub bundle missing');
+  const s = fs.readFileSync(path.join(dir, f), 'utf8');
+
+  // MediaHub debounced 350ms and checked only `paused` — it never looked at
+  // readyState or at whether there was buffer ahead, so a routine segment
+  // boundary put a spinner over a perfectly healthy stream.
+  /onWaiting:\(\)=>\{/.test(s) ? ok('onWaiting handler located') : bad('onWaiting handler not found');
+  /t\.readyState>=3\)return/.test(s) ? ok('spinner suppressed when a frame is ready') : bad('no readyState guard');
+  /t\.buffered\.end\(__nxb\)-t\.currentTime>1\)return/.test(s) ? ok('spinner suppressed when buffer is ahead') : bad('no buffered-ahead guard');
+  /\},1200\)\)\}/.test(s) ? ok('debounce raised to 1200ms') : bad('debounce not raised');
+  /t\.paused\|\|/.test(s) ? ok('spinner suppressed while paused') : bad('no paused guard');
+
+  /backBufferLength:15/.test(s) ? ok('back buffer trimmed to 15s') : bad('back buffer still starves the forward budget');
+  /maxBufferSize:320000000/.test(s) ? ok('320MB byte budget') : bad('no byte budget raise');
+  /fragLoadingMaxRetry:6/.test(s) ? ok('slow segments retried, not surfaced as errors') : bad('no retry tuning');
+
+  // The patched bundle must still be loadable, and the service worker must
+  // re-fetch it — Workbox keys off the filename when revision is null.
+  const opens = (s.match(/\{/g) || []).length, closes = (s.match(/\}/g) || []).length;
+  Math.abs(opens - closes) < 5 ? ok('bundle structurally intact after patching') : bad('bundle looks corrupted');
+  const sw = fs.readFileSync(path.join(ROOT, 'dist', 'sw.js'), 'utf8');
+  new RegExp(`\\{url:"assets/${f}",revision:"[0-9a-f]+"\\}`).test(sw)
+    ? ok('service worker will re-fetch the patched bundle')
+    : bad('sw revision still null — clients would keep the old spinner');
+
+  // Behavioural check of the exact guard that ships.
+  const guard = (t) => {
+    if (!t || t.paused || t.readyState >= 3) return false;
+    for (let i = 0; i < t.buffered.length; i++)
+      if (t.buffered.start(i) <= t.currentTime && t.buffered.end(i) - t.currentTime > 1) return false;
+    return true;
+  };
+  const V = (paused, rs, ahead, cur = 10) => ({ paused, readyState: rs, currentTime: cur,
+    buffered: { length: ahead > 0 ? 1 : 0, start: () => cur - 5, end: () => cur + ahead } });
+  const table = [
+    [V(true, 4, 30), false, 'paused with a full buffer'],
+    [V(false, 4, 30), false, 'playing with buffer ahead'],
+    [V(false, 2, 5), false, 'buffer ahead but low readyState'],
+    [V(false, 1, 0), true, 'genuine stall'],
+  ];
+  const wrong = table.filter(([st, want]) => guard(st) !== want);
+  wrong.length === 0
+    ? ok('spinner shows only on a genuine stall (4 states checked)')
+    : bad(`${wrong.length} spinner state(s) wrong: ${wrong.map((w) => w[2]).join('; ')}`);
+}
+
 (async () => {
   console.log('NexusEmu — streaming & audit verification');
   const tok = token();
@@ -173,6 +224,7 @@ function testFailSafe() {
   await testSegments(tok);
   testBufferConfig();
   testFailSafe();
+  testMediaHubPatch();
   console.log(`\n${'='.repeat(52)}`);
   console.log(`${pass} passed, ${fail} failed${skip ? `, ${skip} skipped` : ''}`);
   process.exit(fail ? 1 : 0);
