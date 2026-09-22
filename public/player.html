@@ -279,6 +279,12 @@ async function attach(q, resumeAt) {
       // binds in practice, so raising the seconds alone would change nothing.
       maxBufferLength: 180, maxMaxBufferLength: 360, backBufferLength: 15,
       maxBufferSize: 320 * 1000 * 1000,
+      // Independently-encoded segments leave sub-frame holes at their
+      // joins (measured: a 0.1s gap at the 0/1 boundary). hls.js defaults
+      // maxBufferHole to 0.1, so such a gap is not bridged and playback
+      // parks there, which the app reads as a dropped stream.
+      maxBufferHole: 0.8, nudgeOffset: 0.3,
+
       fragLoadingTimeOut: 60000, manifestLoadingTimeOut: 30000,
       // Segments are generated on demand, so a cold one legitimately takes a
       // couple of seconds. Retry patiently instead of treating that as failure

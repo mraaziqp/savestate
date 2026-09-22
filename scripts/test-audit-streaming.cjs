@@ -137,6 +137,10 @@ function testBufferConfig() {
   const move = (pl.match(/pointermove[\s\S]*?\}\);/) || [''])[0];
   !/currentTime\s*=/.test(move) ? ok('scrubbing does not seek on pointermove') : bad('scrubbing seeks on every move');
   /const endDrag[\s\S]*?currentTime\s*=\s*dragTo/.test(pl) ? ok('seek committed on release') : bad('no commit-on-release seek');
+
+  // Independently-encoded segments leave sub-frame holes at their joins; hls.js
+  // defaults maxBufferHole to 0.1 and a measured 0.1s gap parked playback.
+  /maxBufferHole/.test(pl) ? ok('player tolerates sub-frame gaps between segments') : bad('a 0.1s segment gap would stall playback');
 }
 
 // ── Fail-safe launcher ──────────────────────────────────────────────────────
@@ -217,10 +221,63 @@ function testMediaHubPatch() {
     : bad(`${wrong.length} spinner state(s) wrong: ${wrong.map((w) => w[2]).join('; ')}`);
 }
 
+// ── Audio decodability (the real cause of the endless loading circle) ───────
+async function testAudioDecodable(tok) {
+  head('Segment audio must be decodable by a browser');
+  const H = { Authorization: `Bearer ${tok}` };
+  const { execFileSync } = require('child_process');
+
+  const srv = fs.readFileSync(path.join(ROOT, 'server.ts'), 'utf8');
+  // 5.1 sources encoded to 6-channel AAC made Chrome fail decoder init
+  // ("kUnsupportedConfig"), which the app read as a dropped connection and
+  // looped on "Reconnecting..." forever.
+  const stereo = (srv.match(/"-ac", "2"/g) || []).length;
+  stereo >= 3 ? ok(`all ${stereo} HLS audio encodes force a stereo downmix`) : bad(`only ${stereo} encode sites downmix — 5.1 would break decoding`);
+
+  // Segments are served immutable, so changing the encoder must change the URL
+  // or browsers replay the old bytes forever.
+  /HLS_ENCODER_VERSION/.test(srv) ? ok('encoder version defined') : bad('no encoder version');
+  /ev: HLS_ENCODER_VERSION/.test(srv) ? ok('segment URLs carry the encoder version') : bad('URL does not change when the encoder does');
+
+  const lib = await fetch(`${BASE}/api/media/library`, { headers: H, signal: AbortSignal.timeout(120000) }).then((r) => r.json());
+  // Pick a genuinely multichannel source, since that is the case that broke.
+  let target = null;
+  for (const i of (lib.items || []).filter((x) => x.kind === 'video').slice(0, 40)) {
+    if (/DDP?5[. ]1|EAC3|AC3|DTS|5\.1/i.test(i.name)) { target = i; break; }
+  }
+  if (!target) return note('no multichannel source in the first 40 items');
+
+  const rel = encodeURIComponent(target.relPath);
+  const pl = await fetch(`${BASE}/api/media/hls/playlist.m3u8?rel=${rel}`, { headers: H, signal: AbortSignal.timeout(120000) });
+  const body = await pl.text();
+  /[?&]ev=\d/.test(body) ? ok('playlist emits versioned segment URLs') : bad('playlist URLs are unversioned');
+
+  const seg = await fetch(`${BASE}/api/media/hls/segment.ts?rel=${rel}&quality=auto&audio_track=0&n=0&ev=3`,
+    { headers: H, signal: AbortSignal.timeout(240000) });
+  if (!seg.ok) return bad(`segment fetch failed (${seg.status})`);
+  const tmp = path.join(os.tmpdir(), `nexus-audio-${Date.now()}.ts`);
+  fs.writeFileSync(tmp, Buffer.from(await seg.arrayBuffer()));
+  try {
+    const probe = execFileSync('ffprobe',
+      ['-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_name,channels,channel_layout',
+       '-of', 'csv=p=0', tmp], { encoding: 'utf8', timeout: 30000 }).trim();
+    const [codec, ch] = probe.split(',');
+    codec === 'aac' ? ok(`audio codec is AAC (${codec})`) : bad(`audio codec is ${codec}`);
+    // This is the assertion that matters: anything above 2 channels and Chrome
+    // refuses to build a decoder for the unknown layout ffmpeg emits.
+    Number(ch) <= 2
+      ? ok(`audio downmixed to ${ch} channel(s) — browser-decodable`)
+      : bad(`audio has ${ch} channels — Chrome will fail decoder init and loop on Reconnecting`);
+  } catch (e) {
+    note(`ffprobe unavailable: ${String(e.message).slice(0, 60)}`);
+  } finally { try { fs.unlinkSync(tmp); } catch {} }
+}
+
 (async () => {
   console.log('NexusEmu — streaming & audit verification');
   const tok = token();
   await testRanges(tok);
+  await testAudioDecodable(tok);
   await testSegments(tok);
   testBufferConfig();
   testFailSafe();

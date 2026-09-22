@@ -313,7 +313,10 @@ function testPlayerUpgrades() {
   /\/api\/media\/prewarm/.test(srv) ? ok('prewarm endpoint present') : bad('no prewarm endpoint');
   /api\/media\/prewarm/.test(pl) ? ok('player prewarms on load') : bad('player does not prewarm');
   // Changing the segment map must invalidate old cached segments.
-  /update\(`v2\|/.test(srv) ? ok('segment cache key versioned for the new map') : bad('stale segments could be served');
+  // Assert that the key IS versioned, not which version — it legitimately bumps
+  // whenever the encoder changes (v3 forced the stereo downmix).
+  const keyVer = (srv.match(/update\(`v(\d+)\|/) || [])[1];
+  keyVer ? ok(`segment cache key versioned (v${keyVer})`) : bad('stale segments could be served');
 
   // The spinner bug: it showed while paused, with a fully buffered video.
   /function playbackIsBlocked/.test(pl) ? ok('spinner gated on real blockage') : bad('spinner not gated');

@@ -5187,6 +5187,7 @@ async function startServer() {
     "/api/media/details",
     "/api/media/episode-poster",
     "/api/media/intro-markers",
+    "/api/media/prewarm",
     "/api/media/thumbnail",
     "/api/media/poster",
     "/api/media/backdrop",
@@ -19375,7 +19376,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } else {
       ffmpegArgs.push(
         "-af", "aresample=async=1:first_pts=0",
-        "-c:a", "aac", "-b:a", audioBitrate,
+        "-c:a", "aac", "-ac", "2", "-b:a", audioBitrate,
       );
     }
     ffmpegArgs.push(
@@ -19753,6 +19754,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // first few segments are short: playback starts after ~0.7s of encoding and
   // the longer segments that follow keep the per-segment overhead low for the
   // rest of the film.
+  // Bump whenever the segment encoder changes in a way that alters output
+  // bytes (codec, channel layout, segment boundaries). v3: 5.1 audio is now
+  // downmixed to stereo, because 6-channel AAC with an unknown layout made
+  // Chrome fail decoder init and loop on "Reconnecting...".
+  const HLS_ENCODER_VERSION = "3";
+
   const HLS_FAST_START_COUNT = 3;    // how many short segments at the head
   const HLS_FAST_START_SECONDS = 2;  // their length
 
@@ -19776,7 +19783,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // v2: the segment map changed, so previously cached .ts files describe
   // different time ranges and must not be reused.
   const hlsKey = (target: string, quality: string, audioTrack: number, n: number) =>
-    `${crypto.createHash("sha1").update(`v2|${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
+    `${crypto.createHash("sha1").update(`v3|${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
 
   // ── Prewarm ───────────────────────────────────────────────────────────────
   // Even with the probe cached and short head segments, the very first segment
@@ -19789,8 +19796,6 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // forget: the response says "started", not "done".
   const prewarmed = new Map<string, number>();
   app.post("/api/media/prewarm", express.json(), async (req, res) => {
-    const auth = requireAnyAuth(req, res);
-    if (!auth) return;
     const rel = String(req.body?.rel ?? req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
     const target = resolveMediaTarget(rel);
@@ -19830,8 +19835,15 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             "-ss", String(sb.start), "-i", target, "-t", String(sb.dur),
             "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
             ...enc.post,
+            // 5.1 sources (this library is full of E-AC3/AC3 DDP5.1) were encoded to
+            // SIX-channel AAC with an unknown layout, which Chrome refuses to
+            // build a decoder for: "audio decoder initialization failed,
+            // kUnsupportedConfig". The element then raised MEDIA_ERR_DECODE, the
+            // player treated it as a dropped connection and looped on
+            // "Reconnecting..." forever. Downmix to stereo, which every browser
+            // decodes -- the same thing /api/media/stream already did.
             "-af", "aresample=async=1:first_pts=0",
-            "-c:a", "aac", "-b:a", "160k",
+            "-c:a", "aac", "-ac", "2", "-b:a", "160k",
             "-output_ts_offset", String(sb.start),
             "-muxdelay", "0", "-muxpreload", "0",
             "-f", "mpegts", "pipe:1",
@@ -19880,6 +19892,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const qs = (n: number) => {
       const u = new URLSearchParams({
         rel, quality, audio_track: String(audioTrack), n: String(n),
+        // Encoder version. Segments are immutable per URL, so this is what
+        // makes a client fetch freshly-encoded bytes instead of replaying a
+        // cached segment built by an older encoder.
+        ev: HLS_ENCODER_VERSION,
       });
       if (token) u.set("token", token);
       return u.toString();
@@ -19968,7 +19984,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
           ...encB.post,
           "-af", "aresample=async=1:first_pts=0",
-          "-c:a", "aac", "-b:a", "160k",
+          "-c:a", "aac", "-ac", "2", "-b:a", "160k",
           "-output_ts_offset", String(segStart),
           "-muxdelay", "0", "-muxpreload", "0",
           "-f", "mpegts", "pipe:1",
@@ -20011,14 +20027,24 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // ~30s ahead of the player — the margin that keeps a seek from stalling.
     const PREFETCH_SEGMENTS = Number(process.env.NEXUS_HLS_PREFETCH ?? 5);
     const prefetchAhead = (from: number) => {
-      for (let i = 1; i <= PREFETCH_SEGMENTS; i++) {
-        const nn = from + i;
-        if (nn >= count) break;             // past the end of the film
-        const kk = hlsKey(target, quality, audioTrack, nn);
-        if (hlsInFlight.has(kk)) continue;
-        if (hlsInFlight.size >= 8) break;   // server is already busy enough
-        void buildSegment(nn).catch(() => { /* speculative — failure is not an error */ });
-      }
+      // Prefetch sequentially: building segment n+1 at 100% encoder speed
+      // ensures it is ready in cache before segment n finishes playing.
+      // Launching 5 concurrent ffmpegs at once starved the CPU/GPU, delaying
+      // the immediate next segment by 3-4x and increasing the chance of buffer underruns.
+      (async () => {
+        for (let i = 1; i <= PREFETCH_SEGMENTS; i++) {
+          const nn = from + i;
+          if (nn >= count) break;             // past the end of the film
+          const kk = hlsKey(target, quality, audioTrack, nn);
+          if (hlsInFlight.has(kk)) continue;
+          if (hlsInFlight.size >= 4) break;   // server is already busy enough
+          try {
+            await buildSegment(nn);
+          } catch {
+            break;
+          }
+        }
+      })().catch(() => { /* speculative — failure is not an error */ });
     };
 
     // Already built: send it straight off disk and warm what follows, so
@@ -20032,59 +20058,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
 
     try {
-      let pending = hlsInFlight.get(key);
-      if (!pending) {
-        const encC = videoEncodeArgs({
-          hw: await hwEncodeAvailable(), quality,
-          srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
-        });
-        pending = (async () => {
-          const args = [
-            "-hide_banner", "-loglevel", "error",
-            // -ss BEFORE -i is the fast seek: ffmpeg jumps in the container
-            // rather than decoding from zero, which is what makes building an
-            // arbitrary segment cheap no matter how far into the film it is.
-            ...encC.pre,
-            "-ss", String(startSec),
-            "-i", target,
-            "-t", String(thisDur),
-            "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
-            // Every segment must begin on a keyframe or players cannot switch
-            // into it cleanly mid-stream (keyframes: true, above).
-            ...encC.post,
-            "-af", "aresample=async=1:first_pts=0",
-            "-c:a", "aac", "-b:a", "160k",
-            // Carries the segment's true position, so the player's clock is the
-            // film's clock — this is what makes the timeline honest.
-            "-output_ts_offset", String(startSec),
-            "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", "pipe:1",
-          ];
-          const chunks: Buffer[] = [];
-          await new Promise<void>((resolve, reject) => {
-            const ff = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
-            let errOut = "";
-            ff.stdout.on("data", (d: Buffer) => chunks.push(d));
-            ff.stderr.on("data", (d: Buffer) => { errOut += d.toString(); });
-            ff.on("error", reject);
-            ff.on("close", (code) => {
-              if (code === 0 || chunks.length > 0) resolve();
-              else reject(new Error(errOut.slice(0, 300) || `ffmpeg exited ${code}`));
-            });
-          });
-          const buf = Buffer.concat(chunks);
-          // Write via a temp name: a half-written segment served from cache
-          // would be a permanent glitch at that exact point in the film.
-          await mkdir(HLS_CACHE_DIR, { recursive: true });
-          const tmp = `${cachePath}.${process.pid}.part`;
-          await writeFile(tmp, buf);
-          await renameFile(tmp, cachePath);
-          return buf;
-        })();
-        hlsInFlight.set(key, pending);
-        pending.finally(() => hlsInFlight.delete(key));
-      }
-      const buf = await pending;
+      const buf = await buildSegment(n);
       res.setHeader("Content-Type", "video/mp2t");
       res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
       res.send(buf);
