@@ -132,10 +132,12 @@ const NEXUS_CLOUD_FIRST = (process.env.NEXUS_CLOUD_FIRST ?? "1") !== "0";
  * non-existent without touching the filesystem, so a destroyed drive can never
  * stall a request on a hung mount or be silently re-created by mkdir -p.
  */
-const NEXUS_DEAD_MOUNTS: string[] = [
+const NEXUS_DEAD_MOUNTS: string[] = [...new Set([
   "/media/moh/EMULATION" + " dRIVE",
+  // .env also lists it, so without the dedupe the same mount appeared twice in
+  // every denylist report and was checked twice on every path test.
   ...(process.env.NEXUS_DEAD_MOUNTS ?? "").split(",").map((x) => x.trim()).filter(Boolean),
-];
+])];
 
 function isDeadDrivePath(p: string | null | undefined): boolean {
   if (!p) return false;
@@ -5987,7 +5989,11 @@ async function startServer() {
       else res.json({ path: null, cancelled: true });
     } catch (err) {
       log("ERROR", `pick-folder failed: ${err}`, "system");
-      res.status(500).json({ error: "Could not open folder dialog" });
+      res.status(501).json({
+        error: "Could not open folder dialog",
+        reason: "This host has no desktop session, so a native picker cannot be shown.",
+        hint: "Type or paste the folder path instead.",
+      });
     }
   });
 
@@ -6011,7 +6017,11 @@ async function startServer() {
       else res.json({ path: null, cancelled: true });
     } catch (err) {
       log("ERROR", `pick-file failed: ${err}`, "system");
-      res.status(500).json({ error: "Could not open file dialog" });
+      res.status(501).json({
+        error: "Could not open file dialog",
+        reason: "This host has no desktop session, so a native picker cannot be shown.",
+        hint: "Type or paste the file path instead.",
+      });
     }
   });
 
@@ -6993,120 +7003,35 @@ async function startServer() {
       });
     }
 
-    // ── Emulator fallback matrix ──────────────────────────────────────────────
-  // A platform usually has more than one emulator that can run it, but the
-  // launch path committed to exactly one and returned a 500 if it failed. PS2
-  // is the clearest case: a pcsx2_libretro core that SIGABRTs on this machine's
-  // OpenGL stack made the game unplayable even though standalone PCSX2 — or
-  // Play! — would have run it.
-  //
-  // Each entry is tried in order and the first that both EXISTS and actually
-  // stays alive wins. A candidate that is simply not installed is skipped
-  // silently; only a candidate that launches and dies counts as a failure
-  // worth reporting.
-  type EmuCandidate = {
-    id: string;
-    label: string;
-    /** Resolve to a spawnable command, or null when this emulator isn't here. */
-    resolve: () => Promise<{ exe: string; args: (rom: string) => string[] } | null>;
-  };
-
-  /** Is a bare command on PATH? Used for emulators installed by a package manager. */
-  const _whichCache = new Map<string, string | null>();
-  async function whichBin(bin: string): Promise<string | null> {
-    if (_whichCache.has(bin)) return _whichCache.get(bin)!;
-    const found = await execAsync(`which ${bin}`)
-      .then((r: any) => String(r.stdout ?? "").trim() || null)
-      .catch(() => null);
-    _whichCache.set(bin, found);
-    return found;
-  }
-
-  /** A flatpak app id that is actually installed. */
-  async function flatpakApp(appId: string): Promise<string | null> {
-    const bin = `/var/lib/flatpak/exports/bin/${appId}`;
-    if (existsSync(bin)) return bin;
-    const userBin = path.join(NEXUS_HOME, ".local/share/flatpak/exports/bin", appId);
-    return existsSync(userBin) ? userBin : null;
-  }
-
-  const EMULATOR_FALLBACKS: Record<string, EmuCandidate[]> = {
-    ps2: [
-      {
-        id: "pcsx2", label: "PCSX2",
-        resolve: async () => {
-          const info = await detectPcsx2Path();
-          if (!info) return null;
-          if (info.isRetroArchCore) {
-            const retro = await detectRetroArchPath();
-            return retro ? { exe: retro, args: (rom) => ["-L", info.path, rom] } : null;
-          }
-          if (info.isWine) return { exe: "wine", args: (rom) => [info.path, "--", "-batch", rom] };
-          return { exe: info.path, args: (rom) => ["-batch", rom] };
-        },
-      },
-      {
-        // Play! is a separate PS2 emulator with a different renderer, so it
-        // often works exactly where the pcsx2 core crashes on driver issues.
-        id: "play", label: "Play!",
-        resolve: async () => {
-          const bin = (await whichBin("Play")) ?? (await whichBin("play")) ?? (await flatpakApp("org.purei.Play"));
-          return bin ? { exe: bin, args: (rom) => ["--disc", rom] } : null;
-        },
-      },
-    ],
-    ps1: [
-      {
-        id: "duckstation", label: "DuckStation",
-        resolve: async () => {
-          const bin = (await whichBin("duckstation-qt")) ?? (await whichBin("duckstation-nogui"))
-            ?? (await flatpakApp("org.duckstation.DuckStation"));
-          return bin ? { exe: bin, args: (rom) => ["-batch", rom] } : null;
-        },
-      },
-    ],
-    gamecube: [
-      {
-        id: "dolphin", label: "Dolphin",
-        resolve: async () => {
-          const bin = await detectDolphinPath();
-          return bin ? { exe: bin, args: (rom) => ["-b", "-e", rom] } : null;
-        },
-      },
-    ],
-  };
-  EMULATOR_FALLBACKS.wii = EMULATOR_FALLBACKS.gamecube;
-
-  /**
-   * Walk a platform's fallback chain and return the first emulator that starts
-   * and stays running. Returns the list of what was tried either way, so a
-   * failure can say something more useful than "it crashed".
-   */
-  async function launchWithFallback(platform: string, romPath: string, spawnEnv: any) {
-    const chain = EMULATOR_FALLBACKS[platform] ?? [];
-    const tried: { id: string; label: string; outcome: string }[] = [];
-    for (const cand of chain) {
-      let resolved: { exe: string; args: (rom: string) => string[] } | null = null;
-      try { resolved = await cand.resolve(); } catch { resolved = null; }
-      if (!resolved) { tried.push({ id: cand.id, label: cand.label, outcome: "not installed" }); continue; }
-      try {
-        const { pid, alive, stderr } = await spawnAndVerify(resolved.exe, resolved.args(romPath), spawnEnv, 3000);
-        if (alive) {
-          if (tried.length) {
-            log("INFO", `Fell back to ${cand.label} for ${platform} after ${tried.map((t) => t.label).join(", ")}`, "launcher");
-          }
-          return { ok: true as const, pid, emulator: cand.id, label: cand.label, tried };
-        }
-        tried.push({ id: cand.id, label: cand.label, outcome: `exited immediately: ${String(stderr).slice(0, 160)}` });
-        log("WARN", `${cand.label} failed to stay running for ${platform}; trying the next option`, "launcher");
-      } catch (e: any) {
-        tried.push({ id: cand.id, label: cand.label, outcome: `spawn failed: ${String(e?.message ?? e).slice(0, 160)}` });
-      }
-    }
-    return { ok: false as const, tried };
-  }
 
   // ── PS2: use pcsx2 RetroArch core (installed) or standalone PCSX2 ─────
+    // An explicit choice from the Launch Failed screen goes straight to that
+    // emulator, rather than walking the chain from the top and failing again on
+    // the one the user just watched crash.
+    const forcedEmulator = String((req.body as any)?.emulator ?? '').trim().toLowerCase();
+    if (forcedEmulator && romPath) {
+      const chain = EMULATOR_FALLBACKS[(game.platform ?? '').toLowerCase()] ?? [];
+      const pick = chain.find((c) => c.id === forcedEmulator);
+      if (pick) {
+        const spawnEnv = process.platform === "linux"
+          ? { ...process.env, DISPLAY: process.env.DISPLAY ?? ':0', PULSE_SERVER: `unix:/run/user/${process.getuid?.() ?? 1000}/pulse/native` }
+          : process.env;
+        let resolved: any = null;
+        try { resolved = await pick.resolve(); } catch { resolved = null; }
+        if (!resolved) {
+          return res.status(422).json({ success: false, emulator: pick.id, error: `${pick.label} is not installed on this host.` });
+        }
+        const { pid, alive, stderr } = await spawnAndVerify(resolved.exe, resolved.args(romPath), spawnEnv, 3000);
+        if (!alive) {
+          return res.status(500).json({ success: false, emulator: pick.id, error: `${pick.label} exited immediately: ${String(stderr).slice(0, 200)}` });
+        }
+        const fp = (req as any).authPayload as any;
+        if (pid) runningEmulatorPids.set(game_id, { pid, startedAt: Date.now(), userId: fp?.userId, title: game.title ?? game_id, platform: (game.platform ?? '') });
+        log('INFO', `Launched ${game.title} via ${pick.label} (explicit choice)`, 'launcher');
+        return res.json({ success: true, pid, emulator: pick.id, mode: 'explicit' });
+      }
+    }
+
     if ((game.platform ?? '').toLowerCase() === 'ps2') {
       const pcsx2Info = await detectPcsx2Path();
       if (pcsx2Info && romPath) {
@@ -11056,6 +10981,63 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ checked, findings, quarantined: moved.length, quarantineDir: qdir, moved, failed });
   });
 
+  // ── Log retention ─────────────────────────────────────────────────────────
+  // daemon_logs had grown to 12.2M rows / 1.58 GB in Neon, 97% of it INFO older
+  // than a month. Nothing was ever deleting it, so it grew for the life of the
+  // install — paid storage, and slow to query until an index was added.
+  //
+  // INFO is operational noise that stops being useful within days. ERROR and
+  // WARN are kept far longer because they are what /api/ai/diagnostics reads to
+  // spot recurring failures.
+  const LOG_RETAIN_INFO_DAYS = Number(process.env.NEXUS_LOG_RETAIN_INFO_DAYS ?? 14);
+  const LOG_RETAIN_PROBLEM_DAYS = Number(process.env.NEXUS_LOG_RETAIN_PROBLEM_DAYS ?? 90);
+
+  /**
+   * Delete expired log rows in batches.
+   *
+   * Batched deliberately: one DELETE covering 12M rows would hold a long
+   * transaction against a remote database and bloat the WAL. Small chunks let
+   * other queries interleave and make a timeout harmless — the next run simply
+   * continues.
+   */
+  async function pruneDaemonLogs(maxBatches = 40, batchSize = 20_000) {
+    if (!pool || !dbConnected) return { deleted: 0, batches: 0 };
+    let deleted = 0, batches = 0;
+    for (let i = 0; i < maxBatches; i++) {
+      let n = 0;
+      try {
+        const r = await pool.query(
+          `DELETE FROM daemon_logs WHERE ctid IN (
+             SELECT ctid FROM daemon_logs
+              WHERE (lower(level) = 'info'  AND created_at < NOW() - ($1 || ' days')::interval)
+                 OR (lower(level) <> 'info' AND created_at < NOW() - ($2 || ' days')::interval)
+              LIMIT $3)`,
+          [LOG_RETAIN_INFO_DAYS, LOG_RETAIN_PROBLEM_DAYS, batchSize],
+        );
+        n = Number(r.rowCount ?? 0);
+      } catch (e: any) {
+        log("WARN", `Log prune stopped: ${e?.message ?? e}`, "maintenance");
+        break;
+      }
+      deleted += n; batches++;
+      if (n < batchSize) break;      // caught up
+    }
+    if (deleted) log("INFO", `Pruned ${deleted} expired log row(s)`, "maintenance");
+    return { deleted, batches };
+  }
+
+  app.post("/api/maintenance/prune-logs", express.json(), async (req, res) => {
+    const auth = requireAuthenticatedUser(req, res);
+    if (!auth) return;
+    if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Admin only" });
+    const maxBatches = Math.min(500, Math.max(1, parseInt(String(req.body?.maxBatches ?? "40"), 10) || 40));
+    res.json(await pruneDaemonLogs(maxBatches));
+  });
+
+  // Daily, offset so it never coincides with the storage autopilot's sweep.
+  setInterval(() => { void pruneDaemonLogs().catch(() => {}); }, 24 * 60 * 60 * 1000).unref?.();
+  setTimeout(() => { void pruneDaemonLogs(8).catch(() => {}); }, 5 * 60_000).unref?.();
+
   // ── Storage autopilot ─────────────────────────────────────────────────────
   // Cloud-first only works if local disk actually drains. Downloads land on the
   // NVMe, and with the media drive gone there is no second disk to spill onto —
@@ -11659,6 +11641,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
   // 10-foot interface for TV boxes and Android TV. /tv and /leanback are both
   // accepted because some launchers deep-link the latter by convention.
+  app.get("/launch", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.sendFile(path.join(PUBLIC_PAGES, "launch.html"));
+  });
   for (const route of ["/tv", "/leanback"]) {
     app.get(route, (_req, res) => {
       res.setHeader("Cache-Control", "no-store");
@@ -17230,6 +17216,148 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         { method: "POST",   path: "/api/brain/key/generate",  desc: "Rotate the Brain API key" },
       ],
     });
+  });
+
+  // NOTE: this block used to sit inside the /api/games/launch handler, which
+  // meant the whole matrix was rebuilt on every launch request and nothing
+  // outside that callback could reach it. Hoisted to startServer scope so the
+  // alternates endpoint can share it.
+  // ── Emulator fallback matrix ──────────────────────────────────────────────
+  // A platform usually has more than one emulator that can run it, but the
+  // launch path committed to exactly one and returned a 500 if it failed. PS2
+  // is the clearest case: a pcsx2_libretro core that SIGABRTs on this machine's
+  // OpenGL stack made the game unplayable even though standalone PCSX2 — or
+  // Play! — would have run it.
+  //
+  // Each entry is tried in order and the first that both EXISTS and actually
+  // stays alive wins. A candidate that is simply not installed is skipped
+  // silently; only a candidate that launches and dies counts as a failure
+  // worth reporting.
+  type EmuCandidate = {
+    id: string;
+    label: string;
+    /** Resolve to a spawnable command, or null when this emulator isn't here. */
+    resolve: () => Promise<{ exe: string; args: (rom: string) => string[] } | null>;
+  };
+
+  /** Is a bare command on PATH? Used for emulators installed by a package manager. */
+  const _whichCache = new Map<string, string | null>();
+  async function whichBin(bin: string): Promise<string | null> {
+    if (_whichCache.has(bin)) return _whichCache.get(bin)!;
+    const found = await execAsync(`which ${bin}`)
+      .then((r: any) => String(r.stdout ?? "").trim() || null)
+      .catch(() => null);
+    _whichCache.set(bin, found);
+    return found;
+  }
+
+  /** A flatpak app id that is actually installed. */
+  async function flatpakApp(appId: string): Promise<string | null> {
+    const bin = `/var/lib/flatpak/exports/bin/${appId}`;
+    if (existsSync(bin)) return bin;
+    const userBin = path.join(NEXUS_HOME, ".local/share/flatpak/exports/bin", appId);
+    return existsSync(userBin) ? userBin : null;
+  }
+
+  const EMULATOR_FALLBACKS: Record<string, EmuCandidate[]> = {
+    ps2: [
+      {
+        id: "pcsx2", label: "PCSX2",
+        resolve: async () => {
+          const info = await detectPcsx2Path();
+          if (!info) return null;
+          if (info.isRetroArchCore) {
+            const retro = await detectRetroArchPath();
+            return retro ? { exe: retro, args: (rom) => ["-L", info.path, rom] } : null;
+          }
+          if (info.isWine) return { exe: "wine", args: (rom) => [info.path, "--", "-batch", rom] };
+          return { exe: info.path, args: (rom) => ["-batch", rom] };
+        },
+      },
+      {
+        // Play! is a separate PS2 emulator with a different renderer, so it
+        // often works exactly where the pcsx2 core crashes on driver issues.
+        id: "play", label: "Play!",
+        resolve: async () => {
+          const bin = (await whichBin("Play")) ?? (await whichBin("play")) ?? (await flatpakApp("org.purei.Play"));
+          return bin ? { exe: bin, args: (rom) => ["--disc", rom] } : null;
+        },
+      },
+    ],
+    ps1: [
+      {
+        id: "duckstation", label: "DuckStation",
+        resolve: async () => {
+          const bin = (await whichBin("duckstation-qt")) ?? (await whichBin("duckstation-nogui"))
+            ?? (await flatpakApp("org.duckstation.DuckStation"));
+          return bin ? { exe: bin, args: (rom) => ["-batch", rom] } : null;
+        },
+      },
+    ],
+    gamecube: [
+      {
+        id: "dolphin", label: "Dolphin",
+        resolve: async () => {
+          const bin = await detectDolphinPath();
+          return bin ? { exe: bin, args: (rom) => ["-b", "-e", rom] } : null;
+        },
+      },
+    ],
+  };
+  EMULATOR_FALLBACKS.wii = EMULATOR_FALLBACKS.gamecube;
+
+  /**
+   * Walk a platform's fallback chain and return the first emulator that starts
+   * and stays running. Returns the list of what was tried either way, so a
+   * failure can say something more useful than "it crashed".
+   */
+  async function launchWithFallback(platform: string, romPath: string, spawnEnv: any) {
+    const chain = EMULATOR_FALLBACKS[platform] ?? [];
+    const tried: { id: string; label: string; outcome: string }[] = [];
+    for (const cand of chain) {
+      let resolved: { exe: string; args: (rom: string) => string[] } | null = null;
+      try { resolved = await cand.resolve(); } catch { resolved = null; }
+      if (!resolved) { tried.push({ id: cand.id, label: cand.label, outcome: "not installed" }); continue; }
+      try {
+        const { pid, alive, stderr } = await spawnAndVerify(resolved.exe, resolved.args(romPath), spawnEnv, 3000);
+        if (alive) {
+          if (tried.length) {
+            log("INFO", `Fell back to ${cand.label} for ${platform} after ${tried.map((t) => t.label).join(", ")}`, "launcher");
+          }
+          return { ok: true as const, pid, emulator: cand.id, label: cand.label, tried };
+        }
+        tried.push({ id: cand.id, label: cand.label, outcome: `exited immediately: ${String(stderr).slice(0, 160)}` });
+        log("WARN", `${cand.label} failed to stay running for ${platform}; trying the next option`, "launcher");
+      } catch (e: any) {
+        tried.push({ id: cand.id, label: cand.label, outcome: `spawn failed: ${String(e?.message ?? e).slice(0, 160)}` });
+      }
+    }
+    return { ok: false as const, tried };
+  }
+
+  // What the Launch Failed screen offers under "Try alternate core": this
+  // platform's fallback chain, annotated with whether each option is actually
+  // installed, so the UI can grey out what it cannot do.
+  //
+  // Registered here rather than beside EMULATOR_FALLBACKS, because that lives
+  // inside the /api/games/launch handler — defining a route there nests it in
+  // a request callback, so it only exists after someone launches a game.
+  app.get("/api/emulator/alternates", async (req, res) => {
+    const auth = requireAnyAuth(req, res);
+    if (!auth) return;
+    const platform = String(req.query.platform ?? "").toLowerCase();
+    const chain = EMULATOR_FALLBACKS[platform] ?? [];
+    const out: any[] = [];
+    for (const c of chain) {
+      let available = false;
+      try { available = !!(await c.resolve()); } catch { available = false; }
+      out.push({ id: c.id, label: c.label, available });
+    }
+    if (!out.length) {
+      const retro = await detectRetroArchPath();
+      out.push({ id: "retroarch", label: "RetroArch (libretro core)", available: !!retro });
+    }
+    res.json({ platform, alternates: out });
   });
 
   app.get("/api/emulator/cores/status/:platform", async (req, res) => {

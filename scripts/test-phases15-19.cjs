@@ -276,8 +276,12 @@ function testThemingOnboarding() {
   raw.length === 0 ? ok('no hardcoded colours outside the theme definitions') : bad(`${raw.length} hardcoded colour(s): ${raw.slice(0,3).join(', ')}`);
 
   const pl = fs.readFileSync(path.join(ROOT, 'public', 'player.html'), 'utf8');
-  /SPINNER_DELAY_MS = 500/.test(pl) ? ok('player spinner debounced 500ms') : bad('spinner not debounced');
-  /maxBufferLength: 120/.test(pl) ? ok('player buffers 120s') : bad('buffer not raised');
+  // Assert the property, not a specific number — the threshold was later
+  // raised to 1200ms and pinning the value made this fail on an improvement.
+  const spinMs = +(pl.match(/SPINNER_DELAY_MS\s*=\s*(\d+)/) || [])[1];
+  spinMs >= 500 ? ok(`player spinner debounced (${spinMs}ms)`) : bad(`spinner debounce ${spinMs}ms too eager`);
+  const bufLen = +(pl.match(/maxBufferLength:\s*(\d+)/) || [])[1];
+  bufLen >= 120 ? ok(`forward buffer ceiling ${bufLen}s`) : bad(`buffer ceiling only ${bufLen}s`);
   /\}, 2500\);/.test(pl) ? ok('controls auto-hide at 2500ms') : bad('auto-hide not 2500ms');
   /cursor:\s*none/.test(pl) ? ok('cursor hidden when idle') : bad('cursor not hidden');
 }
@@ -315,7 +319,8 @@ function testPlayerUpgrades() {
   /function playbackIsBlocked/.test(pl) ? ok('spinner gated on real blockage') : bad('spinner not gated');
   /if \(v\.paused\) return false;/.test(pl) ? ok('never spins while paused') : bad('would spin while paused');
   /v\.readyState >= 3/.test(pl) ? ok('never spins when a frame is ready') : bad('ignores readyState');
-  /SPINNER_DELAY_MS = 500/.test(pl) ? ok('500ms debounce retained') : bad('debounce lost');
+  const sd = +(pl.match(/SPINNER_DELAY_MS\s*=\s*(\d+)/) || [])[1];
+  sd >= 500 ? ok(`debounce retained (${sd}ms)`) : bad('debounce lost');
 
   // Simulate the exact state that was wrong: paused, ready, buffered.
   const blocked = (st) => {

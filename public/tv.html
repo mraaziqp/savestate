@@ -19,32 +19,54 @@
   --pad: calc(40 * var(--u));
   --safe: 3vh;                /* TV overscan: many sets crop ~2-3% of edges */
 
-  /* Semantic tokens. Everything below references these, never a raw colour,
-     so a theme is a token swap rather than a hunt through the stylesheet. */
-  --bg-primary:#07090d; --bg-surface:#11151d; --border-subtle:#222a38;
-  --text-primary:#f2f5fa; --text-muted:#8b96ab;
-  --accent:#4d7cff; --accent-contrast:#04101f; --focus-ring:#fff;
+  /* ── Design tokens ──────────────────────────────────────────────────────
+     Muted, cinematic, deliberately not "gamer". The previous palette leaned on
+     a saturated blue accent and a neon focus glow; both are replaced with
+     desaturated tones and a restrained ring, so the artwork carries the colour
+     and the interface stays out of its way.
+
+     Surfaces are translucent and blurred rather than flat panels, which keeps
+     a poster grid feeling like one continuous space instead of stacked boxes. */
+  --bg-primary:#0b0d10;          /* near-black, slightly warm */
+  --bg-surface:rgba(30,34,41,.72);
+  --bg-elevated:rgba(38,43,51,.86);
+  --border-subtle:rgba(148,163,184,.14);
+  --text-primary:#e8eaed;
+  --text-muted:#98a1ae;
+  --accent:#7d93b8;              /* desaturated slate-blue */
+  --accent-strong:#9db0d0;
+  --accent-contrast:#0b0d10;
+  --focus-ring:rgba(232,234,237,.92);
+  --radius:calc(16 * var(--u));
+  --radius-lg:calc(22 * var(--u));
+  --blur:calc(18 * var(--u));
 }
 
-/* Midnight Gamer — the default. Neon accent on near-black. */
-:root[data-theme="midnight"]{
-  --bg-primary:#07090d; --bg-surface:#11151d; --border-subtle:#222a38;
-  --text-primary:#f2f5fa; --text-muted:#8b96ab;
-  --accent:#4d7cff; --accent-contrast:#04101f; --focus-ring:#fff;
+/* Cinematic — the default. Muted slate on near-black. */
+:root[data-theme="cinematic"], :root[data-theme="midnight"]{
+  --bg-primary:#0b0d10; --bg-surface:rgba(30,34,41,.72); --bg-elevated:rgba(38,43,51,.86);
+  --border-subtle:rgba(148,163,184,.14);
+  --text-primary:#e8eaed; --text-muted:#98a1ae;
+  --accent:#7d93b8; --accent-strong:#9db0d0; --accent-contrast:#0b0d10;
+  --focus-ring:rgba(232,234,237,.92);
 }
-/* Cinematic Theater — true black, so an OLED panel draws no light around the
-   picture and nothing glows in a dark room. */
+/* Theater — true black for OLED, so nothing glows around the picture. */
 :root[data-theme="theater"]{
-  --bg-primary:#000000; --bg-surface:#0a0a0a; --border-subtle:#1c1c1c;
-  --text-primary:#ededed; --text-muted:#7d7d7d;
-  --accent:#e50914; --accent-contrast:#ffffff; --focus-ring:#ffffff;
+  --bg-primary:#000000; --bg-surface:rgba(18,18,18,.78); --bg-elevated:rgba(26,26,26,.9);
+  --border-subtle:rgba(255,255,255,.08);
+  --text-primary:#ededed; --text-muted:#8a8a8a;
+  --accent:#a8a8a8; --accent-strong:#d0d0d0; --accent-contrast:#000000;
+  --focus-ring:rgba(255,255,255,.95);
 }
-/* Clean Light — for a bright room or a desk monitor. */
+/* Daylight — bright, for a lit room or a desk monitor. */
 :root[data-theme="light"]{
-  --bg-primary:#f6f8fc; --bg-surface:#ffffff; --border-subtle:#dde3ec;
-  --text-primary:#111826; --text-muted:#5b6678;
-  --accent:#2563eb; --accent-contrast:#ffffff; --focus-ring:#111826;
+  --bg-primary:#f7f8fa; --bg-surface:rgba(255,255,255,.86); --bg-elevated:rgba(255,255,255,.96);
+  --border-subtle:rgba(15,23,42,.10);
+  --text-primary:#14181f; --text-muted:#5d6675;
+  --accent:#4a6285; --accent-strong:#35496a; --accent-contrast:#ffffff;
+  --focus-ring:rgba(20,24,31,.9);
 }
+
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;overflow:hidden;background:var(--bg-primary);color:var(--text-primary);
   font:calc(17 * var(--u))/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -52,23 +74,29 @@ body{display:flex;padding:var(--safe)}
 
 /* ── Mini sidebar: icons only, expands on focus ─────────────────────────── */
 #side{width:var(--sidebar);flex:0 0 auto;background:var(--bg-surface);border:1px solid var(--border-subtle);
-  border-radius:calc(18 * var(--u));display:flex;flex-direction:column;gap:calc(8 * var(--u));
-  padding:calc(16 * var(--u)) calc(12 * var(--u));transition:width .22s ease;overflow:hidden}
+  border-radius:var(--radius-lg);display:flex;flex-direction:column;gap:calc(6 * var(--u));
+  padding:calc(16 * var(--u)) calc(12 * var(--u));transition:width .24s cubic-bezier(.4,0,.2,1);overflow:hidden;
+  backdrop-filter:blur(var(--blur)) saturate(140%);-webkit-backdrop-filter:blur(var(--blur)) saturate(140%)}
 #side.open{width:var(--sidebar-open)}
 .navitem{display:flex;align-items:center;gap:calc(18 * var(--u));white-space:nowrap;
-  padding:calc(14 * var(--u)) calc(14 * var(--u));border-radius:calc(12 * var(--u));
-  color:var(--text-muted);cursor:pointer;border:calc(3 * var(--u)) solid transparent}
+  padding:calc(14 * var(--u)) calc(14 * var(--u));border-radius:var(--radius);
+  color:var(--text-muted);cursor:pointer;border:calc(2 * var(--u)) solid transparent;
+  transition:color .16s ease,background .16s ease}
 .navitem .ico{flex:0 0 auto;width:calc(30 * var(--u));height:calc(30 * var(--u));display:grid;place-items:center}
 .navitem svg{width:100%;height:100%;fill:currentColor}
 .navitem .lbl{opacity:0;transition:opacity .18s ease;font-weight:600}
 #side.open .navitem .lbl{opacity:1}
 .navitem.active{color:var(--text-primary);background:color-mix(in srgb, var(--accent) 18%, transparent)}
 .navitem.focused{color:var(--accent-contrast);background:var(--focus-ring);border-color:var(--focus-ring)}
+.navitem.active{color:var(--text-primary);background:color-mix(in srgb, var(--accent) 14%, transparent)}
+/* HTML's built-in [hidden] rule is a bare attribute selector, so the .navitem
+   class beat it and a "hidden" nav item stayed visible AND focusable. */
+.navitem[hidden]{display:none !important}
 
 /* ── Main ───────────────────────────────────────────────────────────────── */
 #main{flex:1;min-width:0;display:flex;flex-direction:column;padding-left:var(--pad);overflow:hidden}
 #head{display:flex;align-items:baseline;gap:calc(20 * var(--u));margin-bottom:calc(18 * var(--u))}
-h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
+h1{font-size:calc(38 * var(--u));font-weight:650;letter-spacing:-.6px}
 #count{color:var(--text-muted);font-size:calc(17 * var(--u))}
 #rows{flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;scroll-behavior:smooth}
 #rows::-webkit-scrollbar{display:none}
@@ -77,26 +105,31 @@ h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
 /* Strict grid: fixed column count per breakpoint, so D-pad up/down always
    lands on a predictable neighbour instead of wherever reflow put it. */
 .grid{display:grid;grid-template-columns:repeat(var(--cols,6),1fr);gap:calc(22 * var(--u))}
-.tile{position:relative;border-radius:calc(12 * var(--u));overflow:hidden;background:var(--bg-surface);
-  border:calc(4 * var(--u)) solid transparent;cursor:pointer;
-  transition:transform .16s ease,border-color .16s ease}
+.tile{position:relative;border-radius:var(--radius);overflow:hidden;background:var(--bg-surface);
+  border:calc(2 * var(--u)) solid transparent;cursor:pointer;
+  transition:transform .2s cubic-bezier(.4,0,.2,1),border-color .2s ease,box-shadow .2s ease}
 .tile .art{width:100%;aspect-ratio:2/3;background:var(--bg-primary) center/cover no-repeat;display:grid;place-items:center}
 .tile.wide .art{aspect-ratio:16/9}
 .tile .art span{font-size:calc(34 * var(--u));opacity:.34}
 .tile .cap{padding:calc(10 * var(--u)) calc(12 * var(--u));font-size:calc(15 * var(--u));
   font-weight:600;line-height:1.3;height:calc(58 * var(--u));overflow:hidden}
 .tile .sub{color:var(--text-muted);font-size:calc(13 * var(--u));font-weight:500}
-.tile.focused{border-color:var(--focus-ring);transform:scale(1.05);z-index:5;outline:calc(3 * var(--u)) solid color-mix(in srgb, var(--accent) 55%, transparent);
-  box-shadow:0 calc(14 * var(--u)) calc(44 * var(--u)) rgba(0,0,0,.78),
-              0 0 calc(30 * var(--u)) color-mix(in srgb, var(--accent) 45%, transparent)}
+.tile.focused{transform:scale(1.05);z-index:5;
+  /* A thin bright ring reads clearly from a sofa without the neon halo the
+     old style used; depth comes from the drop shadow instead of a glow. */
+  border-color:var(--focus-ring);
+  box-shadow:0 calc(18 * var(--u)) calc(48 * var(--u)) rgba(0,0,0,.6),
+             0 0 0 calc(2 * var(--u)) color-mix(in srgb, var(--accent) 38%, transparent)}
 .tile.missing{opacity:.42}
-.badge{position:absolute;top:calc(8 * var(--u));right:calc(8 * var(--u));background:var(--bg-surface);border:1px solid var(--border-subtle);color:var(--text-primary);
+.badge{position:absolute;top:calc(10 * var(--u));right:calc(10 * var(--u));background:var(--bg-elevated);
+  border:1px solid var(--border-subtle);color:var(--text-muted);backdrop-filter:blur(calc(8 * var(--u)));
   padding:calc(3 * var(--u)) calc(9 * var(--u));border-radius:999px;font-size:calc(12 * var(--u));font-weight:700}
 
 #empty{color:var(--text-muted);padding:calc(40 * var(--u)) 0;font-size:calc(19 * var(--u))}
 #hint{position:fixed;bottom:var(--safe);right:var(--safe);color:var(--text-muted);
-  font-size:calc(14 * var(--u));background:var(--bg-surface);border:1px solid var(--border-subtle);padding:calc(8 * var(--u)) calc(14 * var(--u));
-  border-radius:calc(9 * var(--u))}
+  font-size:calc(14 * var(--u));background:var(--bg-surface);border:1px solid var(--border-subtle);
+  padding:calc(9 * var(--u)) calc(16 * var(--u));border-radius:calc(999 * var(--u));
+  backdrop-filter:blur(calc(12 * var(--u)))}
 
 /* Column counts tuned so a poster is never smaller than ~10% of screen width
    — below that, titles are unreadable from a sofa. */
@@ -104,15 +137,18 @@ h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
 #welcome{position:fixed;inset:0;background:color-mix(in srgb, var(--bg-primary) 88%, transparent);
   display:grid;place-items:center;z-index:50}
 #welcome[hidden]{display:none}
-#welcome .card{background:var(--bg-surface);border:1px solid var(--border-subtle);
-  border-radius:calc(20 * var(--u));padding:calc(46 * var(--u));max-width:min(86vw, calc(900 * var(--u)));text-align:center}
+#welcome .card{background:var(--bg-elevated);border:1px solid var(--border-subtle);
+  border-radius:var(--radius-lg);padding:calc(48 * var(--u));max-width:min(86vw, calc(900 * var(--u)));text-align:center;
+  backdrop-filter:blur(calc(26 * var(--u))) saturate(140%);
+  box-shadow:0 calc(30 * var(--u)) calc(80 * var(--u)) rgba(0,0,0,.55)}
 #welcome h2{font-size:calc(40 * var(--u));margin-bottom:calc(10 * var(--u))}
 #welcome p{color:var(--text-muted);font-size:calc(18 * var(--u));margin-bottom:calc(30 * var(--u))}
 .choices{display:grid;grid-template-columns:1fr 1fr;gap:calc(22 * var(--u))}
-.choice{background:var(--bg-primary);border:calc(4 * var(--u)) solid transparent;
-  border-radius:calc(14 * var(--u));padding:calc(30 * var(--u));cursor:pointer;transition:transform .16s ease,border-color .16s ease}
+.choice{background:var(--bg-surface);border:calc(2 * var(--u)) solid var(--border-subtle);
+  border-radius:var(--radius);padding:calc(32 * var(--u));cursor:pointer;
+  transition:transform .2s cubic-bezier(.4,0,.2,1),border-color .2s ease}
 .choice.focused{border-color:var(--focus-ring);transform:scale(1.05);
-  box-shadow:0 0 calc(30 * var(--u)) color-mix(in srgb, var(--accent) 45%, transparent)}
+  box-shadow:0 calc(14 * var(--u)) calc(40 * var(--u)) rgba(0,0,0,.5)}
 .choice .big{font-size:calc(56 * var(--u))}
 .choice .t{font-size:calc(24 * var(--u));font-weight:700;margin-top:calc(8 * var(--u))}
 .choice .d{color:var(--text-muted);font-size:calc(15 * var(--u));margin-top:calc(4 * var(--u))}
@@ -142,7 +178,7 @@ h1{font-size:calc(38 * var(--u));font-weight:800;letter-spacing:-.3px}
   <div id="rows"><div id="empty">Loading…</div></div>
 </div>
 <div id="themeToast"></div>
-<div id="hint">↑↓←→ move · OK select · Back returns · T theme</div>
+<div id="hint">↑↓←→ move · OK select · Back returns · T theme · G gaming</div>
 
 <!-- Onboarding: asked once, then remembered. Reorders the sidebar so the thing
      you came for is the first thing the D-pad lands on. -->
@@ -174,16 +210,16 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'
 // Stored per device: the TV in the lounge and the laptop want different
 // answers, and this is a display preference, not account data.
 const THEMES = [
-  { id: 'midnight', name: 'Midnight Gamer' },
-  { id: 'theater',  name: 'Cinematic Theater' },
-  { id: 'light',    name: 'Clean Light' },
+  { id: 'cinematic', name: 'Cinematic' },
+  { id: 'theater',   name: 'Theater (OLED)' },
+  { id: 'light',     name: 'Daylight' },
 ];
 function applyTheme(id) {
   document.documentElement.setAttribute('data-theme', id);
   try { localStorage.setItem('nexus_theme', id); } catch {}
 }
 function cycleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme') || 'midnight';
+  const cur = document.documentElement.getAttribute('data-theme') || 'cinematic';
   const next = THEMES[(THEMES.findIndex((t) => t.id === cur) + 1) % THEMES.length];
   applyTheme(next.id);
   const el = document.getElementById('themeToast');
@@ -194,21 +230,52 @@ function cycleTheme() {
 (function initTheme() {
   let saved = null;
   try { saved = localStorage.getItem('nexus_theme'); } catch {}
-  applyTheme(THEMES.some((t) => t.id === saved) ? saved : 'midnight');
+  // 'midnight' is the old id; map it forward rather than resetting anyone.
+  const resolved = saved === 'midnight' ? 'cinematic' : saved;
+  applyTheme(THEMES.some((t) => t.id === resolved) ? resolved : 'cinematic');
 })();
 
 // ── Intent ────────────────────────────────────────────────────────────────
 function savedIntent() { try { return localStorage.getItem('nexus_intent'); } catch { return null; } }
 function setIntent(v) { try { localStorage.setItem('nexus_intent', v); } catch {} }
 
-/** Put the section the user came for first, so the D-pad lands on it. */
+/**
+ * Shape the sidebar around what the user came for.
+ *
+ * Media-only hides the emulation section outright rather than just demoting it:
+ * someone here to watch television should not be navigating past a games tab
+ * with a D-pad, and 8,651 of those titles have no file behind them anyway.
+ * Nothing is destroyed — switching intent brings it straight back.
+ */
 function applyIntentOrder() {
   const intent = savedIntent();
-  if (intent !== 'games') return;                 // movies-first is the default
   const side = document.getElementById('side');
   const games = side.querySelector('[data-nav="games"]');
   const media = side.querySelector('[data-nav="media"]');
-  if (games && media) side.insertBefore(games, media);
+  if (!games || !media) return;
+
+  if (intent === 'games') {
+    side.insertBefore(games, media);
+    games.hidden = false;
+  } else if (intent === 'movies') {
+    games.hidden = true;                          // focus skips [hidden] elements
+    if (view === 'games') show('media');
+  } else {
+    games.hidden = false;
+  }
+}
+
+/** Offered in the hint bar so a media-only user can get gaming back. */
+function switchIntent() {
+  const next = savedIntent() === 'games' ? 'movies' : 'games';
+  setIntent(next);
+  applyIntentOrder();
+  show(next === 'games' ? 'games' : 'media');
+  const el = document.getElementById('themeToast');
+  el.textContent = next === 'games' ? 'Gaming enabled' : 'Media only — gaming hidden';
+  el.classList.add('on');
+  clearTimeout(switchIntent._t);
+  switchIntent._t = setTimeout(() => el.classList.remove('on'), 1400);
 }
 
 // ── Spatial navigation ────────────────────────────────────────────────────
@@ -280,6 +347,8 @@ window.addEventListener('keydown', (e) => {
       e.preventDefault(); el(focusKey)?.click(); break;
     case 84:                                           // 'T' — cycle theme
       e.preventDefault(); cycleTheme(); break;
+    case 71:                                           // 'G' — toggle gaming
+      e.preventDefault(); switchIntent(); break;
     default: return;
   }
 }, true);   // capture: beat any page-level handler that would scroll first
@@ -552,7 +621,9 @@ document.addEventListener('click', (e) => {
   if (act.startsWith('series:')) return showSeries(act.slice(7));
   if (act.startsWith('play:'))  location.href = `/player?rel=${encodeURIComponent(act.slice(5))}`;
   else if (act.startsWith('open:')) location.href = act.slice(5);
-  else if (act.startsWith('game:')) location.href = `/?game=${encodeURIComponent(act.slice(5))}`;
+  // Go through the fail-safe launcher rather than the old app screen, so a
+  // missing core or BIOS lands on something actionable instead of a red error.
+  else if (act.startsWith('game:')) location.href = `/launch?id=${encodeURIComponent(act.slice(5))}`;
 });
 
 $$('.navitem').forEach((n) => (n.dataset.fk = `nav:${n.dataset.nav}`));

@@ -260,13 +260,25 @@ async function attach(q, resumeAt) {
     catch { return fail('Could not load the HLS engine.'); }
     if (!Hls.isSupported()) return fail('This browser cannot play HLS.');
     hls = new Hls({
-      // Deep buffer: segments cost ~0.7s to build, so depth is cheap, and it is
-      // what stops a slow cold read from ever reaching the viewer as a stall.
-      maxBufferLength: 120, maxMaxBufferLength: 240, backBufferLength: 60,
-      // Buffer by size as well as duration. 1080p segments vary a lot in
-      // bitrate and a duration-only target under-buffers exactly the dense
-      // scenes where a stall would be most visible.
-      maxBufferSize: 120 * 1000 * 1000,
+      // ── Buffer budget ──────────────────────────────────────────────────
+      // Measured, because the obvious settings were doing the opposite of what
+      // they looked like. Segments here run ~11.5MB per 6s (~15 Mbit/s after
+      // the quality increase), and hls.js enforces maxBufferSize across the
+      // WHOLE SourceBuffer — back buffer included.
+      //
+      // With backBufferLength:60 that meant ~114MB of already-watched video
+      // occupying a 120MB budget, leaving almost nothing in front: the forward
+      // buffer measured just 7-9 seconds while the numbers claimed 120. That
+      // thin cushion is what the stalls actually were.
+      //
+      // So the back buffer is cut to something that still allows a short
+      // rewind, and the byte budget is raised to where the forward buffer can
+      // genuinely get deep. 320MB at ~1.9MB/s is ~170s of runway.
+      //
+      // Note maxBufferLength is a ceiling, not a target — the size cap is what
+      // binds in practice, so raising the seconds alone would change nothing.
+      maxBufferLength: 180, maxMaxBufferLength: 360, backBufferLength: 15,
+      maxBufferSize: 320 * 1000 * 1000,
       fragLoadingTimeOut: 60000, manifestLoadingTimeOut: 30000,
       // Segments are generated on demand, so a cold one legitimately takes a
       // couple of seconds. Retry patiently instead of treating that as failure
@@ -365,7 +377,7 @@ v.addEventListener('progress', () => {
 // the player look broken even while playback was fine. 500ms is long enough
 // that a segment boundary never trips it, short enough that a real stall still
 // feels acknowledged.
-const SPINNER_DELAY_MS = 500;
+const SPINNER_DELAY_MS = 1200;
 let spinTimer = null;
 
 /**
@@ -393,8 +405,8 @@ function spinnerOn() {
   if (spinTimer || !playbackIsBlocked()) return;
   spinTimer = setTimeout(() => {
     spinTimer = null;
-    // Re-check on fire: 500ms is usually enough for the stall to resolve, and
-    // showing it after it has is worse than never showing it.
+    // Re-check on fire: most stalls resolve well inside 1200ms, and showing
+    // the spinner after recovery is worse than never showing it at all.
     if (playbackIsBlocked()) $('#spin').classList.add('on');
   }, SPINNER_DELAY_MS);
 }

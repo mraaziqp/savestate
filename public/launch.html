@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nexus — Launch</title>
+<style>
+/* Same muted token system as /tv, so the two surfaces feel like one product. */
+:root{
+  --bg-primary:#0b0d10; --bg-surface:rgba(30,34,41,.72); --bg-elevated:rgba(38,43,51,.9);
+  --border-subtle:rgba(148,163,184,.14);
+  --text-primary:#e8eaed; --text-muted:#98a1ae;
+  --accent:#7d93b8; --accent-strong:#9db0d0; --accent-contrast:#0b0d10;
+  --ok:#6f9e7c; --warn:#b89a63; --bad:#b1706e;
+}
+:root[data-theme="theater"]{ --bg-primary:#000; --bg-surface:rgba(18,18,18,.78); --accent:#a8a8a8; }
+:root[data-theme="light"]{
+  --bg-primary:#f7f8fa; --bg-surface:rgba(255,255,255,.86); --bg-elevated:rgba(255,255,255,.96);
+  --border-subtle:rgba(15,23,42,.10); --text-primary:#14181f; --text-muted:#5d6675;
+  --accent:#4a6285; --accent-contrast:#fff;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;background:var(--bg-primary);color:var(--text-primary);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  display:grid;place-items:center;padding:24px}
+.card{width:min(560px,94vw);background:var(--bg-surface);border:1px solid var(--border-subtle);
+  border-radius:22px;padding:34px;backdrop-filter:blur(20px) saturate(140%);
+  box-shadow:0 30px 80px rgba(0,0,0,.5)}
+h1{font-size:22px;font-weight:650;letter-spacing:-.4px;margin-bottom:6px}
+.sub{color:var(--text-muted);font-size:14px;margin-bottom:22px}
+.state{display:flex;align-items:center;gap:14px;padding:18px 0}
+.spin{width:26px;height:26px;border:2.5px solid rgba(255,255,255,.16);border-top-color:var(--accent-strong);
+  border-radius:50%;animation:sp .8s linear infinite;flex:0 0 auto}
+@keyframes sp{to{transform:rotate(360deg)}}
+.hidden{display:none !important}
+
+.opt{border:1px solid var(--border-subtle);border-radius:14px;padding:16px 18px;margin-top:12px;
+  background:var(--bg-elevated);transition:border-color .16s ease}
+.opt:hover{border-color:var(--accent)}
+.opt h3{font-size:15px;font-weight:620;margin-bottom:3px}
+.opt p{color:var(--text-muted);font-size:13px;margin-bottom:10px}
+button,select{font:inherit;border-radius:10px;border:1px solid var(--border-subtle);
+  background:var(--bg-surface);color:var(--text-primary);padding:9px 15px;cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-contrast);font-weight:620}
+button:disabled{opacity:.5;cursor:not-allowed}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+
+#drop{border:1.5px dashed var(--border-subtle);border-radius:12px;padding:22px;text-align:center;
+  color:var(--text-muted);font-size:13.5px;transition:border-color .16s ease,background .16s ease}
+#drop.over{border-color:var(--accent-strong);background:color-mix(in srgb,var(--accent) 12%,transparent);color:var(--text-primary)}
+.err{color:var(--bad);font-size:13.5px;margin-top:10px;white-space:pre-wrap}
+.tried{color:var(--text-muted);font-size:12.5px;margin-top:12px;line-height:1.7}
+.tag{display:inline-block;padding:1px 8px;border-radius:999px;border:1px solid var(--border-subtle);
+  font-size:11.5px;margin-right:6px}
+a.back{color:var(--text-muted);font-size:13px;text-decoration:none;display:inline-block;margin-top:20px}
+a.back:hover{color:var(--text-primary)}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">Starting…</h1>
+  <div class="sub" id="subtitle"></div>
+
+  <div id="working" class="state"><div class="spin"></div><div id="workingText">Launching…</div></div>
+
+  <div id="okBox" class="hidden">
+    <div class="state"><div style="font-size:26px">✓</div><div id="okText">Running.</div></div>
+  </div>
+
+  <!-- Launch Failed: three concrete things the player can do, never a bare error -->
+  <div id="failBox" class="hidden">
+    <div class="err" id="errText"></div>
+    <div class="tried" id="triedText"></div>
+
+    <div class="opt" id="optAlt">
+      <h3>Try a different emulator</h3>
+      <p>The same game run by another emulator. Often fixes a crash caused by graphics drivers.</p>
+      <div class="row">
+        <select id="altSelect"></select>
+        <button class="primary" id="altGo">Retry</button>
+      </div>
+    </div>
+
+    <div class="opt hidden" id="optBios">
+      <h3>Add the missing BIOS</h3>
+      <p id="biosWhich"></p>
+      <div id="drop">Drop the BIOS file here, or click to choose</div>
+      <input type="file" id="biosFile" class="hidden">
+    </div>
+
+    <div class="opt">
+      <h3>Play on this PC instead</h3>
+      <p>Hands off to the desktop companion and runs it on local hardware.</p>
+      <button id="desktopGo">Open on desktop</button>
+    </div>
+  </div>
+
+  <a class="back" href="/tv">← Back to library</a>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const qs = new URLSearchParams(location.search);
+const gameId = qs.get('id') || '';
+const token = localStorage.getItem('nexus_token') || qs.get('token') || '';
+try { const t = localStorage.getItem('nexus_theme'); if (t) document.documentElement.setAttribute('data-theme', t === 'midnight' ? 'cinematic' : t); } catch {}
+
+const H = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+let game = null;
+
+const show = (el, on) => el.classList.toggle('hidden', !on);
+function working(msg) {
+  $('#workingText').textContent = msg;
+  show($('#working'), true); show($('#failBox'), false); show($('#okBox'), false);
+}
+function succeeded(msg) {
+  show($('#working'), false); show($('#failBox'), false); show($('#okBox'), true);
+  $('#title').textContent = 'Running';
+  $('#okText').textContent = msg;
+}
+
+/**
+ * Render a failure as something actionable.
+ *
+ * A bare red error leaves the player stuck; every branch here ends in a button
+ * that can actually change the outcome.
+ */
+function failed(d, status) {
+  show($('#working'), false); show($('#okBox'), false); show($('#failBox'), true);
+  $('#title').textContent = 'Couldn’t start this game';
+  $('#errText').textContent = d?.error || d?.message || `Launch failed (HTTP ${status}).`;
+
+  // What the server already attempted, so "try another" isn't a blind guess.
+  const tried = d?.tried || [];
+  $('#triedText').innerHTML = tried.length
+    ? 'Already tried: ' + tried.map((t) => `<span class="tag">${t.label}: ${t.outcome}</span>`).join('')
+    : '';
+
+  // BIOS is the one failure with a single, certain fix — lead with it.
+  const needsBios = d?.requires_action === 'upload_bios';
+  show($('#optBios'), needsBios);
+  if (needsBios) {
+    $('#biosWhich').textContent =
+      `${d.platform_label || d.platform} needs a BIOS file. Any one of these works: ${(d.accepted_filenames || []).join(', ')}`;
+  }
+  loadAlternates();
+}
+
+async function loadAlternates() {
+  const sel = $('#altSelect');
+  sel.innerHTML = '<option>Loading…</option>';
+  try {
+    const r = await fetch(`/api/emulator/alternates?platform=${encodeURIComponent(game?.platform || '')}`, { headers: H });
+    const d = await r.json();
+    const alts = d.alternates || [];
+    sel.innerHTML = alts.length
+      ? alts.map((a) => `<option value="${a.id}"${a.available ? '' : ' disabled'}>${a.label}${a.available ? '' : ' — not installed'}</option>`).join('')
+      : '<option disabled>No alternates for this platform</option>';
+    const anyUsable = alts.some((a) => a.available);
+    $('#altGo').disabled = !anyUsable;
+    show($('#optAlt'), alts.length > 0);
+  } catch {
+    sel.innerHTML = '<option disabled>Could not load</option>';
+    $('#altGo').disabled = true;
+  }
+}
+
+async function launch(extra = {}) {
+  working(extra.emulator ? `Starting with ${extra.emulator}…` : 'Launching…');
+  try {
+    const r = await fetch('/api/games/launch', {
+      method: 'POST', headers: H,
+      body: JSON.stringify({ game_id: gameId, ...extra }),
+      signal: AbortSignal.timeout(90000),
+    });
+    const d = await r.json().catch(() => ({}));
+    // 202 is not a failure — it means the launch is waiting on something.
+    if (r.ok && d.success) {
+      succeeded(d.emulator ? `Started with ${d.emulator}${d.fellBackFrom ? ` (after ${d.fellBackFrom} failed)` : ''}.` : 'Started.');
+      return;
+    }
+    failed(d, r.status);
+  } catch (e) {
+    failed({ error: String(e.message || e) }, 0);
+  }
+}
+
+$('#altGo').onclick = () => launch({ emulator: $('#altSelect').value });
+
+// ── BIOS drop zone ────────────────────────────────────────────────────────
+const drop = $('#drop'), fileInput = $('#biosFile');
+drop.onclick = () => fileInput.click();
+fileInput.onchange = () => fileInput.files[0] && uploadBios(fileInput.files[0]);
+['dragenter', 'dragover'].forEach((e) => drop.addEventListener(e, (ev) => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave', 'drop'].forEach((e) => drop.addEventListener(e, (ev) => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', (ev) => { const f = ev.dataTransfer?.files?.[0]; if (f) uploadBios(f); });
+
+async function uploadBios(file) {
+  drop.textContent = `Uploading ${file.name}…`;
+  try {
+    const r = await fetch('/api/emulator/bios/upload', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'x-filename': file.name },
+      body: file,
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) throw new Error(d.error || `Upload failed (${r.status})`);
+    drop.textContent = `${file.name} saved — resuming…`;
+    // The launch was only paused; retry it now the file exists.
+    setTimeout(() => launch(), 600);
+  } catch (e) {
+    drop.textContent = 'Drop the BIOS file here, or click to choose';
+    $('#errText').textContent = String(e.message || e);
+  }
+}
+
+// ── Desktop handoff ───────────────────────────────────────────────────────
+// The companion listens on loopback; if it isn't running there is nothing to
+// hand off to, so say that rather than opening a link into nothing.
+$('#desktopGo').onclick = async () => {
+  $('#desktopGo').disabled = true;
+  $('#desktopGo').textContent = 'Checking for the desktop app…';
+  let alive = false;
+  try {
+    await fetch('http://127.0.0.1:17373/health', { mode: 'no-cors', signal: AbortSignal.timeout(2500) });
+    alive = true;
+  } catch { alive = false; }
+  if (alive) {
+    location.href = `nexus://launch?game=${encodeURIComponent(gameId)}`;
+    $('#desktopGo').textContent = 'Handed off to desktop';
+  } else {
+    $('#desktopGo').disabled = false;
+    $('#desktopGo').textContent = 'Open on desktop';
+    $('#errText').textContent = 'The desktop companion isn’t running on this machine, so there is nothing to hand off to. Start NexusEmu on the PC you want to play on, then try again.';
+  }
+};
+
+(async () => {
+  if (!gameId) { failed({ error: 'No game id supplied.' }, 0); return; }
+  try {
+    const d = await fetch('/api/games', { headers: H, signal: AbortSignal.timeout(60000) }).then((r) => r.json());
+    const list = Array.isArray(d) ? d : (d.games || d.items || []);
+    game = list.find((g) => g.id === gameId) || null;
+  } catch {}
+  $('#title').textContent = game?.title || 'Starting…';
+  $('#subtitle').textContent = game ? `${game.platform || ''}` : '';
+  launch();
+})();
+</script>
+</body>
+</html>
