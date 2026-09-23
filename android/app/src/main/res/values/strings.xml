@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">NexusEmu</string>
+    <string name="title_activity_main">NexusEmu</string>
+    <string name="package_name">com.savestate.nexus</string>
+    <string name="custom_url_scheme">com.savestate.nexus</string>
+</resources>

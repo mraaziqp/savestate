@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  NexusEmu control plane on AWS App Runner — a serverless container service, no
+  EC2 instances to manage. Scales to zero-ish between requests and terminates
+  TLS on its own domain, which removes the need for Nginx and Let's Encrypt.
+
+  READ BEFORE DEPLOYING — two capabilities do not survive the move:
+
+    * Hardware transcoding. There is no /dev/dri on App Runner or Fargate, so
+      ffmpeg falls back to software x264. Measured on the laptop: 3.2x realtime
+      at 323% CPU versus 8.9x at 63% with VAAPI. About 76% of this library is
+      HEVC/AC3 in Matroska and must be transcoded, so a 2 vCPU task supports
+      roughly one concurrent viewer. Size accordingly, or keep transcoding on
+      hardware you control and use this only as the control plane.
+
+    * Local emulation and Remote Play. Both drive processes on the host
+      (RetroArch, xdotool); neither works in a managed container.
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: nexus-emu
+  ImageUri:
+    Type: String
+    Description: Full ECR image URI including tag.
+  SecretName:
+    Type: String
+    Default: nexus-emu/env
+    Description: Secrets Manager secret holding the .env as JSON.
+  SecretArn:
+    Type: String
+    Default: ''
+    Description: >
+      Full ARN of that secret. Leave blank and the deploy script fills it in --
+      Secrets Manager appends a random 6-character suffix to every ARN, so it
+      cannot be derived from the name alone.
+  Cpu:
+    Type: String
+    Default: '2 vCPU'
+    AllowedValues: ['0.25 vCPU', '0.5 vCPU', '1 vCPU', '2 vCPU', '4 vCPU']
+  Memory:
+    Type: String
+    Default: '4 GB'
+    AllowedValues: ['0.5 GB', '1 GB', '2 GB', '3 GB', '4 GB', '6 GB', '8 GB', '10 GB', '12 GB']
+
+Resources:
+  # Lets App Runner pull the image out of a private ECR repository.
+  EcrAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServiceName}-ecr-access'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: build.apprunner.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
+
+  # The role the running container assumes. Scoped to exactly one secret --
+  # a wildcard here would let the app read every secret in the account.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ServiceName}-instance'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: tasks.apprunner.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: read-own-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [secretsmanager:GetSecretValue]
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${SecretName}-*'
+
+  Service:
+    Type: AWS::AppRunner::Service
+    Properties:
+      ServiceName: !Ref ServiceName
+      SourceConfiguration:
+        AuthenticationConfiguration:
+          AccessRoleArn: !GetAtt EcrAccessRole.Arn
+        AutoDeploymentsEnabled: false   # deploys go through the script, not on push
+        ImageRepository:
+          ImageIdentifier: !Ref ImageUri
+          ImageRepositoryType: ECR
+          ImageConfiguration:
+            Port: '3000'
+            RuntimeEnvironmentVariables:
+              - { Name: NODE_ENV, Value: production }
+              - { Name: PORT, Value: '3000' }
+              - { Name: NEXUS_CLOUD_FIRST, Value: '1' }
+              - { Name: NEXUS_STREAM_ONLY, Value: '1' }
+              - { Name: NEXUS_DISABLE_LOCAL_SCAN, Value: '1' }
+              # No render node in a managed container.
+              - { Name: NEXUS_DISABLE_HW_TRANSCODE, Value: '1' }
+              - { Name: NEXUS_VAULT_FALLBACK, Value: /tmp/nexus-vault }
+              - { Name: NEXUS_DATA_DIR, Value: /tmp/nexus-data }
+            RuntimeEnvironmentSecrets:
+              - { Name: DATABASE_URL,   Value: !Sub '${SecretArn}:DATABASE_URL::' }
+              - { Name: JWT_SECRET,     Value: !Sub '${SecretArn}:JWT_SECRET::' }
+              - { Name: GEMINI_API_KEY, Value: !Sub '${SecretArn}:GEMINI_API_KEY::' }
+              - { Name: NEXUS_ENCRYPTION_KEY, Value: !Sub '${SecretArn}:NEXUS_ENCRYPTION_KEY::' }
+              - { Name: AWEHCHAT_API_KEY,     Value: !Sub '${SecretArn}:AWEHCHAT_API_KEY::' }
+              - { Name: GOOGLE_DRIVE_CLIENT_ID,     Value: !Sub '${SecretArn}:GOOGLE_DRIVE_CLIENT_ID::' }
+              - { Name: GOOGLE_DRIVE_CLIENT_SECRET, Value: !Sub '${SecretArn}:GOOGLE_DRIVE_CLIENT_SECRET::' }
+              - { Name: GOOGLE_DRIVE_REFRESH_TOKEN, Value: !Sub '${SecretArn}:GOOGLE_DRIVE_REFRESH_TOKEN::' }
+      InstanceConfiguration:
+        Cpu: !Ref Cpu
+        Memory: !Ref Memory
+        InstanceRoleArn: !GetAtt InstanceRole.Arn
+      HealthCheckConfiguration:
+        Protocol: HTTP
+        Path: /api/health
+        # Generous: a cold start probes Neon and builds the media index before
+        # it can answer, and a tight threshold kills the task mid-boot.
+        Interval: 20
+        Timeout: 10
+        HealthyThreshold: 1
+        UnhealthyThreshold: 5
+      NetworkConfiguration:
+        IngressConfiguration:
+          IsPubliclyAccessible: true
+
+Mappings: {}
+
+Outputs:
+  ServiceUrl:
+    Description: Public HTTPS endpoint (App Runner terminates TLS).
+    Value: !Sub 'https://${Service.ServiceUrl}'
+  ServiceArn:
+    Value: !GetAtt Service.ServiceArn
+  CustomDomainHint:
+    Description: How to attach the wildcard domain.
+    Value: !Sub >
+      aws apprunner associate-custom-domain --service-arn ${Service.ServiceArn}
+      --domain-name savestate.co.za --enable-www-subdomain
