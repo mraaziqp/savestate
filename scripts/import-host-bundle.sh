@@ -65,6 +65,7 @@ place "$B/cloudflared/config.yml" "$DATA_DIR/cloudflared/config.yml"
 
 # rclone (Drive)
 place "$B/rclone/rclone.conf" "$HOME/.config/rclone/rclone.conf"
+place "$B/rclone/rcd.env" "$HOME/.config/rclone/rcd.env"
 
 # App env
 place "$B/env/.env" "$APP_DIR/.env"

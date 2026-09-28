@@ -1,0 +1,53 @@
+# Nexus Cloud Media Mount (Google Drive archive)
+#
+# TUNED 2026-09-20 to fix chronic playback buffering.
+#
+# The previous config used --vfs-cache-mode=minimal, which caches metadata but
+# never file data. Every read at a new offset therefore became a fresh HTTPS
+# range request to Google Drive. Measured cost on this host, building one 6s
+# HLS segment from a 1080p source:
+#
+#            minimal (old)   full + read-ahead (new)
+#   cold seek     9.54s            6.78s
+#   next segment  9.44s            0.69s
+#   next segment  9.81s            0.66s
+#
+# Producing 6 seconds of video took 9.5 seconds, so playback could never keep
+# up and the player buffered forever. ffmpeg sat at 4-5% CPU the whole time —
+# it was not encoding, it was waiting on the network. With the VFS cache and
+# read-ahead the same work takes 0.68s (8.8x realtime), which is the encoder's
+# actual speed.
+#
+# Cache sizing: this host has ~56 GB free after losing the media drive, so the
+# cache is capped at 12 GB and aged out after 24h. Raise --vfs-cache-max-size
+# if disk frees up; lower it if the root filesystem gets tight.
+[Unit]
+Description=Nexus Cloud Media Mount (Google Drive & OneDrive Archive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/fusermount3 -u -z __HOME__/nexus-cloud-media
+ExecStartPre=-/bin/mkdir -p __HOME__/nexus-cloud-media __HOME__/.nexus-data/rclone-cache
+ExecStart=__HOME__/.local/bin/rclone mount gdrive:NexusArchive __HOME__/nexus-cloud-media \
+  --config=__HOME__/.config/rclone/rclone.conf \
+  --vfs-cache-mode=full \
+  --cache-dir=__HOME__/.nexus-data/rclone-cache \
+  --vfs-cache-max-size=12G \
+  --vfs-cache-max-age=24h \
+  --vfs-read-chunk-size=16M \
+  --vfs-read-chunk-size-limit=512M \
+  --vfs-read-ahead=256M \
+  --vfs-fast-fingerprint \
+  --buffer-size=64M \
+  --dir-cache-time=24h \
+  --transfers=8 \
+  --checkers=16 \
+  --read-only
+ExecStop=/usr/bin/fusermount3 -u -z __HOME__/nexus-cloud-media
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

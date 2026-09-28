@@ -1,0 +1,22 @@
+[Unit]
+Description=NexusEmu Host Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash __APP_DIR__/build-server.sh
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node __APP_DIR__/dist/server.mjs
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=0
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexus-host
+
+[Install]
+WantedBy=default.target

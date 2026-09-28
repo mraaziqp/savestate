@@ -1,0 +1,106 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# nexus-rclone-rcd.service — Rclone Remote Control daemon
+#
+# This is the engine behind the in-app OneDrive → Google Drive transfer. It
+# exposes an HTTP JSON API on localhost that the Nexus frontend calls to start
+# jobs and poll progress.
+#
+# Install:  cp to ~/.config/systemd/user/nexus-rclone-rcd.service
+#           systemctl --user daemon-reload
+#           systemctl --user enable --now nexus-rclone-rcd.service
+# ─────────────────────────────────────────────────────────────────────────────
+[Unit]
+Description=Rclone RC daemon — cloud-to-cloud transfer engine for Nexus Emu
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ── SECURITY: credentials come from the environment, never the command line ──
+# rclone reads RCLONE_RC_USER / RCLONE_RC_PASS directly from the environment,
+# so the flags are omitted deliberately. Passing --rc-pass on the command line
+# puts the password in the process argv, where ANY local user can read it with
+# a plain `ps aux`. Env vars of another user's process are not world-readable.
+# Format of __HOME__/.config/rclone/rcd.env (chmod 600):
+#     RCLONE_RC_USER=nexus
+#     RCLONE_RC_PASS=<a long random string>
+# Generate the password with:  openssl rand -base64 32
+EnvironmentFile=__HOME__/.config/rclone/rcd.env
+
+ExecStart=__HOME__/.local/bin/rclone rcd \
+  --config=__HOME__/.config/rclone/rclone.conf \
+  --rc-addr 127.0.0.1:5572 \
+  --rc-allow-origin "http://localhost:3000" \
+  --rc-web-gui=false \
+  --rc-job-expire-duration 24h \
+  --rc-job-expire-interval 60s \
+  --transfers 12 \
+  --checkers 24 \
+  --drive-chunk-size 128M \
+  --onedrive-chunk-size 100M \
+  --tpslimit 10 \
+  --tpslimit-burst 20 \
+  --stats 5s \
+  --stats-one-line \
+  --use-json-log \
+  --log-level INFO \
+  --log-file __HOME__/.local/share/rclone-rcd.log
+
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WHY THESE CHOICES:
+#
+# --rc-addr 127.0.0.1:5572   (NOT 0.0.0.0)
+#     Binds to loopback only. This daemon holds live OAuth tokens for both your
+#     Google Drive and your OneDrive — anyone who reaches this port can read and
+#     delete everything in both accounts. Your box is exposed to the internet
+#     via the savestate.co.za Cloudflare tunnel, so binding to 0.0.0.0 would put
+#     a credentialed file-management API on the public internet. Loopback +
+#     auth, always. The Nexus server (also on localhost:3000) proxies to it.
+#
+# --rc-allow-origin http://localhost:3000
+#     Without this the browser blocks the fetch as a CORS violation. Set to your
+#     actual frontend origin. Do NOT use "*" — with auth credentials attached,
+#     a wildcard origin lets any page you visit drive this API.
+#
+# --rc-job-expire-duration 24h
+#     Async job results are kept in memory for 24h so a long transfer's status
+#     survives a browser refresh. Default is 60s, which would make your progress
+#     UI lose the job almost immediately.
+#
+# ── THE ONE THAT ACTUALLY MATTERS FOR YOUR 350 GB ──
+# rclone does SERVER-SIDE transfers only between two remotes of the SAME
+# provider. OneDrive → Google Drive are different providers, so there is NO
+# server-side copy path: every byte flows OneDrive → your laptop → Google Drive.
+#
+# Consequences you need to plan for:
+#   1. 350 GB round-trips through your home connection, in BOTH directions.
+#      At a 20 Mbit/s upload that is roughly 40 hours of continuous transfer.
+#   2. It does NOT consume local disk — rclone streams through memory buffers,
+#      it does not stage the full file. Your 1.4 GB of free space is not a
+#      blocker for this specific operation.
+#   3. Google Drive enforces a hard 750 GB/day upload quota per account. 350 GB
+#      fits in one day, but if you retry after a partial failure you can trip it.
+#      When you do, rclone reports 403 userRateLimitExceeded and stalls.
+#
+# --tpslimit 10 --tpslimit-burst 20
+#     Caps total API transactions/sec across both providers. This is what keeps
+#     you under OneDrive's throttling threshold on a long-running job.
+#
+# --onedrive-chunk-size 100M / --drive-chunk-size 128M
+#     Larger chunks = fewer HTTP round trips = higher sustained throughput on
+#     big video files. Each concurrent transfer buffers one chunk in RAM, so
+#     with --transfers 12 the ceiling is ~12 x 128M ≈ 1.5 GB. You have 15 GB
+#     total with ~9 GB available, so this fits — but do not raise --transfers
+#     much past 12 on this machine.
+#
+# --use-json-log
+#     Machine-parseable log lines, so the Nexus server can tail this file and
+#     surface real errors in the UI instead of an opaque "failed".
+# ─────────────────────────────────────────────────────────────────────────────

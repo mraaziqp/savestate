@@ -1,0 +1,23 @@
+# NexusEmu Local Client Launcher Companion (Port 17373)
+#
+# RECOVERED 2026-09-20: WorkingDirectory and ExecStart both pointed at the
+# destroyed "/media/moh/EMULATION dRIVE" copy of the project. Repointed at the
+# live working copy in the home directory.
+[Unit]
+Description=NexusEmu Local Client Launcher Companion (Port 17373)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=-__APP_DIR__/.env
+ExecStart=/usr/bin/node __APP_DIR__/client-launcher.cjs
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nexus-client-launcher
+
+[Install]
+WantedBy=default.target

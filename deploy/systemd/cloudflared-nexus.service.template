@@ -1,0 +1,22 @@
+# NexusEmu Cloudflare Named Tunnel (savestate.co.za)
+#
+# RECOVERED 2026-09-20: the previous ExecStart read its config from
+# "/media/moh/EMULATION dRIVE/NexussEmu/.nexus-data/cloudflared/config.yml".
+# That drive was destroyed, so with Restart=always any crash would have taken
+# savestate.co.za down permanently. The config now lives on the system disk.
+[Unit]
+Description=NexusEmu Cloudflare Named Tunnel (savestate.co.za)
+After=network-online.target nexus-host.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__HOME__/.local/bin/cloudflared tunnel --protocol http2 --config __HOME__/.nexus-data/cloudflared/config.yml run nexusemu-prod
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cloudflared-nexus
+
+[Install]
+WantedBy=default.target

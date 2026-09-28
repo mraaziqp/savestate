@@ -74,6 +74,12 @@ if [[ -f "$HOME/.config/rclone/rclone.conf" ]]; then
 else
   warn "no rclone config — the Drive mount will need re-authorising"
 fi
+# The rcd unit reads this for the RC daemon's auth; without it the unit starts
+# and then fails, and the cloud-to-cloud transfer engine is quietly missing.
+if [[ -f "$HOME/.config/rclone/rcd.env" ]]; then
+  cp "$HOME/.config/rclone/rcd.env" "$STAGE/bundle/rclone/"
+  ok "rclone rcd env"
+fi
 
 # ── App env ──────────────────────────────────────────────────────────────────
 for f in .env .env.production; do
