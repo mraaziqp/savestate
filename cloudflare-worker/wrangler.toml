@@ -1,0 +1,15 @@
+# Deploy:  npx wrangler deploy
+# The route puts this Worker in front of every request to the domain; the happy
+# path is a pass-through, so normal traffic is unaffected.
+name = "savestate-failover"
+main = "savestate-failover.js"
+compatibility_date = "2026-09-01"
+
+routes = [
+  { pattern = "savestate.co.za/*", zone_name = "savestate.co.za" },
+  { pattern = "*.savestate.co.za/*", zone_name = "savestate.co.za" },
+]
+
+# Optional secondary origin, tried before showing the offline page.
+[vars]
+FALLBACK_ORIGIN = "https://main.d1o153osqs5hc7.amplifyapp.com"
