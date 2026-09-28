@@ -42,6 +42,14 @@ Parameters:
     Type: String
     Default: '4 GB'
     AllowedValues: ['0.5 GB', '1 GB', '2 GB', '3 GB', '4 GB', '6 GB', '8 GB', '10 GB', '12 GB']
+  NodeHeapMB:
+    Type: Number
+    Default: 1024
+    Description: >
+      V8 max-old-space in MB. Must leave room inside Memory for ffmpeg children
+      and the Node runtime itself -- the image's own 1536 MB default is too
+      close to the ceiling on a 2 GB task and gets the container OOM-killed
+      under transcoding load.
 
 Resources:
   # Lets App Runner pull the image out of a private ECR repository.
@@ -102,6 +110,13 @@ Resources:
               - { Name: NEXUS_DISABLE_HW_TRANSCODE, Value: '1' }
               - { Name: NEXUS_VAULT_FALLBACK, Value: /tmp/nexus-vault }
               - { Name: NEXUS_DATA_DIR, Value: /tmp/nexus-data }
+              # Overrides the image's built-in NODE_OPTIONS so the heap is sized
+              # against the memory this service actually has.
+              - { Name: NODE_OPTIONS, Value: !Sub '--max-old-space-size=${NodeHeapMB}' }
+              # The HLS segment cache lives on the container's ephemeral disk,
+              # which is far smaller than the laptop's. 2 GB keeps it useful
+              # without risking a full disk, which fails every segment build.
+              - { Name: NEXUS_HLS_CACHE_MAX_GB, Value: '2' }
             RuntimeEnvironmentSecrets:
               - { Name: DATABASE_URL,   Value: !Sub '${SecretArn}:DATABASE_URL::' }
               - { Name: JWT_SECRET,     Value: !Sub '${SecretArn}:JWT_SECRET::' }
@@ -114,6 +129,11 @@ Resources:
               - { Name: GDRIVE_CLIENT_ID,     Value: !Sub '${SecretArn}:GDRIVE_CLIENT_ID::' }
               - { Name: GDRIVE_CLIENT_SECRET, Value: !Sub '${SecretArn}:GDRIVE_CLIENT_SECRET::' }
               - { Name: GDRIVE_REFRESH_TOKEN, Value: !Sub '${SecretArn}:GDRIVE_REFRESH_TOKEN::' }
+              # Preferred over the three above: a service-account key has no
+              # consent screen and no refresh token to expire. Holds the key
+              # JSON itself (single line), not a file path — the container has
+              # no key file to point at.
+              - { Name: GDRIVE_SERVICE_ACCOUNT_JSON, Value: !Sub '${SecretArn}:GDRIVE_SERVICE_ACCOUNT_JSON::' }
       InstanceConfiguration:
         Cpu: !Ref Cpu
         Memory: !Ref Memory

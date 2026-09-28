@@ -5583,6 +5583,83 @@ async function startServer() {
       return { ok: !!pin, msg: pin ? 'PIN configured' : 'ACCESS_PIN not set — all clients can connect without PIN' };
     });
 
+    // ── Checks below answer "what is actually serving right now" ──────────
+    // The set above proves the box is configured; these prove the paths users
+    // depend on are live, which is the difference between a dashboard that
+    // looks green and one that tells you why playback just broke.
+
+    // The public URL check above proves the domain answers, but not WHY when it
+    // stops: a dead tunnel and a dead server look identical from outside.
+    await check('Domain: Cloudflare tunnel', true, async () => {
+      const { stdout } = await execAsync("pgrep -a cloudflared || true").catch(() => ({ stdout: "" }));
+      const line = String(stdout).split("\n").find((l) => l.includes("cloudflared"));
+      if (!line) return { ok: false, msg: 'cloudflared not running — savestate.co.za will not reach this host' };
+      const named = /run\s+(\S+)\s*$/.exec(line.trim());
+      return { ok: true, msg: `Running${named ? ` (tunnel: ${named[1]})` : ''}` };
+    });
+
+    // Media served from Drive fails in a way that looks like a stalled player,
+    // so surface the credential state directly rather than leaving it to guess.
+    await check('Media: Google Drive', false, async () => {
+      const usingSa = !!(process.env.GDRIVE_SERVICE_ACCOUNT_JSON ?? "").trim();
+      const usingOauth = !!(process.env.GDRIVE_REFRESH_TOKEN ?? "").trim();
+      if (!usingSa && !usingOauth) {
+        return { ok: false, warn: true, msg: 'No Drive credentials — Drive-hosted media unavailable' };
+      }
+      const client = await getGoogleDriveClient();
+      if (!client) return { ok: false, msg: 'Drive credentials present but the client failed to initialise' };
+      const r = await client.files.list({
+        pageSize: 1, fields: 'files(id)',
+        includeItemsFromAllDrives: true, supportsAllDrives: true,
+      });
+      const n = (r?.data?.files ?? []).length;
+      return {
+        ok: n > 0,
+        warn: n === 0,
+        msg: n > 0
+          ? `Connected via ${usingSa ? 'service account' : 'OAuth'}`
+          : `Authenticated via ${usingSa ? 'service account' : 'OAuth'} but nothing is shared with it`,
+      };
+    });
+
+    await check('Media: Library', false, async () => {
+      const root = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
+      const items = await scanMediaDir(root, 5000).catch(() => [] as MediaItem[]);
+      const videos = items.filter((i) => i.kind === 'video').length;
+      return { ok: videos > 0, warn: videos === 0, msg: `${videos} video(s) under ${root}` };
+    });
+
+    // Software transcoding is ~3x realtime versus ~9x on VAAPI, which is the
+    // difference between smooth playback and a spinner under any real load.
+    await check('Streaming: Hardware transcode', false, async () => {
+      if (process.env.NEXUS_DISABLE_HW_TRANSCODE === '1') {
+        return { ok: false, warn: true, msg: 'Disabled by NEXUS_DISABLE_HW_TRANSCODE — software encoding only' };
+      }
+      const hw = await hwEncodeAvailable().catch(() => false);
+      return {
+        ok: hw, warn: !hw,
+        msg: hw ? `VAAPI available (${VAAPI_DEVICE})` : 'No usable VAAPI device — software encoding only (much slower)',
+      };
+    });
+
+    // A full disk fails every segment build, which the player shows as a
+    // spinner that never resolves. This cache reached 37 GB once already.
+    await check('Streaming: HLS cache', false, async () => {
+      const names = await readdir(HLS_CACHE_DIR).catch(() => [] as string[]);
+      let bytes = 0;
+      for (const n of names) {
+        const st = await stat(path.join(HLS_CACHE_DIR, n)).catch(() => null);
+        if (st?.isFile()) bytes += st.size;
+      }
+      const gb = bytes / 1024 ** 3;
+      const capGb = HLS_CACHE_MAX_BYTES / 1024 ** 3;
+      return {
+        ok: gb <= capGb,
+        warn: gb > capGb,
+        msg: `${gb.toFixed(2)} GB across ${names.length} file(s) (cap ${capGb.toFixed(0)} GB)`,
+      };
+    });
+
     // Summarise
     const passed  = checks.filter(c => c.status === 'pass').length;
     const failed  = checks.filter(c => c.status === 'fail').length;
@@ -19471,6 +19548,45 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (_gdriveClient) return _gdriveClient;
     try {
       const { google } = await import("googleapis");
+
+      // ── Service account (preferred for an always-on server) ───────────────
+      // Checked before the OAuth path because it has no moving parts that can
+      // expire: no consent screen, no refresh token, no publishing status. A
+      // user-OAuth refresh token issued by an app still in "Testing" dies after
+      // 7 days, and moving that app to production demands an app name, support
+      // email, homepage and privacy-policy URL — a lot of ceremony for a
+      // credential only this server ever uses.
+      //
+      // Point GDRIVE_SERVICE_ACCOUNT_JSON at the downloaded key file (or paste
+      // the JSON itself), then share the Drive folder with the service
+      // account's client_email. Note it reads what is shared with it; creating
+      // NEW files can fail, because a service account has no Drive storage
+      // quota of its own on a consumer account.
+      const saRaw = (process.env.GDRIVE_SERVICE_ACCOUNT_JSON ?? "").trim();
+      if (saRaw) {
+        try {
+          const creds = saRaw.startsWith("{")
+            ? JSON.parse(saRaw)
+            : JSON.parse(await readFile(saRaw, "utf-8"));
+          if (!creds.client_email || !creds.private_key) {
+            throw new Error("key file has no client_email/private_key");
+          }
+          const jwtAuth = new google.auth.JWT({
+            email: creds.client_email,
+            key: creds.private_key,
+            scopes: ["https://www.googleapis.com/auth/drive"],
+          });
+          await jwtAuth.authorize();
+          _gdriveClient = google.drive({ version: "v3", auth: jwtAuth });
+          log("INFO", `Google Drive: authenticated as service account ${creds.client_email}`, "stream");
+          return _gdriveClient;
+        } catch (e: any) {
+          // Fall through to OAuth rather than failing outright — a broken
+          // service-account key should not take out a working refresh token.
+          log("WARN", `Google Drive service account unusable (${e?.message ?? e}) — falling back to OAuth`, "stream");
+        }
+      }
+
       let clientId = process.env.GDRIVE_CLIENT_ID;
       let clientSecret = process.env.GDRIVE_CLIENT_SECRET;
       let refreshToken = process.env.GDRIVE_REFRESH_TOKEN;

@@ -17,6 +17,14 @@ cd "$(dirname "$0")/.."
 REGION="${AWS_REGION:-eu-west-2}"
 REPO="${ECR_REPO:-nexus-emu}"
 STACK="${STACK_NAME:-nexus-emu}"
+# Size the App Runner instance. These were previously never passed, so every
+# deploy silently took the template's 2 vCPU / 4 GB defaults regardless of
+# intent. NODE_MAX_OLD_SPACE must stay well under CPU_MEM: the image ships a
+# 1536 MB heap, which leaves almost nothing for ffmpeg and the runtime itself
+# in a 2 GB task and invites an OOM kill.
+SVC_CPU="${SVC_CPU:-1 vCPU}"
+SVC_MEM="${SVC_MEM:-2 GB}"
+NODE_HEAP_MB="${NODE_HEAP_MB:-1024}"
 TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%s)}"
 ENV_FILE="${NEXUS_ENV_FILE:-.env.production}"
 SECRET_NAME="${SECRET_NAME:-nexus-emu/env}"
@@ -146,7 +154,10 @@ deploy() {
         ImageUri="$uri:$TAG" \
         SecretName="$SECRET_NAME" \
         SecretArn="$secret_arn" \
-        ServiceName="$STACK"
+        ServiceName="$STACK" \
+        Cpu="$SVC_CPU" \
+        Memory="$SVC_MEM" \
+        NodeHeapMB="$NODE_HEAP_MB"
   status
 }
 

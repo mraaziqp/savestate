@@ -10,7 +10,7 @@
 //   2. APIs & Services → Library → enable "Google Drive API".
 //   3. APIs & Services → Credentials → Create Credentials → OAuth client ID.
 //      Application type: "Web application".
-//      Authorized redirect URIs: add http://localhost:8080/oauth2callback
+//      Authorized redirect URIs: add the redirect URI this script prints
 //   4. Copy the Client ID and Client Secret it gives you.
 //
 // Usage:
@@ -21,21 +21,61 @@
 // lands in shell history or in `ps` output.
 
 import http from "node:http";
-import readline from "node:readline";
 import { URL } from "node:url";
 
+// Reads a line from the terminal, optionally without echoing it.
+//
+// Written against raw stdin rather than readline: overriding readline's
+// _writeToOutput to suppress the echo left its question callback unresolved,
+// so the process exited with "Detected unsettled top-level await" the moment
+// Enter was pressed. Raw mode is explicit about when the line ends and cannot
+// get into that state.
 function ask(question, { hidden = false } = {}) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  if (hidden) {
-    // Suppress echo so the secret isn't shown on screen as it's typed.
-    rl._writeToOutput = (s) => { if (s.includes(question)) rl.output.write(s); };
-  }
-  return new Promise((resolve) => rl.question(question, (answer) => { rl.close(); if (hidden) process.stdout.write("\n"); resolve(answer.trim()); }));
+  return new Promise((resolve, reject) => {
+    const stdin = process.stdin;
+    if (!stdin.isTTY) {
+      reject(new Error("No terminal available for input. Set GDRIVE_CLIENT_SECRET in the environment instead."));
+      return;
+    }
+    process.stdout.write(question);
+    stdin.resume();
+    stdin.setEncoding("utf8");
+    if (hidden) stdin.setRawMode(true);
+
+    let buf = "";
+    const finish = () => {
+      if (hidden) stdin.setRawMode(false);
+      stdin.removeListener("data", onData);
+      stdin.pause();
+      process.stdout.write("\n");
+      resolve(buf.trim());
+    };
+    const onData = (chunk) => {
+      // In raw mode a paste arrives as one chunk, so walk it character by
+      // character rather than assuming a single keystroke.
+      for (const ch of chunk) {
+        if (ch === "\n" || ch === "\r" || ch === "") return finish();
+        if (ch === "") { if (hidden) stdin.setRawMode(false); process.stdout.write("\n"); process.exit(130); }
+        if (ch === "" || ch === "\b") { buf = buf.slice(0, -1); continue; }
+        buf += ch;
+      }
+    };
+    stdin.on("data", onData);
+  });
 }
 
 let clientId = process.argv[2];
 if (!clientId) clientId = await ask("Client ID (ends in .apps.googleusercontent.com): ");
-const clientSecret = await ask("Client secret (starts with GOCSPX-, input hidden): ", { hidden: true });
+
+// An env var avoids the prompt entirely, which also helps when the terminal
+// cannot do raw mode. Prefix the command with a space to keep it out of
+// shell history.
+let clientSecret = process.env.GDRIVE_CLIENT_SECRET ?? "";
+if (clientSecret) {
+  console.log("Using GDRIVE_CLIENT_SECRET from the environment.");
+} else {
+  clientSecret = await ask("Client secret (starts with GOCSPX-, input hidden): ", { hidden: true });
+}
 
 if (!clientId || !clientSecret) {
   console.error("Both a client ID and a client secret are required.");
@@ -48,7 +88,27 @@ if (/^YOUR_|_HERE$|^<.*>$/.test(clientSecret) || !clientSecret.startsWith("GOCSP
   process.exit(1);
 }
 
-const REDIRECT_URI = "http://localhost:8080/oauth2callback";
+// Port 8080 is a common default and is often already taken (on this host it is
+// stalwart-mail). Pick the first free port from a short list instead of failing
+// with EADDRINUSE -- but print the resulting URI loudly, because it has to match
+// an Authorized redirect URI on the OAuth client exactly.
+import net from "node:net";
+
+async function firstFreePort(candidates) {
+  for (const p of candidates) {
+    const free = await new Promise((resolve) => {
+      const s = net.createServer();
+      s.once("error", () => resolve(false));
+      s.once("listening", () => s.close(() => resolve(true)));
+      s.listen(p, "127.0.0.1");
+    });
+    if (free) return p;
+  }
+  throw new Error("No free port found for the OAuth callback.");
+}
+
+const PORT = Number(process.env.OAUTH_PORT) || await firstFreePort([8080, 8088, 8090, 8123, 9080]);
+const REDIRECT_URI = `http://localhost:${PORT}/oauth2callback`;
 // Full read/write Drive scope — server.ts references upload functionality
 // (gdriveUploads) alongside the read-only streaming proxy, so this needs to
 // cover both. Narrow to drive.readonly later if uploads turn out unused.
@@ -65,7 +125,7 @@ const authUrl = oauth2Client.generateAuthUrl({
 
 console.log("\n1. Open this URL in your browser and approve access:\n");
 console.log(authUrl);
-console.log("\n2. Waiting for the redirect back to localhost:8080 ...\n");
+console.log(`\n2. Waiting for the redirect back to ${REDIRECT_URI} ...\n`);
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, REDIRECT_URI);
@@ -98,4 +158,4 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(8080);
+server.listen(PORT);
