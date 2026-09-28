@@ -20,38 +20,43 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── deps: production node_modules only ───────────────────────────────────────
-FROM node:20-alpine AS deps
+# Debian slim, not Alpine, and Node 22, not 20 — both deliberate:
+#
+#  * Alpine (musl) + `apk add vips-dev` made sharp detect a system libvips and
+#    compile itself from source, which then failed for want of node-addon-api.
+#    On glibc it just unpacks its prebuilt @img/sharp-linux-x64 binary, so no
+#    build toolchain is needed in this image at all.
+#  * googleapis (google-auth-library, gcp-metadata, google-logging-utils) and
+#    pdfjs-dist all declare engines >=22 and warn loudly on Node 20.
+FROM node:22-slim AS deps
 WORKDIR /app
-# node-gyp fallbacks for any native module without a musl prebuild; none of
-# this reaches the final image.
-RUN apk add --no-cache python3 make g++ libc6-compat vips-dev
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev --no-audit --no-fund \
  || npm install --omit=dev --no-audit --no-fund
 
 # ── build: bundle the server ─────────────────────────────────────────────────
-FROM node:20-alpine AS build
+FROM node:22-slim AS build
 WORKDIR /app
-RUN apk add --no-cache libc6-compat
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json server.ts ./
 # esbuild is the only build-time dependency; --packages=external keeps
 # node_modules out of the bundle so the layer stays cacheable.
 RUN npm install --no-save esbuild@^0.25.0 \
  && ./node_modules/.bin/esbuild server.ts \
-      --platform=node --target=node20 --format=esm --packages=external \
+      --platform=node --target=node22 --format=esm --packages=external \
       --outfile=dist/server.mjs \
  && test -s dist/server.mjs
 
 # ── runtime ──────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:22-slim AS runtime
 WORKDIR /app
 
 # ffmpeg is required: ~76% of the library is HEVC/AC3 in Matroska and must be
 # transcoded before a browser can play it. tini reaps the ffmpeg children a
 # bare node PID 1 would leave behind.
-RUN apk add --no-cache ffmpeg tini curl \
- && rm -rf /var/cache/apk/*
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg tini curl \
+ && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
     PORT=3000 \
@@ -81,5 +86,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
 
-ENTRYPOINT ["/sbin/tini", "--"]
+# Debian puts tini at /usr/bin, unlike Alpine's /sbin.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/server.mjs"]

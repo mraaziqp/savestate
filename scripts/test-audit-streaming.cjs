@@ -91,8 +91,16 @@ async function testSegments(tok) {
   const t0 = Date.now();
   const pl = await fetch(`${BASE}/api/media/hls/playlist.m3u8?rel=${rel}`, { headers: H, signal: AbortSignal.timeout(120000) });
   const plMs = Date.now() - t0;
-  const body = await pl.text();
+  let body = await pl.text();
   pl.ok ? ok(`playlist served in ${plMs}ms`) : bad(`playlist returned ${pl.status}`);
+
+  if (body.includes('#EXT-X-STREAM-INF:')) {
+    const vMatch = body.match(/(\/api\/media\/hls\/playlist\.m3u8\?[^\r\n]+)/);
+    if (vMatch) {
+      const vRes = await fetch(`${BASE}${vMatch[1]}`, { headers: H, signal: AbortSignal.timeout(120000) });
+      body = await vRes.text();
+    }
+  }
 
   // Fast-start: the head segments must be short so a frame can be drawn early.
   const durs = [...body.matchAll(/#EXTINF:([\d.]+)/g)].map((m) => parseFloat(m[1]));
@@ -249,7 +257,14 @@ async function testAudioDecodable(tok) {
 
   const rel = encodeURIComponent(target.relPath);
   const pl = await fetch(`${BASE}/api/media/hls/playlist.m3u8?rel=${rel}`, { headers: H, signal: AbortSignal.timeout(120000) });
-  const body = await pl.text();
+  let body = await pl.text();
+  if (body.includes('#EXT-X-STREAM-INF:')) {
+    const vMatch = body.match(/(\/api\/media\/hls\/playlist\.m3u8\?[^\r\n]+)/);
+    if (vMatch) {
+      const vRes = await fetch(`${BASE}${vMatch[1]}`, { headers: H, signal: AbortSignal.timeout(120000) });
+      body = await vRes.text();
+    }
+  }
   /[?&]ev=\d/.test(body) ? ok('playlist emits versioned segment URLs') : bad('playlist URLs are unversioned');
 
   const seg = await fetch(`${BASE}/api/media/hls/segment.ts?rel=${rel}&quality=auto&audio_track=0&n=0&ev=3`,

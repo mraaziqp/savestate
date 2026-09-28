@@ -1,0 +1,41 @@
+# AWS Amplify Hosting build spec.
+#
+# THERE IS NO BUILD STEP, ON PURPOSE.
+#
+# The Vite frontend sources were lost when the media drive failed (see commit
+# a52fa94). What survives is the compiled bundle in dist/, which is committed.
+# There is no vite.config and no root index.html, so `vite build` fails with
+# "Cannot resolve entry module index.html" — running it would replace a working
+# site with a failed build. Restore the sources before adding a build back.
+#
+# npm ci is also skipped: nothing here needs node_modules, and it was the step
+# that failed the 2026-09-26 deploy on a stale lockfile.
+#
+# IMPORTANT — this publishes the FRONTEND ONLY. The app makes 204 distinct
+# relative /api/* calls and has no configurable API base, so a static deploy
+# with no backend behind it loads and then fails on every request. Either:
+#
+#   a) add a rewrite in the Amplify console so the API reaches the backend:
+#        source: /api/<*>   target: https://<app-runner-url>/api/<*>   type: 200 (Rewrite)
+#      and a SPA fallback:
+#        source: /<*>       target: /index.html                       type: 200 (Rewrite)
+#
+#   b) or skip Amplify entirely and deploy the container to App Runner, which
+#      already serves dist/ AND the API from one origin (see Dockerfile).
+#      That is the simpler path and needs no rewrite rules or CORS.
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - echo "No preBuild — dist/ is prebuilt and committed."
+    build:
+      commands:
+        - echo "No build — publishing the committed dist/ as-is."
+        - test -f dist/index.html || (echo "dist/index.html missing — refusing to publish an empty site" && exit 1)
+  artifacts:
+    baseDirectory: dist
+    files:
+      - '**/*'
+  cache:
+    paths: []

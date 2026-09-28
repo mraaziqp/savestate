@@ -14,7 +14,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-REGION="${AWS_REGION:-eu-west-1}"
+REGION="${AWS_REGION:-eu-west-2}"
 REPO="${ECR_REPO:-nexus-emu}"
 STACK="${STACK_NAME:-nexus-emu}"
 TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%s)}"

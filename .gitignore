@@ -53,3 +53,6 @@ android/app/src/main/assets/public/
 *.apk
 *.aab
 .last-image
+
+# Local editor/preview config (machine-specific paths)
+.claude/

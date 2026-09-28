@@ -5130,6 +5130,14 @@ async function startServer() {
   }
 
   // ── Auth ──────────────────────────────────────────────────────
+  // Falling back to a random secret means every restart invalidates all
+  // sessions (and, since encryptSecret falls back to this same value,
+  // every stored secret too). Fine for a single long-lived laptop process;
+  // fatal on AWS where containers restart/scale routinely — JWT_SECRET must
+  // be pinned in env there.
+  if (!process.env.JWT_SECRET) {
+    log("WARN", "JWT_SECRET is not set in env — using a random secret for this process only. All sessions and encrypted secrets will be invalidated on restart. Set JWT_SECRET explicitly before deploying to AWS.", "auth");
+  }
   const JWT_SECRET = process.env.JWT_SECRET ?? crypto.randomBytes(32).toString("hex");
   const ACCESS_PIN = process.env.ACCESS_PIN ?? "";
 
@@ -5245,7 +5253,7 @@ async function startServer() {
     }
     // Accept JWT (PIN session or user account)
     try {
-      const payload = jwt.verify(raw, JWT_SECRET) as any;
+      const payload = jwt.verify(raw, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       if (!payload?.userId && !payload?.nexus) {
         res.status(401).json({ error: "Invalid token" });
         return;
@@ -5787,6 +5795,9 @@ async function startServer() {
   });
 
   app.delete("/api/games/:id", async (req, res) => {
+    const authPayload = (req as any).authPayload;
+    const isPrivileged = authPayload?.brain || authPayload?.nexus || ['admin', 'superadmin', 'ultra_admin'].includes(authPayload?.role);
+    if (!isPrivileged) return res.status(403).json({ error: "Admin only" });
     const { id } = req.params;
     if (dbConnected && pool) {
       try { await pool.query("DELETE FROM games WHERE id=$1", [id]); } catch { /* ok */ }
@@ -10656,7 +10667,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const qToken = (req.query.token as string | undefined)?.trim();
     let auth = getOptionalAuthUser(req);
     if (!auth?.userId && qToken) {
-      try { const p = jwt.verify(qToken, JWT_SECRET) as any; if (p?.userId) auth = p; } catch {}
+      try { const p = jwt.verify(qToken, JWT_SECRET, { algorithms: ["HS256"] }) as any; if (p?.userId) auth = p; } catch {}
     }
     if (!auth?.userId) return res.status(401).json({ error: "Unauthorized" });
     const userId = auth.userId;
@@ -14156,7 +14167,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/auth/verify", (req, res) => {
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     if (!token) return res.status(401).json({ valid: false });
-    try { jwt.verify(token, JWT_SECRET); res.json({ valid: true }); }
+    try { jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }); res.json({ valid: true }); }
     catch { res.status(401).json({ valid: false }); }
   });
 
@@ -14165,7 +14176,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     if (!token) return res.json({ granted: false, reason: "not_logged_in" });
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       // PIN/Brain session = host = always granted
       if (payload?.nexus || payload?.brain) return res.json({ granted: true, reason: "host" });
       if (!payload.userId) return res.json({ granted: false, reason: "invalid_token" });
@@ -14188,7 +14199,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return null;
     }
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as AuthUser;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as AuthUser;
       if (!payload?.userId) {
         res.status(401).json({ error: "Invalid token" });
         return null;
@@ -14204,7 +14215,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     if (!token) return null;
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as AuthUser;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as AuthUser;
       return payload?.userId ? payload : null;
     } catch { return null; }
   }
@@ -14216,7 +14227,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       || String(req.query.token ?? "").trim();
     if (!token) { res.status(401).json({ error: "Login required" }); return null; }
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       if (payload?.userId) return { userId: String(payload.userId), username: payload.username ?? "user" };
       // PIN session — stable identifier for host player so saves persist across browser re-logins
       if (payload?.nexus) {
@@ -14253,7 +14264,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       || String(req.query.token ?? "").trim();
     if (!token) { res.status(401).json({ error: "Login required" }); return null; }
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       // PIN session maps to userId "host"
       const userId = payload.userId ?? (payload.nexus ? "host" : null);
       if (!userId) { res.status(401).json({ error: "Invalid token" }); return null; }
@@ -14614,7 +14625,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     let userId: string | null = null;
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       userId = payload.userId;
     } catch {
       return res.status(401).json({ error: "Invalid token" });
@@ -15936,33 +15947,29 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, tier: row.tier, user: me });
   });
 
-  // Update storage rental listing
-  app.patch("/api/hosts/storage-rental", express.json(), async (req, res) => {
-    if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
-    const auth = requireAnyAuth(req, res); if (!auth) return;
-    const { storage_for_rent_gb = 0, storage_rent_monthly_rands = 0 } = req.body;
-    const r = await pool.query(
-      "UPDATE host_profiles SET storage_for_rent_gb=$1, storage_rent_monthly_rands=$2 WHERE owner_id=$3 RETURNING id",
-      [storage_for_rent_gb, storage_rent_monthly_rands, auth.userId]
-    ).catch(() => null);
-    if (!r?.rowCount) return res.status(404).json({ error: "No host profile found" });
-    res.json({ ok: true });
-  });
+  // ── Storage rental: WITHDRAWN ────────────────────────────────────────────
+  // Peer-to-peer storage rental is not offered: there is no spare capacity to
+  // sell. Storage is now a paid-account benefit instead, sized by user_tier in
+  // getUserStorageQuota() — the subscription funds the capacity.
+  //
+  // The routes are kept as explicit 410s rather than deleted so that any
+  // client still calling them gets a clear answer instead of a 404 that looks
+  // like a bug. The UI is archived at .archived-features/storage-rental-ui.block.js
+  // and the DB columns are left in place (they hold no meaningful data while
+  // listings are refused, and dropping them would be irreversible).
+  const storageRentalWithdrawn = (_req: express.Request, res: express.Response) => {
+    res.status(410).json({
+      error: "Storage rental has been withdrawn.",
+      detail: "Storage is included with paid accounts rather than rented between hosts.",
+    });
+  };
+  app.patch("/api/hosts/storage-rental", storageRentalWithdrawn);
 
-  // Storage marketplace — browse available rental storage
-  app.get("/api/storage/marketplace", async (req, res) => {
-    if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
-    const rows = await pool.query(`
-      SELECT hp.id, hp.name, hp.icon, hp.plan, hp.internet_url,
-             hp.storage_for_rent_gb, hp.storage_rent_monthly_rands,
-             u.username, u.display_name
-      FROM host_profiles hp
-      JOIN users u ON u.id = hp.owner_id
-      WHERE hp.storage_for_rent_gb > 0
-      ORDER BY hp.storage_for_rent_gb DESC
-    `).then(r => r.rows).catch(() => []);
-    res.json(rows);
-  });
+  // Storage marketplace — withdrawn alongside the rental listing route above.
+  // Returns an empty list rather than 410: this one is a browse endpoint, and
+  // any caller rendering a list handles "nothing available" gracefully, where
+  // an error would surface to users as a broken page.
+  app.get("/api/storage/marketplace", (_req, res) => res.json([]));
 
   // ── Gateway status (connected app health monitor) ─────────────
   app.get("/api/gateways/status", async (_req, res) => {
@@ -17497,7 +17504,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       || String(req.query.token ?? "").trim();
     if (!rawAuth) return res.status(401).json({ error: "Login required" });
     try {
-      const payload = jwt.verify(rawAuth, JWT_SECRET) as any;
+      const payload = jwt.verify(rawAuth, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       if (!payload?.userId && !payload?.nexus) {
         return res.status(401).json({ error: "Invalid token" });
       }
@@ -17735,14 +17742,46 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   }, 30 * 60_000).unref?.();
 
+  /**
+   * Where a newly uploaded ROM should be written.
+   *
+   * The configured vault root is the rclone mount of Google Drive, which is
+   * mounted READ-ONLY on purpose -- it is the library, and making it writable
+   * would let the reclaim paths delete cloud data. Uploading into it fails at
+   * mkdir, which meant no ROM could be added back to the library at all after
+   * the drive loss.
+   *
+   * So: use the configured root when it is genuinely writable, and otherwise
+   * fall back to the local vault, which is writable and is already a scan root
+   * (so the upload is indexed and becomes playable without another step).
+   */
+  async function romWriteRoot(configuredRoot: string): Promise<{ root: string; fellBack: boolean }> {
+    if (configuredRoot) {
+      try {
+        await mkdir(configuredRoot, { recursive: true });
+        // mkdir succeeding on an existing dir proves nothing; test a real write.
+        const probe = path.join(configuredRoot, `.write-probe-${process.pid}`);
+        await writeFile(probe, "");
+        await unlink(probe).catch(() => {});
+        return { root: configuredRoot, fellBack: false };
+      } catch { /* read-only or absent -- fall through */ }
+    }
+    const fallback = path.join(NEXUS_LOCAL_VAULT, "roms");
+    await mkdir(fallback, { recursive: true });
+    return { root: fallback, fellBack: true };
+  }
+
   app.post("/api/games/upload-rom", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
     const filename = ((req.headers['x-filename'] as string) || '').replace(/[^a-zA-Z0-9._() [\]-]/g, '_');
     const platformHeader = ((req.headers['x-platform'] as string) || 'unknown').replace(/[^a-zA-Z0-9 ]/g, '').slice(0, 40);
     if (!filename) return res.status(400).json({ error: 'x-filename header required' });
     const config = await getVaultConfig();
-    if (!config.root_path) return res.status(400).json({ error: 'Vault root not configured. Set it in Vault Manager.' });
-    const platformDir = path.join(config.root_path, platformHeader);
+    const { root: writeRoot, fellBack } = await romWriteRoot(config.root_path);
+    if (fellBack) {
+      log('INFO', `ROM upload routed to the local vault (${writeRoot}) because the configured root is not writable`, 'vault');
+    }
+    const platformDir = path.join(writeRoot, platformHeader);
     await mkdir(platformDir, { recursive: true });
     const dest = path.join(platformDir, filename);
 
@@ -18549,7 +18588,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     if (token) {
       try {
-        const payload = jwt.verify(token, JWT_SECRET) as any;
+        const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
         if (!payload?.nexus && !payload?.brain && payload?.userId) {
           // Regular user — check media_access
           if (dbConnected && pool) {
@@ -19747,6 +19786,71 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // shared rather than duplicated.
   const hlsInFlight = new Map<string, Promise<Buffer>>();
 
+  // ── HLS cache pruning ─────────────────────────────────────────────────
+  // Segments were written here and never removed. On the laptop this reached
+  // 37 GB / 2,951 files in five days of normal watching (~7 GB/day), and the
+  // only thing standing between that and a full disk was free space. A full
+  // disk makes every segment build fail, which the player shows as a spinner
+  // that never resolves — the same symptom as a slow encode, which is why it
+  // is worth bounding rather than leaving to chance.
+  //
+  // It matters more in a container: App Runner/Fargate give a few GB of
+  // ephemeral disk, so an unbounded cache is a guaranteed crash rather than a
+  // slow leak.
+  //
+  // Eviction is oldest-mtime-first, which approximates least-recently-used:
+  // a segment is written once and then only read, and re-reading it is cheap
+  // (a cache hit) while re-encoding is not, so age is the best available
+  // signal for what is least likely to be wanted again.
+  const HLS_CACHE_MAX_BYTES = Math.max(1, Number(process.env.NEXUS_HLS_CACHE_MAX_GB ?? 8)) * 1024 ** 3;
+
+  async function pruneHlsCache(): Promise<void> {
+    try {
+      const names = await readdir(HLS_CACHE_DIR).catch(() => [] as string[]);
+      if (!names.length) return;
+
+      const now = Date.now();
+      let total = 0;
+      const files: { path: string; size: number; mtime: number }[] = [];
+
+      for (const name of names) {
+        const full = path.join(HLS_CACHE_DIR, name);
+        const st = await stat(full).catch(() => null);
+        if (!st?.isFile()) continue;
+
+        // A .part file is a build that was interrupted (restart, crash, client
+        // disconnect). It can never be completed or served — the rename to its
+        // final name only happens on success — so it is pure waste.
+        if (name.endsWith(".part")) {
+          if (now - st.mtimeMs > 60 * 60 * 1000) await unlink(full).catch(() => {});
+          continue;
+        }
+        total += st.size;
+        files.push({ path: full, size: st.size, mtime: st.mtimeMs });
+      }
+
+      if (total <= HLS_CACHE_MAX_BYTES) return;
+
+      files.sort((a, b) => a.mtime - b.mtime);
+      let freed = 0;
+      let removed = 0;
+      for (const f of files) {
+        if (total - freed <= HLS_CACHE_MAX_BYTES) break;
+        await unlink(f.path).catch(() => {});
+        freed += f.size;
+        removed++;
+      }
+      log("INFO", `HLS cache pruned: removed ${removed} segment(s), freed ${(freed / 1024 ** 3).toFixed(2)} GB (cap ${(HLS_CACHE_MAX_BYTES / 1024 ** 3).toFixed(0)} GB)`, "media");
+    } catch (err) {
+      log("WARN", `HLS cache prune failed: ${(err as Error)?.message ?? err}`, "media");
+    }
+  }
+
+  // Once shortly after boot to clear whatever the last run left behind, then
+  // hourly. unref so a pending timer never holds shutdown open.
+  setTimeout(() => { pruneHlsCache().catch(() => {}); }, 30_000).unref?.();
+  setInterval(() => { pruneHlsCache().catch(() => {}); }, 60 * 60 * 1000).unref?.();
+
   // ── Fast-start segment map ────────────────────────────────────────────
   // Uniform 6s segments meant the player could not draw a frame until a whole
   // 6s segment had been encoded — measured at 2.2s of work before anything
@@ -19887,6 +19991,52 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const quality = String(req.query.quality ?? "auto");
     const audioTrack = Math.max(0, parseInt(String(req.query.audio_track ?? "0"), 10) || 0);
     const token = String(req.query.token ?? "");
+
+    // ── Adaptive bitrate ──────────────────────────────────────────────────
+    // Until now this endpoint always returned a single-rendition media
+    // playlist, so hls.js had nowhere to go when bandwidth dropped: it could
+    // only stall and wait. That is what "it buffers on a good connection"
+    // eventually becomes on a connection that is merely average.
+    //
+    // When no explicit quality is asked for, answer with a MASTER playlist
+    // instead and let the player measure throughput and pick. Each variant
+    // points back here with an explicit quality, which returns the media
+    // playlist as before -- so this is additive and the existing clients need
+    // no change (MediaHub omits the quality param whenever the user leaves the
+    // selector on Auto, which is the default).
+    if (quality === "auto" && req.query.variant !== "1") {
+      const srcW = fmt.width || 1920;
+      const srcH = fmt.height || 1080;
+      // Never offer a rendition larger than the source: upscaling costs
+      // bitrate and CPU and looks no better.
+      const tiers = [
+        { q: "1080", w: 1920 },
+        { q: "720",  w: 1280 },
+        { q: "480",  w: 854  },
+      ].filter((t) => t.w <= srcW || t.w === 854);
+
+      const lines: string[] = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-INDEPENDENT-SEGMENTS"];
+      for (const t of tiers) {
+        const lad = qualityLadder(t.q, srcW);
+        // BANDWIDTH must be the PEAK, not the average, or a player on a
+        // marginal link picks a rendition it cannot actually sustain.
+        const videoBps = Math.round((parseFloat(lad.maxrate) || 4) * 1_000_000);
+        const audioBps = (parseInt(lad.abr, 10) || 160) * 1000;
+        const peak = videoBps + audioBps;
+        const h = Math.max(2, Math.round((srcH * t.w) / srcW / 2) * 2);
+        const u = new URLSearchParams({ rel, quality: t.q, audio_track: String(audioTrack), variant: "1" });
+        if (token) u.set("token", token);
+        lines.push(
+          `#EXT-X-STREAM-INF:BANDWIDTH=${peak},AVERAGE-BANDWIDTH=${Math.round(peak * 0.75)},` +
+          `RESOLUTION=${Math.min(t.w, srcW)}x${h},CODECS="avc1.640028,mp4a.40.2"`,
+        );
+        lines.push(`/api/media/hls/playlist.m3u8?${u.toString()}`);
+      }
+      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+      res.setHeader("Cache-Control", "no-cache");
+      return res.send(lines.join("\n"));
+    }
+
     const count = segmentCount(duration);
 
     const qs = (n: number) => {
@@ -20164,7 +20314,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!token) return res.status(401).json({ error: "Missing token" });
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB unavailable" });
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       const userId = payload?.userId ?? null;
       const sessionId = payload?.nexus ? token.slice(-16) : null;
       const r = userId
@@ -20181,7 +20331,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const { relPath, title, currentTime, duration, ended } = req.body as { relPath: string; title: string; currentTime: number; duration: number; ended: boolean };
     if (!relPath) return res.status(400).json({ error: "relPath required" });
     try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
+      const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       const userId = payload?.userId ?? null;
       const sessionId = payload?.nexus ? token.slice(-16) : null;
       const now = Date.now();
@@ -20208,16 +20358,28 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // Local library recommendations — based on watch history and genre matching
+  // Full filesystem walk was run on every single call to this route with no
+  // caching at all — cheap on a local disk, but recommendations get hit often
+  // (home screen load) and this gets worse the moment media sits on a network
+  // mount/AWS. Personalization (watch history) still runs fresh per request;
+  // only the directory scan itself is cached.
+  const mediaRecScanCache = new Map<string, { items: Awaited<ReturnType<typeof scanMediaDir>>; ts: number }>();
+  const MEDIA_REC_SCAN_TTL_MS = 5 * 60 * 1000;
+
   app.get("/api/media/recommendations", async (req, res) => {
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     const root = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
-    const allItems = (await scanMediaDir(root, 10000)).filter(i => i.kind === "video");
+    const cachedScan = mediaRecScanCache.get(root);
+    const scanned = (cachedScan && (Date.now() - cachedScan.ts < MEDIA_REC_SCAN_TTL_MS))
+      ? cachedScan.items
+      : await scanMediaDir(root, 10000).then(items => { mediaRecScanCache.set(root, { items, ts: Date.now() }); return items; });
+    const allItems = scanned.filter(i => i.kind === "video");
 
     // Get watch history from DB
     let watchedRelPaths: string[] = [];
     if (token && pool && dbConnected) {
       try {
-        const payload = jwt.verify(token, JWT_SECRET) as any;
+        const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
         const userId = payload?.userId ?? null;
         if (userId) {
           const r = await pool.query("SELECT rel_path, watch_time, duration FROM media_watch_progress WHERE user_id=$1 ORDER BY updated_at DESC LIMIT 50", [userId]);
@@ -22361,6 +22523,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   app.patch('/api/codex/books/:id', express.json(), async (req, res) => {
+    const authPayload = (req as any).authPayload;
+    const isPrivileged = authPayload?.brain || authPayload?.nexus || ['admin', 'superadmin', 'ultra_admin'].includes(authPayload?.role);
+    if (!isPrivileged) return res.status(403).json({ error: "Admin only" });
     const books = await loadCodexMeta();
     const idx = books.findIndex(b => b.id === req.params.id);
     if (idx === -1) return res.status(404).json({ error: 'Not found' });
@@ -22376,6 +22541,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   app.delete('/api/codex/books/:id', async (req, res) => {
+    const authPayload = (req as any).authPayload;
+    const isPrivileged = authPayload?.brain || authPayload?.nexus || ['admin', 'superadmin', 'ultra_admin'].includes(authPayload?.role);
+    if (!isPrivileged) return res.status(403).json({ error: "Admin only" });
     const books = await loadCodexMeta();
     const book = books.find(b => b.id === req.params.id);
     if (!book) return res.status(404).json({ error: 'Not found' });
@@ -22758,18 +22926,38 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           [clientId, clientName, deviceName || "", isPrivate || false, passwordHash, JSON.stringify(tracks || []), totalTracks, totalSize]
         );
 
-        if (Array.isArray(tracks)) {
-          for (const track of tracks) {
-            const trackExists = await pool.query("SELECT id FROM music_tracks WHERE abs_path = $1", [track.absPath]);
-            if (trackExists.rows.length === 0) {
-              const queueExists = await pool.query("SELECT id FROM music_download_queue WHERE track_path = $1 AND source_client_id = $2", [track.absPath, clientId]);
-              if (queueExists.rows.length === 0) {
-                await pool.query(
-                  `INSERT INTO music_download_queue (source_client_id, track_title, track_artist, track_path, file_size, status)
-                   VALUES ($1, $2, $3, $4, $5, 'pending')`,
-                  [clientId, track.title, track.artist || "Unknown", track.absPath, track.fileSize || 0]
-                );
-              }
+        if (Array.isArray(tracks) && tracks.length > 0) {
+          // Was one round trip pair (existence + queue checks) per track,
+          // sequential — a library sync with hundreds of tracks meant hundreds
+          // of serialized DB round trips. Batched to a fixed 2-3 queries total
+          // regardless of track count, same skip-if-known semantics.
+          const absPaths = tracks.map((t: any) => t.absPath);
+          const existing = await pool.query("SELECT abs_path FROM music_tracks WHERE abs_path = ANY($1)", [absPaths]);
+          const knownPaths = new Set(existing.rows.map((r: any) => r.abs_path));
+          const candidates = tracks.filter((t: any) => !knownPaths.has(t.absPath));
+
+          if (candidates.length > 0) {
+            const candidatePaths = candidates.map((t: any) => t.absPath);
+            const queued = await pool.query(
+              "SELECT track_path FROM music_download_queue WHERE source_client_id = $1 AND track_path = ANY($2)",
+              [clientId, candidatePaths]
+            );
+            const queuedPaths = new Set(queued.rows.map((r: any) => r.track_path));
+            const toQueue = candidates.filter((t: any) => !queuedPaths.has(t.absPath));
+
+            if (toQueue.length > 0) {
+              await pool.query(
+                `INSERT INTO music_download_queue (source_client_id, track_title, track_artist, track_path, file_size, status)
+                 SELECT $1, t.title, t.artist, t.path, t.size, 'pending'
+                 FROM UNNEST($2::text[], $3::text[], $4::text[], $5::bigint[]) AS t(title, artist, path, size)`,
+                [
+                  clientId,
+                  toQueue.map((t: any) => t.title),
+                  toQueue.map((t: any) => t.artist || "Unknown"),
+                  toQueue.map((t: any) => t.absPath),
+                  toQueue.map((t: any) => t.fileSize || 0),
+                ]
+              );
             }
           }
         }
@@ -23263,6 +23451,50 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   const USER_STORAGE_DIR = path.join(PERSIST_DIR, "user-storage");
   const USER_STORAGE_QUOTA = 56 * 1024 * 1024 * 1024; // 56 GB per user (free tier)
 
+  // Storage is a paid-account benefit: the subscription is what funds the
+  // capacity behind it. Previously every tier shared the one 56 GB constant,
+  // while the over-quota error told people to "upgrade your plan for more
+  // storage" -- an upgrade that bought them nothing, because nothing read the
+  // tier. Tiers are the same three the admin API already accepts
+  // (free/pro/unlimited, see the user_tier update route).
+  const STORAGE_QUOTA_BY_TIER: Record<string, number> = {
+    free:      56  * 1024 ** 3,
+    pro:       512 * 1024 ** 3,
+    unlimited: 4   * 1024 ** 4,
+  };
+
+  // Small cache: the quota is consulted on every upload and every quota poll,
+  // and a per-request SELECT for a value that changes rarely is wasteful.
+  const _tierCache = new Map<string, { tier: string; ts: number }>();
+  const TIER_CACHE_TTL_MS = 60_000;
+
+  async function getUserStorageQuota(userId: string): Promise<number> {
+    // A PIN/host session has no row in users; it is the host owner, so it is
+    // not quota-limited in any meaningful sense. Checked BEFORE the database
+    // branch on purpose: gating it on dbConnected capped the owner at the free
+    // tier whenever the DB was unreachable, which is exactly when the host is
+    // most likely to be running standalone.
+    if (userId === "host") return STORAGE_QUOTA_BY_TIER.unlimited;
+
+    let tier = "free";
+    const cached = _tierCache.get(userId);
+    if (cached && Date.now() - cached.ts < TIER_CACHE_TTL_MS) {
+      tier = cached.tier;
+    } else if (pool && dbConnected) {
+      const r = await pool.query("SELECT user_tier, role FROM users WHERE id=$1", [userId]).catch(() => null);
+      const row = r?.rows?.[0];
+      if (row) {
+        tier = ['admin', 'superadmin', 'ultra_admin'].includes(row.role ?? '')
+          ? "unlimited"
+          : String(row.user_tier ?? "free");
+      }
+      _tierCache.set(userId, { tier, ts: Date.now() });
+    }
+    // Note: with no DB the tier is unknown, so this deliberately falls back to
+    // the free-tier quota rather than assuming a paid one.
+    return STORAGE_QUOTA_BY_TIER[tier] ?? STORAGE_QUOTA_BY_TIER.free;
+  }
+
   async function getUserStorageUsed(userId: string): Promise<number> {
     const userDir = path.join(USER_STORAGE_DIR, userId);
     let total = 0;
@@ -23283,7 +23515,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const auth = requireAnyAuth(req, res);
     if (!auth) return;
     const used = await getUserStorageUsed(auth.userId);
-    res.json({ ok: true, used, quota: USER_STORAGE_QUOTA, usedMB: Math.round(used / 1e6), quotaGB: USER_STORAGE_QUOTA / 1e9, pct: Math.round((used / USER_STORAGE_QUOTA) * 100) });
+    const quota = await getUserStorageQuota(auth.userId);
+    res.json({ ok: true, used, quota, usedMB: Math.round(used / 1e6), quotaGB: Math.round(quota / 1e9), pct: Math.round((used / quota) * 100) });
   });
 
   // Quota alias — used by StorageHub component
@@ -23303,7 +23536,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       } catch {}
     };
     await countFiles(userDir);
-    res.json({ usedBytes: used, quotaBytes: USER_STORAGE_QUOTA, fileCount });
+    res.json({ usedBytes: used, quotaBytes: await getUserStorageQuota(auth.userId), fileCount });
   });
 
   // Return files in StoredFile format for StorageHub component
@@ -23396,13 +23629,21 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const body = req.body as Buffer;
     // Quota check
     const used = await getUserStorageUsed(auth.userId);
-    if (used + body.length > USER_STORAGE_QUOTA) return res.status(413).json({ error: "Storage quota exceeded (56 GB free tier). Upgrade your plan for more storage." });
+    const quota = await getUserStorageQuota(auth.userId);
+    if (used + body.length > quota) {
+      // Name the actual limit rather than hardcoding "56 GB free tier" — that
+      // message was shown to paid users too, who had already paid for more.
+      return res.status(413).json({
+        error: `Storage quota exceeded (${Math.round(quota / 1e9)} GB). Upgrade your plan for more storage.`,
+        usedBytes: used, quotaBytes: quota,
+      });
+    }
     const userDir = path.join(USER_STORAGE_DIR, auth.userId, folder);
     await mkdir(userDir, { recursive: true });
     const filePath = path.join(userDir, filename);
     await writeFile(filePath, body);
     const newUsed = used + body.length;
-    res.json({ ok: true, name: filename, size: body.length, usedMB: Math.round(newUsed / 1e6), quotaGB: USER_STORAGE_QUOTA / 1e9 });
+    res.json({ ok: true, name: filename, size: body.length, usedMB: Math.round(newUsed / 1e6), quotaGB: Math.round(quota / 1e9) });
   });
 
   app.get("/api/storage/download", async (req, res) => {
@@ -25779,6 +26020,8 @@ Format as JSON:
 
     session.sockets.add(ws);
     trackWebSocket(ws);
+    ws.isAlive = true;
+    ws.on("pong", () => { ws.isAlive = true; });
     try { ws.send(JSON.stringify({ type: "ready", sessionId: session.id })); } catch {}
 
     ws.on("message", async (raw: any) => {
@@ -25815,6 +26058,8 @@ Format as JSON:
 
   coopWss.on("connection", (ws: any, req: any) => {
     trackWebSocket(ws);
+    ws.isAlive = true;
+    ws.on("pong", () => { ws.isAlive = true; });
     const url = new URL(req.url ?? "/", "http://localhost");
     const sessionId = url.searchParams.get("session") ?? "";
     const clientId = url.searchParams.get("id") ?? crypto.randomBytes(4).toString("hex");
@@ -25913,6 +26158,24 @@ Format as JSON:
 
     ws.on("close", () => handleClientDisconnect(session, clientId, clientName));
   });
+
+  // Co-Op and Remote Play sockets only got app-level ping/pong (client-sent
+  // {type:"ping"} echoed back) — no server-initiated liveness check, so an
+  // idle connection behind a load balancer with a shorter idle timeout than
+  // whatever the client's ping interval is would get silently dropped with
+  // nothing here to notice. Same standard ws liveness sweep already used for
+  // Watch Party above; `wss.clients` is maintained by the ws library itself
+  // so no per-session bookkeeping is needed here.
+  const coopHeartbeatInterval = setInterval(() => {
+    for (const wssInstance of [coopWss, remotePlayWss]) {
+      for (const ws of wssInstance.clients) {
+        if ((ws as any).isAlive === false) { try { ws.terminate(); } catch {} continue; }
+        (ws as any).isAlive = false;
+        try { ws.ping(); } catch {}
+      }
+    }
+  }, 30_000);
+  coopHeartbeatInterval.unref?.();
 
   function handleClientMsg(session: CoopSession, id: string, name: string, ws: any) {
     return (raw: Buffer) => {
@@ -26492,11 +26755,27 @@ Format as JSON:
   persistHostStateNow().catch(() => {});
   syncPersistedFallbackFromLiveSources().catch(() => {});
 
-  const onShutdownPersist = () => {
-    persistHostStateNow().catch(() => {}).finally(() => process.exit(0));
+  const onShutdown = (signal: string) => {
+    log("INFO", `${signal} received — shutting down gracefully`, "shutdown");
+    // AWS (ECS/Fargate) sends SIGTERM then SIGKILL after a grace period
+    // (default 30s) — bail out well before that if something hangs.
+    const forceExit = setTimeout(() => {
+      log("WARN", "Graceful shutdown timed out after 10s — forcing exit", "shutdown");
+      process.exit(1);
+    }, 10_000);
+    forceExit.unref();
+    httpServer.close(() => {
+      Promise.allSettled([
+        persistHostStateNow(),
+        pool ? pool.end() : Promise.resolve(),
+      ]).finally(() => {
+        clearTimeout(forceExit);
+        process.exit(0);
+      });
+    });
   };
-  process.once("SIGINT", onShutdownPersist);
-  process.once("SIGTERM", onShutdownPersist);
+  process.once("SIGINT", () => onShutdown("SIGINT"));
+  process.once("SIGTERM", () => onShutdown("SIGTERM"));
 }
 
 

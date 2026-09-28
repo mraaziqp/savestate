@@ -108,9 +108,12 @@ Resources:
               - { Name: GEMINI_API_KEY, Value: !Sub '${SecretArn}:GEMINI_API_KEY::' }
               - { Name: NEXUS_ENCRYPTION_KEY, Value: !Sub '${SecretArn}:NEXUS_ENCRYPTION_KEY::' }
               - { Name: AWEHCHAT_API_KEY,     Value: !Sub '${SecretArn}:AWEHCHAT_API_KEY::' }
-              - { Name: GOOGLE_DRIVE_CLIENT_ID,     Value: !Sub '${SecretArn}:GOOGLE_DRIVE_CLIENT_ID::' }
-              - { Name: GOOGLE_DRIVE_CLIENT_SECRET, Value: !Sub '${SecretArn}:GOOGLE_DRIVE_CLIENT_SECRET::' }
-              - { Name: GOOGLE_DRIVE_REFRESH_TOKEN, Value: !Sub '${SecretArn}:GOOGLE_DRIVE_REFRESH_TOKEN::' }
+              # Named GDRIVE_* (not GOOGLE_DRIVE_*) to match what getGoogleDriveClient()
+              # in server.ts actually reads — the two names silently diverged and
+              # would have left Drive access broken in prod with no visible error.
+              - { Name: GDRIVE_CLIENT_ID,     Value: !Sub '${SecretArn}:GDRIVE_CLIENT_ID::' }
+              - { Name: GDRIVE_CLIENT_SECRET, Value: !Sub '${SecretArn}:GDRIVE_CLIENT_SECRET::' }
+              - { Name: GDRIVE_REFRESH_TOKEN, Value: !Sub '${SecretArn}:GDRIVE_REFRESH_TOKEN::' }
       InstanceConfiguration:
         Cpu: !Ref Cpu
         Memory: !Ref Memory
