@@ -5653,10 +5653,15 @@ async function startServer() {
       }
       const gb = bytes / 1024 ** 3;
       const capGb = HLS_CACHE_MAX_BYTES / 1024 ** 3;
+      // The pruner runs hourly, so the cache legitimately drifts above the cap
+      // between sweeps — warning at 8.1/8.0 GB is noise, and a dashboard that
+      // cries wolf stops being read. Only flag a genuine overrun, meaning the
+      // pruner is not keeping up with what playback is producing.
+      const overrun = gb > capGb * 1.25;
       return {
-        ok: gb <= capGb,
-        warn: gb > capGb,
-        msg: `${gb.toFixed(2)} GB across ${names.length} file(s) (cap ${capGb.toFixed(0)} GB)`,
+        ok: !overrun,
+        warn: overrun,
+        msg: `${gb.toFixed(2)} GB across ${names.length} file(s) (cap ${capGb.toFixed(0)} GB, pruned hourly)`,
       };
     });
 
