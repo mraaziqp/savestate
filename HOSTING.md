@@ -87,6 +87,47 @@ curl -s https://savestate.co.za/api/health/full
 
 The second should report `"overall": "healthy"` with every check passing.
 
+### Windows hosts: run the stack in WSL2
+
+`setup-host.sh`, the systemd units and the rclone FUSE mount are Linux-only,
+and the PowerShell `host:*` scripts named in `package.json` no longer exist.
+On a Windows PC, run the host inside WSL2 (Ubuntu), where the steps above
+work unchanged.
+
+```powershell
+# PowerShell as Administrator, then reboot
+wsl --install -d Ubuntu-24.04
+```
+
+Inside Ubuntu:
+
+```bash
+# systemd must be on (recent WSL images have it already)
+grep -q 'systemd=true' /etc/wsl.conf || printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf
+# then run `wsl --shutdown` in PowerShell and reopen Ubuntu
+
+git clone git@github.com:mraaziqp/savestate.git ~/NexussEmu   # in ~, not /mnt/c
+cd ~/NexussEmu
+bash scripts/setup-host.sh
+cp /mnt/d/savestate-host-bundle-*.tar.gz.gpg ~/       # D: is the USB stick
+bash scripts/import-host-bundle.sh ~/savestate-host-bundle-*.tar.gz.gpg
+sudo loginctl enable-linger $USER
+```
+
+Differences from a Linux host:
+
+- **WSL has to stay running.** It can stop the Ubuntu VM once no Windows
+  program is attached to it, and that takes the site down. Add a Task
+  Scheduler task that runs at startup whether or not anyone is signed in:
+  `wsl.exe -d Ubuntu-24.04 --exec /bin/sleep infinity`. Check that the site
+  stays up after you close every terminal and after a reboot.
+- **Windows must not sleep.** A sleeping PC counts as the host being down,
+  and traffic moves to the AWS standby.
+- **Hardware transcoding reports a warning.** WSL has no VAAPI `/dev/dri`,
+  so ffmpeg encodes in software.
+- Local RetroArch launches and Remote Play drive a Linux desktop inside WSL,
+  not the Windows desktop.
+
 ## Services
 
 | Unit | Purpose |
