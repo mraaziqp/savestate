@@ -1654,6 +1654,15 @@ async function downloadToFile(url, dest, progressKey) {
       return true;
     }
 
+    // Asked to resume but got the whole file back (a proxy or CDN that
+    // ignores Range answers 200, not 206). Appending it would leave the
+    // first `received` bytes in the ROM twice, so drop them from this body.
+    let skip = received > 0 && res.status === 200 ? received : 0;
+    if (skip) {
+      total = parseInt(res.headers.get('content-length') ?? '0', 10) || total;
+      received = 0;
+    }
+
     const reader = res.body.getReader();
     for (;;) {
       // A dead stream never settles read(), so awaiting it alone would hang
@@ -1668,9 +1677,17 @@ async function downloadToFile(url, dest, progressKey) {
         try { await reader.cancel(); } catch { /* already dead */ }
         return false;
       }
-      const { done, value } = next;
+      const { done, value: chunk } = next;
       if (done) break;
-      if (!value || !value.length) continue;
+      if (!chunk || !chunk.length) continue;
+      let value = chunk;
+      if (skip) {
+        const drop = Math.min(skip, value.length);
+        skip -= drop;
+        received += drop;
+        value = value.subarray(drop);
+        if (!value.length) continue;
+      }
       received += value.length;
       if (progressKey) downloadProgress.set(progressKey, { received, total, startedAt: downloadProgress.get(progressKey)?.startedAt ?? Date.now() });
       await writeChunk(value);
@@ -2787,6 +2804,16 @@ function startEmbeddedLauncher(opts = {}) {
 
       if (req.method === 'GET' && (p === '/health' || p === '/wake' || p === '/')) {
         send(healthPayload());
+        return;
+      }
+
+      // Withholding CORS headers only stops a foreign page READING the
+      // answer. A "simple" cross-site POST (text/plain body, no preflight)
+      // still ran, so any website could make this machine download a file
+      // and open it in an emulator. Refuse before doing anything.
+      if (origin && !isTrustedOrigin(origin)) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: false, error: 'This site is not allowed to control the NexusEmu launcher.' }));
         return;
       }
 
