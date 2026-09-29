@@ -93,6 +93,32 @@ for f in "$DATA_DIR"/*.json; do
 done
 shopt -u nullglob
 
+# ── Content directories the app writes into ──────────────────────────────────
+# These hold real user content rather than cache: uploaded books, per-user
+# storage, music synced from client devices, and BIOS images. An export that
+# silently skipped them would lose data the first time someone used those
+# features. BIOS matters most — without it PS1/PS2/Saturn/DS will not boot,
+# and the Drive mount is read-only so they cannot live there.
+# tmp/ (HLS cache) and rclone-cache/ are excluded deliberately — both
+# regenerate, and tmp/ reached 37 GB once.
+for sub in books user-storage music bios; do
+  src="$DATA_DIR/$sub"
+  [[ -d "$src" ]] || continue
+  count=$(find "$src" -type f 2>/dev/null | wc -l)
+  if (( count > 0 )); then
+    size=$(du -sh "$src" 2>/dev/null | cut -f1)
+    # Guard against sweeping something enormous into a bundle meant to be
+    # small enough to carry on a USB stick.
+    kb=$(du -sk "$src" 2>/dev/null | cut -f1)
+    if (( kb > 2097152 )); then
+      warn "$sub is ${size} — too large to bundle; copy it to Drive separately"
+    else
+      mkdir -p "$STAGE/bundle/content"
+      cp -r "$src" "$STAGE/bundle/content/" 2>/dev/null && ok "content: $sub ($count file(s), $size)"
+    fi
+  fi
+done
+
 # ── systemd units that constitute the host ───────────────────────────────────
 for u in nexus-host cloudflared-nexus nexus-cloud-media nexus-rclone-rcd nexus-client-launcher; do
   src="$HOME/.config/systemd/user/${u}.service"

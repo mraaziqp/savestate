@@ -76,6 +76,20 @@ shopt -s nullglob
 for f in "$B"/state/*.json; do place "$f" "$DATA_DIR/$(basename "$f")"; done
 shopt -u nullglob
 
+# Content directories (books, per-user storage, synced music). Merged rather
+# than replaced, so restoring onto a host that already has some content adds
+# to it instead of silently discarding what is there.
+if [[ -d "$B/content" ]]; then
+  shopt -s nullglob
+  for d in "$B"/content/*/; do
+    name="$(basename "$d")"
+    mkdir -p "$DATA_DIR/$name"
+    cp -rn "$d." "$DATA_DIR/$name/" 2>/dev/null \
+      && ok "content: $name ($(find "$d" -type f 2>/dev/null | wc -l) file(s))"
+  done
+  shopt -u nullglob
+fi
+
 # systemd units — paths inside may reference the old home directory.
 if compgen -G "$B/systemd/*.service" > /dev/null; then
   for f in "$B"/systemd/*.service; do

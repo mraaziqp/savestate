@@ -24,8 +24,25 @@ Everything else is either in git or on Google Drive.
 | Drive token (rclone) | `~/.config/rclone/` | **host bundle** |
 | App secrets | `.env`, `.env.production` | **host bundle** |
 | Library index, progress | `~/.nexus-data/*.json` | **host bundle** |
+| BIOS images | `~/.nexus-data/bios` | **host bundle** |
+| Books, per-user storage, music | `~/.nexus-data/{books,user-storage,music}` | **host bundle** |
 | Media and ROMs | Google Drive (`NexusArchive`) | already there — nothing to move |
 | HLS cache | `~/.nexus-data/tmp/hls-cache` | regenerated; never copy it |
+
+### BIOS
+
+`bios_path` used to point at `/media/moh/500GB Hardrive/Emu/Bios` — the drive
+that failed. The app would have recreated that as a stray directory on any new
+host, and the BIOS upload flow would have written into a phantom path. It now
+points at `~/.nexus-data/bios`, which the host bundle carries.
+
+The Drive mount is deliberately `--read-only`, so BIOS images cannot live
+there; they travel in the bundle instead.
+
+No BIOS images survived the drive failure. Until they are re-added, PS1, PS2,
+Saturn and Nintendo DS titles will pause at launch and ask for one — the
+server answers `202` with the exact accepted filenames, and the player opens a
+file picker, installs it, and retries automatically.
 
 ## Moving to another machine
 
