@@ -1,10 +1,17 @@
 /**
- * savestate.co.za — origin failover / graceful offline.
+ * savestate.co.za — origin failover.
  *
- * The site is served from a Cloudflare Tunnel to a machine at home. When that
- * machine is off, Cloudflare answers with a raw 1033/502 error page, which is
- * what a visitor saw when the laptop went down. This Worker sits on the route
- * and turns that into a real page.
+ * The site is served from a Cloudflare Tunnel to a machine at home (the
+ * "primary"). This Worker sits on the domain's routes and decides, per
+ * request, who answers:
+ *
+ *   1. primary (home host, via the tunnel)      — always tried first
+ *   2. STANDBY_ORIGIN (the AWS App Runner copy) — full app, API included
+ *   3. FALLBACK_ORIGIN (Amplify, static)         — page loads only
+ *   4. the built-in offline page / JSON 503
+ *
+ * So AWS only receives traffic while the home host is down, and the home host
+ * takes it back automatically as soon as it answers again.
  *
  * Design notes, because a Worker in front of a media server is easy to get
  * wrong:
@@ -13,56 +20,122 @@
  *    returned untouched, so the body streams rather than buffering, and Range
  *    requests / 206 responses / Content-Range survive intact. Video scrubbing
  *    breaks immediately if you rebuild the response by hand.
- *  - Only origin-level failures are intercepted. A 404 or 401 from the app is
- *    the app working correctly and must pass through.
- *  - Cloudflare's own origin errors are the 52x family (521 down, 522 timeout,
- *    523 unreachable, 524 timeout) plus 1033 for a tunnel with no connector.
- *    Those, and a thrown fetch, are the "host is down" signal.
- *  - Media and API requests get a JSON/503 rather than an HTML page, so a
- *    player or fetch() sees a real error instead of parsing a web page.
  *
- * Optional: set FALLBACK_ORIGIN (a Worker environment variable) to another
- * host that can serve the app, and the Worker will try it before giving up.
- * Leave it unset and the offline page is the fallback.
+ *  - "Host down" means the request never reached the app: Cloudflare's own
+ *    52x/530 (530 is error 1033, a tunnel with no connector), a thrown fetch,
+ *    or a 502/503/504 WITHOUT the X-SaveState-Origin header. The app stamps
+ *    that header on every response (server.ts), so an app-level 503 such as
+ *    "Database unavailable" passes through as the app's own answer instead of
+ *    being replaced with the offline page. cloudflared's 502 when nothing is
+ *    listening on :3000 carries no such header.
+ *
+ *  - Once the primary is seen down, this isolate goes straight to the standby
+ *    for BREAKER_MS instead of paying for a failed round trip on every
+ *    request, then probes the primary again.
+ *
+ *  - A request body can only be read once. Bodies up to MAX_REPLAY_BYTES are
+ *    buffered so a failed POST can be retried on the standby; larger or
+ *    unsized bodies (uploads) stream straight to the primary and get a 503 if
+ *    it is down, rather than being held in Worker memory.
  */
 
-const ORIGIN_DOWN_STATUSES = new Set([521, 522, 523, 524, 525, 526, 530, 502, 503, 504]);
+// Cloudflare-generated: the request never reached the app.
+const CF_ORIGIN_ERRORS = new Set([520, 521, 522, 523, 524, 525, 526, 527, 530]);
+// Could come from the app or from cloudflared/Cloudflare; the header decides.
+const AMBIGUOUS_ERRORS = new Set([502, 503, 504]);
+const ORIGIN_HEADER = "x-savestate-origin";
+
+const BREAKER_MS = 20_000;
+const MAX_REPLAY_BYTES = 1024 * 1024;
+
+// Per-isolate. Each Cloudflare location discovers the outage on its own, which
+// costs one failed request there; that is fine.
+let primaryDownUntil = 0;
+
+function isOriginDown(res) {
+  if (CF_ORIGIN_ERRORS.has(res.status)) return true;
+  if (AMBIGUOUS_ERRORS.has(res.status)) return !res.headers.has(ORIGIN_HEADER);
+  return false;
+}
+
+function originUrl(env, name) {
+  return (env && env[name] ? String(env[name]) : "").trim();
+}
+
+// Rebuild the request against another origin. The app reads X-Forwarded-Host
+// for subdomain tenancy, so it still sees savestate.co.za rather than the
+// App Runner hostname.
+function forOrigin(request, base, body) {
+  const url = new URL(request.url);
+  const target = new URL(url.pathname + url.search, base);
+  const headers = new Headers(request.headers);
+  headers.delete("host");
+  headers.set("x-forwarded-host", url.host);
+  headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
+  return new Request(target.toString(), {
+    method: request.method,
+    headers,
+    body,
+    redirect: "manual",
+  });
+}
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env, _ctx) {
     const url = new URL(request.url);
+    const isApi = url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws/");
+    const standby = originUrl(env, "STANDBY_ORIGIN");
+    const staticFallback = originUrl(env, "FALLBACK_ORIGIN");
 
-    let upstream = null;
-    try {
-      upstream = await fetch(request);
-      if (!ORIGIN_DOWN_STATUSES.has(upstream.status)) {
-        // Normal case: hand the response straight back, body still streaming.
-        return upstream;
+    const method = request.method.toUpperCase();
+    const hasBody = method !== "GET" && method !== "HEAD" && request.body !== null;
+    let replayBody = null;
+    let canReplay = !hasBody;
+    if (hasBody && standby) {
+      const len = Number(request.headers.get("content-length") || "");
+      if (Number.isFinite(len) && len > 0 && len <= MAX_REPLAY_BYTES) {
+        replayBody = await request.arrayBuffer();
+        canReplay = true;
       }
-    } catch (_err) {
-      // Connection refused / DNS / tunnel gone — treat as origin down.
     }
 
-    const isApi = url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws/");
+    const skipPrimary = standby && canReplay && Date.now() < primaryDownUntil;
 
-    // Origin is down. Try a secondary origin if one is configured.
-    //
-    // API requests are deliberately NOT sent there. The configured fallback is
-    // static hosting (Amplify) with an SPA rewrite, so /api/* returns a 301 to
-    // index.html — the app would receive HTML where it expects JSON and fail in
-    // a confusing way. A clean 503 is far easier to handle and to read in a
-    // network tab.
-    const fallback = (env && env.FALLBACK_ORIGIN ? String(env.FALLBACK_ORIGIN) : "").trim();
-    if (fallback && !isApi) {
+    if (!skipPrimary) {
       try {
-        const alt = new URL(url.pathname + url.search, fallback);
-        const altReq = new Request(alt.toString(), request);
-        const altRes = await fetch(altReq);
-        if (!ORIGIN_DOWN_STATUSES.has(altRes.status)) {
-          // Flagged so the app (and you, in devtools) can tell this is the
-          // standby shell rather than the live host.
-          const out = new Response(altRes.body, altRes);
-          out.headers.set("x-savestate-origin", "standby");
+        const primaryReq = replayBody !== null ? new Request(request, { body: replayBody }) : request;
+        const upstream = await fetch(primaryReq);
+        if (!isOriginDown(upstream)) {
+          primaryDownUntil = 0;
+          // Normal case: hand the response straight back, body still streaming.
+          return upstream;
+        }
+      } catch (_err) {
+        // Connection refused / DNS / tunnel gone — treat as origin down.
+      }
+      primaryDownUntil = Date.now() + BREAKER_MS;
+    }
+
+    // Primary is down. The standby runs the same app, so it takes everything,
+    // API and WebSocket upgrades included.
+    if (standby && canReplay) {
+      try {
+        const res = await fetch(forOrigin(request, standby, hasBody ? replayBody : undefined));
+        if (!isOriginDown(res)) return res;
+      } catch (_err) {
+        // fall through
+      }
+    }
+
+    // Static shell. API requests are deliberately NOT sent there: Amplify's SPA
+    // rewrite answers /api/* with index.html, and the app would get HTML where
+    // it expects JSON. A clean 503 is easier to handle and to read.
+    if (staticFallback && !isApi && (method === "GET" || method === "HEAD")) {
+      try {
+        const res = await fetch(forOrigin(request, staticFallback));
+        if (!isOriginDown(res)) {
+          const out = new Response(res.body, res);
+          out.headers.set(ORIGIN_HEADER, "static");
           return out;
         }
       } catch (_err) {

@@ -3558,8 +3558,21 @@ async function startServer() {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type,Range");
-    res.setHeader("Access-Control-Expose-Headers", "Content-Range,Accept-Ranges,Content-Length");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Range,Accept-Ranges,Content-Length,X-SaveState-Origin");
     if (_req.method === "OPTIONS") { res.sendStatus(204); return; }
+    next();
+  });
+
+  // Marks every response as coming from the app itself. The Cloudflare
+  // failover Worker (cloudflare-worker/) uses it to tell an app-level 502/503
+  // ("ffmpeg not installed", "Database unavailable") apart from cloudflared's
+  // own 502 when nothing is listening on :3000. Without it, any app 503 was
+  // treated as "host down" and replaced with the offline page or sent to the
+  // standby. The value is this instance's role, so devtools shows which
+  // machine answered: "primary" (home host) or "standby" (AWS).
+  const ORIGIN_ROLE = (process.env.NEXUS_ORIGIN_ROLE || "primary").replace(/[^a-z0-9_-]/gi, "") || "primary";
+  app.use((_req, res, next) => {
+    res.setHeader("X-SaveState-Origin", ORIGIN_ROLE);
     next();
   });
 
@@ -5720,6 +5733,7 @@ async function startServer() {
     }
     res.json({
       status: "ok",
+      origin: ORIGIN_ROLE,
       database: dbConnected ? "connected" : "disconnected",
       timestamp: dbTimestamp ?? new Date().toISOString(),
       version: "2.0.4",
@@ -24938,8 +24952,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         }
       }
 
-      if (mem.gdriveUploads && typeof (mem.gdriveUploads as any).values === 'function') {
-        for (const upload of (mem.gdriveUploads as any).values()) {
+      if ((mem as any).gdriveUploads && typeof (mem as any).gdriveUploads.values === 'function') {
+        for (const upload of (mem as any).gdriveUploads.values()) {
         if (upload.status === 'synced' && uniqueHashes.includes(upload.fileHash)) {
           existingHashesSet.add(upload.fileHash);
         }
@@ -25774,7 +25788,11 @@ Format as JSON:
   // broadcast cost — without bound. Generous enough to never bind for normal use.
   const MAX_PARTY_MEMBERS = 50;
 
-  const wss = new WebSocketServer({ noServer: true });
+  // ws defaults maxPayload to 100 MiB, so one client could make the server
+  // buffer and JSON.parse an arbitrarily large frame. Every message on these
+  // sockets (sync commands, controller state, WebRTC SDP) is a few KB.
+  const WS_MAX_PAYLOAD = 256 * 1024;
+  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
   wss.on("connection", (ws: any, req: any) => {
     trackWebSocket(ws);
     const url = new URL(req.url ?? "/", `http://localhost`);
@@ -25983,6 +26001,10 @@ Format as JSON:
     // MultiplayerHub.tsx) — 'rom' is the original RetroArch netplay/stream path.
     source: 'rom' | 'pc'; pcGame: CoopPcGame;
     players: Map<string, CoopPlayer>; pendingJoins: Map<string, CoopJoinReq>;
+    // Returned only to the creator (inside the host wsUrl). Lets the real host
+    // reclaim its seat while a stale socket is still registered; see the
+    // role === "host" check in the connection handler.
+    hostKey: string;
   };
   const coopSessions = new Map<string, CoopSession>();
   const HOST_SECRET = process.env.NEXUS_HOST_SHARE_SECRET ?? process.env.ACCESS_PIN ?? "";
@@ -26166,15 +26188,30 @@ Format as JSON:
       pendingCount: s.pendingJoins.size,
     };
   }
+  // For the REST lobby, which every signed-in user can read. Player ids are
+  // left out because the host's id is what role=host on /ws/coop is checked
+  // against — publishing it in the lobby let any user connect as the host of
+  // any session, approve themselves and end it. Players in the session still
+  // get ids over the socket.
+  function coopPublicSummary(s: CoopSession) {
+    const full = coopSessionSummary(s);
+    return { ...full, players: full.players.map(({ id: _id, ...rest }) => rest) };
+  }
+  function isCoopHost(s: CoopSession, hostId: unknown, hostKey: unknown) {
+    return (typeof hostKey === "string" && hostKey.length > 0 && hostKey === s.hostKey)
+      || (typeof hostId === "string" && hostId.length > 0 && hostId === s.hostId);
+  }
+  const COOP_CHAT_MAX = 500;
+  const coopChatText = (t: unknown) => String(t ?? "").slice(0, COOP_CHAT_MAX);
 
   // WebSocket — Co-Op signaling, controller input, join approval, WebRTC relay
-  const coopWss = new WebSocketServer({ noServer: true });
+  const coopWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
 
   // Remote Play input socket. Declared here rather than beside the Remote
   // Play HTTP routes because WebSocketServer is dynamically imported further
   // down startServer(); constructing one earlier hits the temporal dead zone
   // and kills boot with "Cannot access 'WebSocketServer' before initialization".
-  const remotePlayWss = new WebSocketServer({ noServer: true });
+  const remotePlayWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
   remotePlayWss.on("connection", (ws: any, req: any) => {
     const url = new URL(req.url ?? "", "http://localhost");
     const session = remotePlaySessions.get(String(url.searchParams.get("session") ?? ""));
@@ -26232,7 +26269,20 @@ Format as JSON:
     const session = coopSessions.get(sessionId);
     if (!session) { ws.close(4004, "Session not found"); return; }
 
-    if (role === "host" && session.hostId !== clientId) { ws.close(4003, "Not host"); return; }
+    if (role === "host") {
+      if (session.hostId !== clientId) { ws.close(4003, "Not host"); return; }
+      // The host id also reaches approved players via session_state, so on its
+      // own it does not prove this is the host. While a live host socket is
+      // registered, taking the seat needs the creator's hostKey (the
+      // MultiplayerHub host connects with it via wsUrl). With no live host
+      // socket, the id is enough, which keeps clients that build their own
+      // URL (EmulatorPlayer) working.
+      const current = session.players.get(clientId);
+      const hostLive = current && current.ws !== ws && current.ws?.readyState === 1;
+      if (hostLive && url.searchParams.get("hk") !== session.hostKey) {
+        ws.close(4013, "Host already connected"); return;
+      }
+    }
 
     if (role === "client") {
       // Client must wait for host approval
@@ -26259,7 +26309,12 @@ Format as JSON:
       return;
     }
 
-    // Host connecting (or auto-approved player after approval)
+    // Host connecting (or auto-approved player after approval). A reconnect
+    // replaces a socket the server may still think is open (a phone switching
+    // networks leaves it half-open until the heartbeat reaps it); drop it now
+    // so it stops receiving traffic.
+    const previous = session.players.get(clientId);
+    if (previous && previous.ws !== ws) { try { previous.ws.terminate(); } catch {} }
     session.players.set(clientId, { id: clientId, name: clientName, role, ws, controller: false, joinedAt: Date.now() });
     ws.send(JSON.stringify({ type: "session_state", session: coopSessionSummary(session) }));
     coopBroadcast(session, { type: "player_joined", id: clientId, name: clientName, role }, clientId);
@@ -26277,7 +26332,7 @@ Format as JSON:
           session.players.set(pending.clientId, { id: pending.clientId, name: pending.name, role: "client", ws: pending.ws, controller: true, joinedAt: Date.now() });
           pending.ws.send(JSON.stringify({ type: "join_approved", session: coopSessionSummary(session) }));
           pending.ws.on("message", handleClientMsg(session, pending.clientId, pending.name, pending.ws));
-          pending.ws.on("close", () => handleClientDisconnect(session, pending.clientId, pending.name));
+          pending.ws.on("close", () => handleClientDisconnect(session, pending.clientId, pending.name, pending.ws));
           if (session.status === 'waiting') { session.status = 'active'; }
           coopBroadcast(session, { type: "player_joined", id: pending.clientId, name: pending.name, role: "client" });
           coopBroadcast(session, { type: "session_state", session: coopSessionSummary(session) });
@@ -26312,13 +26367,13 @@ Format as JSON:
         }
         // Chat
         else if (msg.type === "chat") {
-          coopBroadcast(session, { type: "chat", fromId: clientId, name: clientName, text: msg.text, ts: Date.now() });
+          coopBroadcast(session, { type: "chat", fromId: clientId, name: clientName, text: coopChatText(msg.text), ts: Date.now() });
         }
         else if (msg.type === "ping") { ws.send(JSON.stringify({ type: "pong", ts: Date.now() })); }
       } catch { /* malformed msg */ }
     });
 
-    ws.on("close", () => handleClientDisconnect(session, clientId, clientName));
+    ws.on("close", () => handleClientDisconnect(session, clientId, clientName, ws));
   });
 
   // Co-Op and Remote Play sockets only got app-level ping/pong (client-sent
@@ -26381,13 +26436,18 @@ Format as JSON:
           const target = session.players.get(msg.targetId);
           if (target?.ws?.readyState === 1) target.ws.send(JSON.stringify({ ...msg, fromId: id }));
         }
-        else if (msg.type === "chat") { coopBroadcast(session, { type: "chat", fromId: id, name, text: msg.text, ts: Date.now() }); }
+        else if (msg.type === "chat") { coopBroadcast(session, { type: "chat", fromId: id, name, text: coopChatText(msg.text), ts: Date.now() }); }
         else if (msg.type === "ping") { ws.send(JSON.stringify({ type: "pong", ts: Date.now() })); }
       } catch {}
     };
   }
 
-  function handleClientDisconnect(session: CoopSession, id: string, name: string) {
+  function handleClientDisconnect(session: CoopSession, id: string, name: string, ws: any) {
+    // A stale socket closing after the same player reconnected must not remove
+    // the new entry. It used to: the old socket's close (often the heartbeat
+    // reaping it up to a minute later) deleted the reconnected host, which then
+    // silently stopped receiving join requests and controller input.
+    if (session.players.get(id)?.ws !== ws) return;
     stopGamepadBridge(session.id, id);
     session.players.delete(id);
     coopBroadcast(session, { type: "player_left", id, name, playerCount: session.players.size });
@@ -26397,7 +26457,7 @@ Format as JSON:
   // ── Co-Op REST API ──────────────────────────────────────────────
   // GET all active sessions
   app.get("/api/multiplayer/sessions", (_req, res) => {
-    const sessions = [...coopSessions.values()].filter(s => s.status !== 'ended').map(coopSessionSummary);
+    const sessions = [...coopSessions.values()].filter(s => s.status !== 'ended').map(coopPublicSummary);
     res.json({ sessions });
   });
 
@@ -26429,17 +26489,18 @@ Format as JSON:
         storeUrl: pcGame.storeUrl ? String(pcGame.storeUrl) : undefined,
       } : null,
       createdAt: Date.now(), players: new Map(), pendingJoins: new Map(),
+      hostKey: crypto.randomBytes(16).toString("hex"),
     };
     coopSessions.set(id, session);
     log("INFO", `Co-op session created: ${id} — ${session.gameTitle} (${session.mode})`, "coop");
-    res.json({ ok: true, session: coopSessionSummary(session), hostId: hId, wsUrl: `/ws/coop?session=${id}&id=${hId}&name=${encodeURIComponent(session.hostName)}&role=host` });
+    res.json({ ok: true, session: coopSessionSummary(session), hostId: hId, hostKey: session.hostKey, wsUrl: `/ws/coop?session=${id}&id=${encodeURIComponent(hId)}&name=${encodeURIComponent(session.hostName)}&role=host&hk=${session.hostKey}` });
   });
 
   // Get session detail
   app.get("/api/multiplayer/sessions/:id", (req, res) => {
     const s = coopSessions.get(req.params.id);
     if (!s) return res.status(404).json({ error: "Session not found" });
-    res.json(coopSessionSummary(s));
+    res.json(coopPublicSummary(s));
   });
 
   // Join session (Client — initiates, Host approves via WS)
@@ -26460,7 +26521,7 @@ Format as JSON:
   app.patch("/api/multiplayer/sessions/:id", express.json(), (req, res) => {
     const s = coopSessions.get(req.params.id);
     if (!s) return res.status(404).json({ error: "Session not found" });
-    if (req.body?.hostId !== s.hostId) return res.status(403).json({ error: "Host only" });
+    if (!isCoopHost(s, req.body?.hostId, req.body?.hostKey)) return res.status(403).json({ error: "Host only" });
     if (req.body?.mode) s.mode = req.body.mode;
     if (req.body?.streamFeedUrl !== undefined) s.streamFeedUrl = req.body.streamFeedUrl;
     if (req.body?.status) s.status = req.body.status;
@@ -26472,6 +26533,12 @@ Format as JSON:
   app.delete("/api/multiplayer/sessions/:id", express.json(), (req, res) => {
     const s = coopSessions.get(req.params.id);
     if (!s) return res.status(404).json({ error: "Not found" });
+    // Session ids are listed publicly, so this ended anyone's session for
+    // anyone who asked. The host's own "End" button sends end_session over
+    // the socket first, which is what actually ends it for players.
+    const hostId = req.body?.hostId ?? req.query.hostId;
+    const hostKey = req.body?.hostKey ?? req.query.hk;
+    if (!isCoopHost(s, hostId, hostKey)) return res.status(403).json({ error: "Host only" });
     s.status = 'ended';
     coopBroadcast(s, { type: "session_ended" });
     coopSessions.delete(req.params.id);

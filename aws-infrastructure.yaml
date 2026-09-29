@@ -106,6 +106,10 @@ Resources:
               - { Name: NEXUS_CLOUD_FIRST, Value: '1' }
               - { Name: NEXUS_STREAM_ONLY, Value: '1' }
               - { Name: NEXUS_DISABLE_LOCAL_SCAN, Value: '1' }
+              # Stamped on every response as X-SaveState-Origin. The failover
+              # Worker only routes here while the home host is down, and the
+              # header shows in devtools which machine answered.
+              - { Name: NEXUS_ORIGIN_ROLE, Value: standby }
               # No render node in a managed container.
               - { Name: NEXUS_DISABLE_HW_TRANSCODE, Value: '1' }
               - { Name: NEXUS_VAULT_FALLBACK, Value: /tmp/nexus-vault }
