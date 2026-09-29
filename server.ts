@@ -5504,6 +5504,10 @@ async function startServer() {
 
   // ── Health ───────────────────────────────────────────────────
   // ── Full system health check (used by HostHealthCheck dashboard) ──────────
+  // Declared outside the handler so it survives between polls.
+  let _driveHealthCache: { result: { ok: boolean; msg: string; warn?: boolean }; ts: number } | null = null;
+  const DRIVE_HEALTH_TTL_MS = 60_000;
+
   app.get("/api/health/full", async (_req, res) => {
     type CheckResult = { name: string; status: 'pass' | 'fail' | 'warn'; message: string; ms: number; critical: boolean };
     const checks: CheckResult[] = [];
@@ -5600,33 +5604,52 @@ async function startServer() {
 
     // Media served from Drive fails in a way that looks like a stalled player,
     // so surface the credential state directly rather than leaving it to guess.
+    //
+    // Cached: this is a live API round trip and measured 1.3s, which dominated
+    // the whole endpoint. Drive connectivity does not change second to second,
+    // and a dashboard polling health should not pay a network call each time.
     await check('Media: Google Drive', false, async () => {
+      const cached = _driveHealthCache;
+      if (cached && Date.now() - cached.ts < DRIVE_HEALTH_TTL_MS) return cached.result;
+
       const usingSa = !!(process.env.GDRIVE_SERVICE_ACCOUNT_JSON ?? "").trim();
       const usingOauth = !!(process.env.GDRIVE_REFRESH_TOKEN ?? "").trim();
+      let result: { ok: boolean; msg: string; warn?: boolean };
+
       if (!usingSa && !usingOauth) {
-        return { ok: false, warn: true, msg: 'No Drive credentials — Drive-hosted media unavailable' };
+        result = { ok: false, warn: true, msg: 'No Drive credentials — Drive-hosted media unavailable' };
+      } else {
+        const client = await getGoogleDriveClient();
+        if (!client) {
+          result = { ok: false, msg: 'Drive credentials present but the client failed to initialise' };
+        } else {
+          const r = await client.files.list({
+            pageSize: 1, fields: 'files(id)',
+            includeItemsFromAllDrives: true, supportsAllDrives: true,
+          });
+          const n = (r?.data?.files ?? []).length;
+          result = {
+            ok: n > 0,
+            warn: n === 0,
+            msg: n > 0
+              ? `Connected via ${usingSa ? 'service account' : 'OAuth'}`
+              : `Authenticated via ${usingSa ? 'service account' : 'OAuth'} but nothing is shared with it`,
+          };
+        }
       }
-      const client = await getGoogleDriveClient();
-      if (!client) return { ok: false, msg: 'Drive credentials present but the client failed to initialise' };
-      const r = await client.files.list({
-        pageSize: 1, fields: 'files(id)',
-        includeItemsFromAllDrives: true, supportsAllDrives: true,
-      });
-      const n = (r?.data?.files ?? []).length;
-      return {
-        ok: n > 0,
-        warn: n === 0,
-        msg: n > 0
-          ? `Connected via ${usingSa ? 'service account' : 'OAuth'}`
-          : `Authenticated via ${usingSa ? 'service account' : 'OAuth'} but nothing is shared with it`,
-      };
+      _driveHealthCache = { result, ts: Date.now() };
+      return result;
     });
 
     await check('Media: Library', false, async () => {
+      // Read the in-memory index rather than rescanning. The first version of
+      // this check called scanMediaDir() directly, which walks the media root —
+      // and that root is a Google Drive FUSE mount, so every health poll became
+      // a network filesystem walk and the endpoint took ~4.7s. mem.media is
+      // maintained by the scanner on its own interval and is free to read.
+      const videos = mem.media.filter((i) => i.kind === 'video').length;
       const root = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
-      const items = await scanMediaDir(root, 5000).catch(() => [] as MediaItem[]);
-      const videos = items.filter((i) => i.kind === 'video').length;
-      return { ok: videos > 0, warn: videos === 0, msg: `${videos} video(s) under ${root}` };
+      return { ok: videos > 0, warn: videos === 0, msg: `${videos} video(s) indexed under ${root}` };
     });
 
     // Software transcoding is ~3x realtime versus ~9x on VAAPI, which is the
@@ -23588,6 +23611,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // and a per-request SELECT for a value that changes rarely is wasteful.
   const _tierCache = new Map<string, { tier: string; ts: number }>();
   const TIER_CACHE_TTL_MS = 60_000;
+  // Entries expire logically but were never removed, so the map grew by one
+  // entry per distinct user for the life of the process. Small per entry, but
+  // this is a server meant to run for weeks. Sweep expired keys periodically,
+  // and cap the size so a burst of unique users cannot balloon it between
+  // sweeps.
+  const TIER_CACHE_MAX = 5_000;
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of _tierCache) {
+      if (now - v.ts >= TIER_CACHE_TTL_MS) _tierCache.delete(k);
+    }
+  }, 5 * 60_000).unref?.();
 
   async function getUserStorageQuota(userId: string): Promise<number> {
     // A PIN/host session has no row in users; it is the host owner, so it is
@@ -23608,6 +23643,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         tier = ['admin', 'superadmin', 'ultra_admin'].includes(row.role ?? '')
           ? "unlimited"
           : String(row.user_tier ?? "free");
+      }
+      // Hard cap as a backstop between sweeps: drop the oldest insertion,
+      // which Map iteration order gives us for free.
+      if (_tierCache.size >= TIER_CACHE_MAX) {
+        const oldest = _tierCache.keys().next().value;
+        if (oldest !== undefined) _tierCache.delete(oldest);
       }
       _tierCache.set(userId, { tier, ts: Date.now() });
     }
