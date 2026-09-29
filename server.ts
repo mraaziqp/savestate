@@ -547,7 +547,9 @@ const EXT_PLATFORM: Record<string, string> = {
   ".gg":  "gamegear",  ".sms": "mastersystem",
   ".pce": "pce",  ".lnx": "lynx",
   ".ws":  "wonderswan", ".wsc": "wonderswan",
-  ".ngp": "neogeo",    ".ngc": "neogeo",
+  // Neo Geo POCKET, a handheld. These were tagged "neogeo" (the arcade
+  // system) and launched with FinalBurn Neo, which cannot load them.
+  ".ngp": "ngp",       ".ngc": "ngp",
   ".a26": "atari2600",  ".a78": "atari7800",
   ".gcm": "gamecube",  ".gcz": "gamecube",  ".rvz": "gamecube",
   ".wbfs": "wii",      ".wad": "wii",
@@ -583,6 +585,7 @@ export const PLATFORM_CORES: Record<string, { coreId: string; coreName: string; 
   pce:          { coreId: "mednafen_pce",       coreName: "Beetle PCE" },
   wonderswan:   { coreId: "mednafen_wswan",     coreName: "Beetle WonderSwan" },
   neogeo:       { coreId: "fbneo",              coreName: "FinalBurn Neo" },
+  ngp:          { coreId: "mednafen_ngp",       coreName: "Beetle NeoPop" },
   atari2600:    { coreId: "stella",             coreName: "Stella" },
   atari7800:    { coreId: "prosystem",          coreName: "ProSystem" },
   lynx:         { coreId: "mednafen_lynx",      coreName: "Beetle Lynx" },
@@ -634,6 +637,7 @@ const PATH_PLATFORM: Array<[RegExp, string]> = [
   // NEC
   [/turbografx|turbo[\s_\-]*grafx|pc[\s_\-]*engine|\bpce\b/i, "pce"],
   // SNK
+  [/neo[\s_\-]*geo[\s_\-]*pocket|\bngpc?\b/i, "ngp"],
   [/neo[\s_\-]*geo/i,                      "neogeo"],
   // Atari
   [/atari[\s_\-]*2600/i,                   "atari2600"],
@@ -1357,6 +1361,7 @@ const LIBRETRO_SYSTEMS: Record<string, string> = {
   neogeo:           "SNK - Neo Geo CD",
   neogeomvs:        "SNK - Neo Geo",
   neogeocd:         "SNK - Neo Geo CD",
+  ngp:              "SNK - Neo Geo Pocket Color",
   "neo geo":        "SNK - Neo Geo CD",
   // Arcade
   mame:             "MAME",
@@ -5207,6 +5212,7 @@ async function startServer() {
     "/api/integrations/",       // Ecosystem and game discovery integrations
     "/api/stream/gdrive/",      // High-performance Google Drive HTTP Range Streaming Proxy
     "/api/stream/media/",       // Media range streaming proxy
+    "/api/stream/hls/",         // co-op live screen stream; gated on an active stream-mode session inside the handlers
     "/api/media/compress/events", // Compressor SSE progress broadcast
     "/api/media/compress/progress",
     "/api/media/info",
@@ -8106,6 +8112,173 @@ async function startServer() {
       stopped++;
     }
     res.json({ success: true, stopped });
+  });
+
+  // ── Live HLS of the host screen (co-op "stream" mode) ────────────────────
+  // MultiplayerHub's stream viewer POSTs /api/stream/hls/start and then plays
+  // /api/stream/hls/master.m3u8 with hls.js. Neither route existed, so a
+  // friend joining a stream-mode session got five retries and then an error.
+  // This runs one ffmpeg that captures the desktop and writes a 360/480/720p
+  // live ladder, which hls.js switches between as the viewer's bandwidth
+  // allows. Unlike the MJPEG feed it is H.264, so it needs a fraction of the
+  // bandwidth for the same picture.
+  //
+  // The viewer calls these routes without a token, so they are public. They
+  // only do anything while a co-op session in stream mode is live, and the
+  // capture stops by itself once nobody has fetched from it for a while.
+  const LIVE_HLS_DIR = path.join(os.tmpdir(), "nexus-live-hls");
+  const LIVE_HLS_IDLE_MS = 45_000;
+  const LIVE_TIERS: Record<string, { h: number; kbps: number }> = {
+    "360p": { h: 360, kbps: 800 },
+    "480p": { h: 480, kbps: 1400 },
+    "720p": { h: 720, kbps: 2800 },
+    "1080p": { h: 1080, kbps: 5000 },
+  };
+  let liveHls: { proc: ReturnType<typeof spawn>; startedAt: number; lastAccess: number; withAudio: boolean } | null = null;
+
+  function streamSessionLive(): boolean {
+    for (const s of coopSessions.values()) {
+      if (s.status !== "ended" && s.mode === "stream" && s.players.size > 0) return true;
+    }
+    return false;
+  }
+
+  function captureInputArgs(fps: number, withAudio: boolean): string[] {
+    if (process.env.NEXUS_LIVE_SOURCE === "testsrc") {
+      // For exercising the pipeline on a machine with no display.
+      const v = ["-re", "-f", "lavfi", "-i", `testsrc2=size=1280x720:rate=${fps}`];
+      return withAudio ? [...v, "-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"] : v;
+    }
+    if (process.platform === "win32") {
+      return ["-f", "gdigrab", "-thread_queue_size", "512", "-framerate", String(fps), "-draw_mouse", "0", "-i", "desktop"];
+    }
+    if (process.platform === "darwin") {
+      return ["-f", "avfoundation", "-thread_queue_size", "512", "-framerate", String(fps), "-i", withAudio ? "1:0" : "1:"];
+    }
+    const video = ["-f", "x11grab", "-thread_queue_size", "512", "-framerate", String(fps), "-draw_mouse", "0", "-i", process.env.DISPLAY ?? ":0"];
+    // Game audio through PulseAudio/PipeWire's default monitor, when present.
+    return withAudio ? [...video, "-f", "pulse", "-thread_queue_size", "512", "-i", "default"] : video;
+  }
+
+  function stopLiveHls(reason: string) {
+    if (!liveHls) return;
+    const { proc } = liveHls;
+    liveHls = null;
+    try { proc.kill("SIGTERM"); } catch {}
+    setTimeout(() => { try { if (!proc.killed) proc.kill("SIGKILL"); } catch {} }, 1500).unref?.();
+    log("INFO", `Live stream stopped (${reason})`, "stream");
+  }
+
+  async function startLiveHls(profiles: string[], withAudio: boolean): Promise<void> {
+    const ffmpegPath = await getFfmpegPath();
+    if (!ffmpegPath) throw new Error("ffmpeg is not installed on the host");
+    await rm(LIVE_HLS_DIR, { recursive: true, force: true }).catch(() => {});
+    await mkdir(LIVE_HLS_DIR, { recursive: true });
+
+    const tiers = profiles.map((p) => LIVE_TIERS[p]).filter(Boolean);
+    if (!tiers.length) tiers.push(LIVE_TIERS["360p"], LIVE_TIERS["480p"], LIVE_TIERS["720p"]);
+    const fps = 30;
+    const split = tiers.map((_t, i) => `[v${i}]`).join("");
+    const scales = tiers.map((t, i) => `[v${i}]scale=-2:'min(ih,${t.h})'[o${i}]`).join(";");
+    const args: string[] = [
+      "-hide_banner", "-loglevel", "error",
+      ...captureInputArgs(fps, withAudio),
+      "-filter_complex", `[0:v]split=${tiers.length}${split};${scales}`,
+    ];
+    tiers.forEach((t, i) => {
+      args.push(
+        "-map", `[o${i}]`,
+        `-c:v:${i}`, "libx264", `-b:v:${i}`, `${t.kbps}k`, `-maxrate:v:${i}`, `${Math.round(t.kbps * 1.2)}k`, `-bufsize:v:${i}`, `${t.kbps}k`,
+      );
+      if (withAudio) args.push("-map", "1:a:0");
+    });
+    args.push(
+      "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
+      // A keyframe every second so each 1s segment starts cleanly and a new
+      // viewer, or a quality switch, never waits long for a picture.
+      "-g", String(fps), "-keyint_min", String(fps), "-sc_threshold", "0",
+    );
+    if (withAudio) args.push("-c:a", "aac", "-b:a", "128k", "-ac", "2");
+    args.push(
+      "-f", "hls", "-hls_time", "1", "-hls_list_size", "6",
+      "-hls_flags", "delete_segments+independent_segments+omit_endlist",
+      "-master_pl_name", "master.m3u8",
+      "-var_stream_map", tiers.map((_t, i) => (withAudio ? `v:${i},a:${i}` : `v:${i}`)).join(" "),
+      "-hls_segment_filename", path.join(LIVE_HLS_DIR, "stream_%v_%05d.ts"),
+      path.join(LIVE_HLS_DIR, "stream_%v.m3u8"),
+    );
+
+    const proc = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let errOut = "";
+    proc.stderr?.on("data", (d: Buffer) => { if (errOut.length < 2000) errOut += d.toString(); });
+    const session = { proc, startedAt: Date.now(), lastAccess: Date.now(), withAudio };
+    liveHls = session;
+    proc.on("close", (code) => {
+      // stopLiveHls clears liveHls first, so only an unplanned exit gets here.
+      if (liveHls !== session) return;
+      liveHls = null;
+      log("WARN", `Live stream ffmpeg exited (${code}): ${errOut.trim().slice(0, 300)}`, "stream");
+    });
+    proc.on("error", () => { if (liveHls === session) liveHls = null; });
+
+    // Wait for the first playlist, and fall back to video-only if the audio
+    // device is what stopped ffmpeg.
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      if (existsSync(path.join(LIVE_HLS_DIR, "master.m3u8"))) return;
+      if (liveHls !== session) {
+        if (withAudio) return startLiveHls(profiles, false);
+        throw new Error(errOut.trim().slice(0, 200) || "screen capture failed to start");
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  setInterval(() => {
+    if (!liveHls) return;
+    if (!streamSessionLive()) stopLiveHls("no stream-mode session");
+    else if (Date.now() - liveHls.lastAccess > LIVE_HLS_IDLE_MS) stopLiveHls("no viewers");
+  }, 10_000).unref?.();
+
+  app.post("/api/stream/hls/start", express.json(), async (req, res) => {
+    if (!streamSessionLive()) return res.status(409).json({ error: "No co-op session is streaming right now." });
+    const profiles = Array.isArray(req.body?.profiles) ? req.body.profiles.map(String).slice(0, 4) : [];
+    if (liveHls) {
+      liveHls.lastAccess = Date.now();
+      return res.json({ ok: true, running: true, master: "/api/stream/hls/master.m3u8" });
+    }
+    try {
+      await startLiveHls(profiles, process.platform === "linux" || process.platform === "darwin");
+      if (liveHls) liveHls.lastAccess = Date.now();
+      log("INFO", `Live stream started (${liveHls?.withAudio ? "with" : "no"} audio)`, "stream");
+      res.json({ ok: true, running: true, master: "/api/stream/hls/master.m3u8" });
+    } catch (e: any) {
+      log("WARN", `Live stream failed to start: ${e?.message ?? e}`, "stream");
+      res.status(500).json({ error: `Could not start the screen stream: ${e?.message ?? e}` });
+    }
+  });
+
+  app.post("/api/stream/hls/stop", (_req, res) => {
+    stopLiveHls("stopped by client");
+    res.json({ ok: true });
+  });
+
+  app.get("/api/stream/hls/:file", async (req, res) => {
+    const file = String(req.params.file);
+    if (!/^(master|stream_\d+(_\d+)?)\.(m3u8|ts)$/.test(file)) return res.status(404).json({ error: "Not found" });
+    if (!liveHls || !streamSessionLive()) return res.status(404).json({ error: "No live stream" });
+    liveHls.lastAccess = Date.now();
+    const full = path.join(LIVE_HLS_DIR, file);
+    // The first playlist appears a second or so after start.
+    for (let i = 0; i < 40 && !existsSync(full); i++) await new Promise((r) => setTimeout(r, 200));
+    const isPlaylist = file.endsWith(".m3u8");
+    res.sendFile(full, {
+      cacheControl: false,
+      headers: {
+        "Content-Type": isPlaylist ? "application/vnd.apple.mpegurl" : "video/mp2t",
+        "Cache-Control": isPlaylist ? "no-cache, no-store" : "public, max-age=60",
+      },
+    }, (err) => { if (err && !res.headersSent) res.status(404).json({ error: "Segment expired" }); });
   });
 
   /**
@@ -18288,34 +18461,26 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     const filename = path.basename(resolvedRom.absolutePath);
     const encodedFilename = encodeURIComponent(filename).replace(/'/g, "%27");
-    const romStat = await stat(resolvedRom.absolutePath);
-    const romSize = romStat.size;
-    res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/[^\x20-\x7E]/g, '_')}"; filename*=UTF-8''${encodedFilename}`);
-    res.setHeader("Content-Type", "application/octet-stream");
-    res.setHeader("Accept-Ranges", "bytes");
-    const rangeHeader = req.headers.range;
-    if (rangeHeader) {
-      const parts = rangeHeader.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0] || "0", 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : romSize - 1;
-      res.writeHead(206, {
-        "Content-Range": `bytes ${start}-${end}/${romSize}`,
-        "Accept-Ranges": "bytes",
-        "Content-Length": end - start + 1,
+    // sendFile handles Range properly: suffix ranges ("bytes=-N"), ranges
+    // past the end (416), and a correct Content-Length on every 206. The
+    // hand-rolled parser it replaces turned "bytes=-N" into NaN and sent a
+    // Content-Length larger than the body for ranges past EOF, which stalls
+    // or corrupts a download that resumes. It also adds ETag/Last-Modified,
+    // so a device that already has the ROM gets a 304 instead of all of it.
+    res.sendFile(resolvedRom.absolutePath, {
+      dotfiles: "allow",
+      cacheControl: false,
+      headers: {
         "Content-Type": "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${filename.replace(/[^\x20-\x7E]/g, '_')}"; filename*=UTF-8''${encodedFilename}`,
-      });
-      const stream = createReadStream(resolvedRom.absolutePath, { start, end, highWaterMark: 4 * 1024 * 1024 });
-      stream.on("error", () => { try { res.end(); } catch {} });
-      req.on("close", () => stream.destroy());
-      stream.pipe(res);
-    } else {
-      res.setHeader("Content-Length", romSize);
-      const stream = createReadStream(resolvedRom.absolutePath, { highWaterMark: 4 * 1024 * 1024 });
-      stream.on("error", () => { try { res.status(500).end(); } catch {} });
-      req.on("close", () => stream.destroy());
-      stream.pipe(res);
-    }
+        "Content-Disposition": `attachment; filename="${filename.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'")}"; filename*=UTF-8''${encodedFilename}`,
+        "Cache-Control": "private, max-age=3600, no-transform",
+      },
+    }, (err: any) => {
+      if (err && !res.headersSent) {
+        const status = Number(err.status ?? err.statusCode) || 500;
+        res.status(status).json({ error: status === 416 ? "Requested range is outside the file" : "Could not read the ROM file" });
+      }
+    });
     log("INFO", `ROM download: ${filename}`, "remote");
   });
 
@@ -22857,8 +23022,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         'Content-Disposition': `inline; filename="${encodeURIComponent(book.filename)}"`,
         'Cache-Control': 'private, max-age=3600, no-transform',
       },
-    }, (err) => {
-      if (err && !res.headersSent) res.status(500).json({ error: 'Could not read book file' });
+    }, (err: any) => {
+      if (err && !res.headersSent) {
+        const status = Number(err.status ?? err.statusCode) || 500;
+        res.status(status).json({ error: status === 416 ? 'Requested range is outside the file' : 'Could not read book file' });
+      }
     });
   });
 
