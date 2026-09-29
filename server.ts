@@ -2789,6 +2789,9 @@ const DB_SCHEMA = `
   ALTER TABLE users ADD COLUMN IF NOT EXISTS can_upload_media BOOLEAN DEFAULT FALSE;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_tier TEXT DEFAULT 'free';
   ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_limit_bytes BIGINT DEFAULT 10737418240;
+  -- Written by the profile editor (PATCH /api/auth/profile).
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar TEXT;
+  ALTER TABLE users ADD COLUMN IF NOT EXISTS favorite_platform TEXT;
 
   CREATE TABLE IF NOT EXISTS user_game_progress (
     id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
@@ -14051,26 +14054,53 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // ── Auth ──────────────────────────────────────────────────────
-  app.post("/api/auth/register", async (req, res) => {
-    const { username, password, display_name } = req.body as { username: string; password: string; display_name?: string };
-    if (!username?.trim() || !password) return res.status(400).json({ error: "username and password required" });
-    if (username.trim().length < 3) return res.status(400).json({ error: "Username must be at least 3 characters" });
-    if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
-    if (!dbConnected || !pool) return res.status(503).json({ error: "Database not connected" });
+  // Account creation had no limit at all, so one script could fill the users
+  // table. Only successful sign-ups count, so typos and "name taken" retries
+  // never lock a real person out.
+  const registerLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    limit: 10,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    skipFailedRequests: true,
+    message: { error: "Too many accounts created from this network. Try again later." },
+  });
+  const USERNAME_RE = /^[a-z0-9][a-z0-9_.-]{2,31}$/;
+
+  app.post("/api/auth/register", registerLimiter, async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    // The main sign-up form sends display_name; the setup wizard and invite
+    // pages send displayName. Only the first was read, so names typed on the
+    // other two were silently dropped.
+    const rawDisplay = typeof body.display_name === "string" ? body.display_name
+      : typeof body.displayName === "string" ? body.displayName : "";
+    const displayName = rawDisplay.trim().slice(0, 48) || null;
+    const email = typeof body.email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim()) ? body.email.trim().toLowerCase() : null;
+    if (!username || !password) return res.status(400).json({ error: "Choose a username and a password." });
+    if (username.length < 3) return res.status(400).json({ error: "Username must be at least 3 characters." });
+    if (!USERNAME_RE.test(username)) {
+      return res.status(400).json({ error: "Usernames can be up to 32 characters: letters, numbers, dots, dashes and underscores, starting with a letter or number." });
+    }
+    if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters." });
+    if (password.length > 256) return res.status(400).json({ error: "Password is too long." });
+    if (password.toLowerCase() === username) return res.status(400).json({ error: "Password can't be the same as your username." });
+    if (!dbConnected || !pool) return res.status(503).json({ error: "Sign-up is temporarily unavailable. Please try again in a minute." });
     const passwordHash = hashPassword(password);
     try {
       const r = await pool.query(
-        `INSERT INTO users (username, display_name, password_hash) VALUES ($1,$2,$3) RETURNING id, username, display_name, role, created_at`,
-        [username.toLowerCase().trim(), display_name?.trim() || null, passwordHash]
+        `INSERT INTO users (username, display_name, password_hash, email) VALUES ($1,$2,$3,$4) RETURNING id, username, display_name, role, created_at`,
+        [username, displayName, passwordHash, email]
       );
       const u = r.rows[0];
       const token = jwt.sign({ userId: u.id, username: u.username }, JWT_SECRET, { expiresIn: "30d" });
       log("INFO", `New user registered: ${u.username}`, "auth");
       res.json({ token, user: { id: u.id, username: u.username, display_name: u.display_name, role: u.role, created_at: u.created_at } });
     } catch (err: any) {
-      if (err.code === "23505") return res.status(409).json({ error: "Username already taken" });
+      if (err.code === "23505") return res.status(409).json({ error: "That username is taken. Try another." });
       log("ERROR", `Register error: ${err}`, "auth");
-      res.status(500).json({ error: "Registration failed" });
+      res.status(500).json({ error: "Registration failed. Please try again." });
     }
   });
 
@@ -14271,7 +14301,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (!payload.userId) return res.status(401).json({ error: "Token has no user" });
       if (!dbConnected || !pool) return res.status(503).json({ error: "Database not connected" });
       const r = await pool.query(
-        "SELECT id, username, display_name, role, avatar_color, bio, total_playtime, total_games_played, permissions, media_access, can_upload_media, created_at, last_seen FROM users WHERE id=$1",
+        "SELECT id, username, display_name, role, avatar_color, avatar, favorite_platform, bio, total_playtime, total_games_played, permissions, media_access, can_upload_media, created_at, last_seen FROM users WHERE id=$1",
         [payload.userId]
       );
       if (!r.rows[0]) return res.status(404).json({ error: "User not found" });
@@ -14279,7 +14309,60 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const effectiveMediaAccess = Boolean(u.media_access) || ['admin','superadmin','ultra_admin'].includes(u.role ?? '');
       res.json({ user: { ...u, media_access: effectiveMediaAccess } });
     } catch (e: any) {
+      // Used to log and never answer, leaving the app on its loading spinner
+      // until the client gave up.
       log("ERROR", `auth/me error: ${e?.message ?? e}`, "auth");
+      if (!res.headersSent) res.status(500).json({ error: "Could not load your account. Please try again." });
+    }
+  });
+
+  // The profile editor (ProfileManager) saves through this route; it did not
+  // exist, so every profile save failed with "No such API route".
+  app.patch("/api/auth/profile", express.json(), async (req, res) => {
+    const payload = (req as any).authPayload as any;
+    if (!payload?.userId) {
+      return res.status(400).json({ error: payload?.nexus || payload?.brain ? "The host session has no editable profile. Sign in with an account." : "Sign in to edit your profile." });
+    }
+    if (!dbConnected || !pool) return res.status(503).json({ error: "Profile changes are unavailable right now. Please try again in a minute." });
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const text = (key: string, max: number) => {
+      const v = body[key];
+      if (v === undefined || v === null) return undefined;
+      if (typeof v !== "string") return undefined;
+      return v.trim().slice(0, max);
+    };
+    const fields: Record<string, string | null> = {};
+    const displayName = text("display_name", 48) ?? text("displayName", 48);
+    if (displayName !== undefined) fields.display_name = displayName || null;
+    const bio = text("bio", 500);
+    if (bio !== undefined) fields.bio = bio;
+    const avatar = text("avatar", 2048);
+    if (avatar !== undefined) {
+      // An emoji, a short label or an https image URL; nothing that could
+      // turn into a javascript: or data: URL in an <img>.
+      if (avatar && /^[a-z][a-z0-9+.-]*:/i.test(avatar) && !/^https:\/\//i.test(avatar)) {
+        return res.status(400).json({ error: "Avatar must be an https:// image link." });
+      }
+      fields.avatar = avatar || null;
+    }
+    const favoritePlatform = text("favorite_platform", 40);
+    if (favoritePlatform !== undefined) fields.favorite_platform = favoritePlatform || null;
+    const avatarColor = text("avatar_color", 16) ?? text("avatarColor", 16);
+    if (avatarColor !== undefined && /^#[0-9a-f]{3,8}$/i.test(avatarColor)) fields.avatar_color = avatarColor;
+
+    const keys = Object.keys(fields);
+    try {
+      const sets = keys.map((k, i) => `${k} = $${i + 1}`);
+      const r = await pool.query(
+        `UPDATE users SET ${sets.length ? sets.join(", ") + "," : ""} last_seen = NOW() WHERE id = $${keys.length + 1}
+         RETURNING id, username, display_name, role, avatar_color, avatar, favorite_platform, bio, created_at`,
+        [...keys.map((k) => fields[k]), payload.userId],
+      );
+      if (!r.rows[0]) return res.status(404).json({ error: "Account not found" });
+      res.json({ ok: true, user: r.rows[0] });
+    } catch (e: any) {
+      log("ERROR", `auth/profile error: ${e?.message ?? e}`, "auth");
+      res.status(500).json({ error: "Could not save your profile. Please try again." });
     }
   });
 
@@ -22598,12 +22681,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     await autoScanCodexBooks().catch(() => {});
     const [books, progress] = await Promise.all([loadCodexMeta(), loadCodexProgress()]);
     void migrateLegacyCodexFiles(books);
-    const validBooks: CodexBook[] = [];
-    for (const b of books) {
-      // eslint-disable-next-line no-await-in-loop
-      const exists = await resolveCodexFilePath(b);
-      if (exists) validBooks.push(b);
-    }
+    const present = await Promise.all(books.map((b) => resolveCodexFilePath(b)));
+    const validBooks = books.filter((_b, i) => present[i]);
     return res.json({ books: validBooks.map(b => ({ ...b, progress: progress[b.id] ?? null })) });
   });
 
@@ -22646,15 +22725,22 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       pdf: 'application/pdf', epub: 'application/epub+zip',
       cbz: 'application/zip', cbr: 'application/x-rar-compressed',
     };
-    res.setHeader('Content-Type', mimeMap[book.format] ?? 'application/octet-stream');
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(book.filename)}"`);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'no-cache');
-    try {
-      const stat = await import('fs/promises').then(m => m.stat(filePath));
-      res.setHeader('Content-Length', stat.size);
-    } catch { /* best-effort */ }
-    createReadStream(filePath).pipe(res);
+    // sendFile answers Range requests with 206. This used to advertise
+    // Accept-Ranges and then return the whole file to every range request;
+    // pdf.js loads large PDFs in ranged chunks, got the full file back for
+    // each one, and failed with a corrupt document. no-transform keeps the
+    // compression middleware away from partial responses.
+    res.sendFile(filePath, {
+      dotfiles: 'allow',
+      cacheControl: false,
+      headers: {
+        'Content-Type': mimeMap[book.format] ?? 'application/octet-stream',
+        'Content-Disposition': `inline; filename="${encodeURIComponent(book.filename)}"`,
+        'Cache-Control': 'private, max-age=3600, no-transform',
+      },
+    }, (err) => {
+      if (err && !res.headersSent) res.status(500).json({ error: 'Could not read book file' });
+    });
   });
 
   app.put('/api/codex/books/:id/progress', express.json(), async (req, res) => {
@@ -22690,7 +22776,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const { title, author, description, genres, pageCount, coverUrl } = req.body as Partial<CodexBook>;
     if (title) books[idx].title = title;
     if (author) books[idx].author = author;
-    if (coverUrl !== undefined) books[idx].coverUrl = coverUrl;
+    if (coverUrl !== undefined) { books[idx].coverUrl = coverUrl; invalidateCodexCover(books[idx].id); }
     if (description !== undefined) books[idx].description = description;
     if (genres) books[idx].genres = genres;
     if (pageCount !== undefined) books[idx].pageCount = pageCount;
@@ -22710,6 +22796,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       try { await unlink(path.join(LEGACY_CODEX_DIR, book.filename)); } catch { /* ok */ }
     }
     await saveCodexMeta(books.filter(b => b.id !== req.params.id));
+    invalidateCodexCover(req.params.id);
     const progress = await loadCodexProgress();
     delete progress[req.params.id];
     await writeFile(CODEX_PROG, JSON.stringify(progress, null, 2));
@@ -22722,8 +22809,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!q) return res.json({ results: [] });
     try {
       const [gutRes, olRes] = await Promise.allSettled([
-        fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
-        fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=10&fields=key,title,author_name,first_publish_year,cover_i,subject,ia`, { signal: AbortSignal.timeout(10_000) }).then(r => r.json()),
+        // Gutendex regularly takes 10-15s to answer; the old 10s cut-off
+        // dropped all Gutenberg results on a slow day.
+        fetch(`https://gutendex.com/books/?search=${encodeURIComponent(q)}`, { signal: AbortSignal.timeout(20_000) }).then(r => r.json()),
+        fetch(`https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=20&fields=key,title,author_name,first_publish_year,cover_i,subject,ia,ebook_access`, { signal: AbortSignal.timeout(15_000) }).then(r => r.json()),
       ]);
 
       const results: any[] = [];
@@ -22755,9 +22844,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       // Open Library (Internet Archive — EPUB if available)
       if (olRes.status === 'fulfilled') {
         const data = olRes.value as any;
-        for (const doc of (data.docs ?? []).slice(0, 8)) {
+        for (const doc of (data.docs ?? []).slice(0, 20)) {
           const iaIds: string[] = doc.ia ?? [];
           if (!iaIds.length) continue;
+          // Only public-domain scans can be downloaded. "borrowable" and
+          // "printdisabled" items answer the download with 401/403, which is
+          // most of why online downloads failed.
+          if (doc.ebook_access && doc.ebook_access !== 'public') continue;
           const coverUrl = doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : null;
           results.push({
             source: 'openlibrary',
@@ -22798,31 +22891,61 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       'books.google.com',
       'storage.googleapis.com',
     ];
-    try {
-      const urlObj = new URL(downloadUrl);
-      if (!ALLOWED_HOSTS.some(h => urlObj.hostname === h || urlObj.hostname.endsWith(`.${h}`))) {
-        return res.status(400).json({ error: 'Download source not permitted' });
-      }
-    } catch {
-      return res.status(400).json({ error: 'Invalid URL' });
-    }
+    const hostAllowed = (u: string) => {
+      try {
+        const h = new URL(u).hostname;
+        return ALLOWED_HOSTS.some(a => h === a || h.endsWith(`.${a}`));
+      } catch { return false; }
+    };
+    if (!hostAllowed(downloadUrl)) return res.status(400).json({ error: 'Download source not permitted' });
 
     try {
-      const resp = await fetch(downloadUrl, { headers: { 'User-Agent': 'NexusEmu/1.0 (book-reader)' }, signal: AbortSignal.timeout(30_000) });
+      // Open Library search results used to guess "<id>/<id>.epub", which
+      // does not exist for many Internet Archive items. Ask the item which
+      // EPUB it actually has.
+      let url = downloadUrl;
+      const ia = /^https:\/\/archive\.org\/download\/([^/]+)\//.exec(downloadUrl);
+      if (ia) {
+        const meta = await fetch(`https://archive.org/metadata/${encodeURIComponent(ia[1])}`, { signal: AbortSignal.timeout(15_000) })
+          .then(r => (r.ok ? r.json() : null)).catch(() => null) as { files?: Array<{ name?: string; private?: string }>; is_dark?: boolean } | null;
+        const epub = (meta?.files ?? []).find(f => f.name && /\.epub$/i.test(f.name) && f.private !== 'true' && !/_encrypted/i.test(f.name));
+        if (!meta || meta.is_dark || !epub?.name) {
+          return res.status(404).json({ error: 'This title has no free EPUB to download (it is borrow-only on Open Library).' });
+        }
+        url = `https://archive.org/download/${encodeURIComponent(ia[1])}/${epub.name.split('/').map(encodeURIComponent).join('/')}`;
+      }
+
+      const resp = await fetch(url, { headers: { 'User-Agent': 'NexusEmu/1.0 (book-reader)' }, signal: AbortSignal.timeout(180_000) });
+      // Redirects are followed, so check where we ended up, not only where we started.
+      if (!hostAllowed(resp.url || url)) return res.status(400).json({ error: 'Download redirected to a source that is not permitted' });
+      if (resp.status === 401 || resp.status === 403) {
+        return res.status(502).json({ error: 'The source refused the download (the book is probably borrow-only).' });
+      }
       if (!resp.ok) return res.status(502).json({ error: `Download failed: ${resp.status} ${resp.statusText}` });
-
-      const contentType = resp.headers.get('content-type') ?? '';
-      // Allow epub and octet-stream
-      if (!contentType.includes('epub') && !contentType.includes('octet-stream') && !contentType.includes('zip')) {
-        return res.status(415).json({ error: `Unexpected content type: ${contentType}` });
-      }
+      const declared = Number(resp.headers.get('content-length') ?? 0);
+      if (declared > 300 * 1024 * 1024) return res.status(413).json({ error: 'Book is larger than 300 MB' });
 
       const buffer = Buffer.from(await resp.arrayBuffer());
+      // Check the bytes, not the Content-Type: sources label EPUBs as
+      // octet-stream, zip or epub, and a login page as text/html. An EPUB is
+      // a zip whose first entry is the "mimetype" file.
+      const isZip = buffer.length > 60 && buffer.readUInt32LE(0) === 0x04034b50;
+      if (!isZip || !buffer.subarray(0, 120).toString('latin1').includes('epub')) {
+        const looksHtml = /^\s*</.test(buffer.subarray(0, 64).toString('utf8'));
+        return res.status(502).json({
+          error: looksHtml
+            ? 'The source returned a web page instead of the book (it may be borrow-only).'
+            : 'The downloaded file is not a valid EPUB.',
+        });
+      }
+
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const filename = `${id}.epub`;
 
       await mkdir(CODEX_DIR, { recursive: true });
-      await writeFile(path.join(CODEX_DIR, filename), buffer);
+      const tmp = path.join(CODEX_DIR, `${filename}.part`);
+      await writeFile(tmp, buffer);
+      await renameFile(tmp, path.join(CODEX_DIR, filename));
 
       const book: CodexBook = {
         id, title, author: author || 'Unknown',
@@ -22836,8 +22959,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       books.unshift(book);
       await saveCodexMeta(books);
       return res.json({ ok: true, book });
-    } catch (e) {
-      return res.status(500).json({ error: String(e) });
+    } catch (e: any) {
+      const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+      return res.status(timedOut ? 504 : 500).json({ error: timedOut ? 'The book source took too long to respond. Try again.' : String(e) });
     }
   });
 
@@ -22850,11 +22974,181 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const coverUrl = await lookupBookCover(b.title, b.author);
       if (coverUrl) {
         b.coverUrl = coverUrl;
+        invalidateCodexCover(b.id);
         updated++;
       }
     }
     if (updated > 0) await saveCodexMeta(books);
     return res.json({ ok: true, checked: books.length, updated });
+  });
+
+  // ── Book covers ──────────────────────────────────────────────────────────
+  // CodexLibrary renders every grid tile as <img src="/api/codex/books/:id/cover">
+  // and falls back to a generated placeholder on error. This route did not
+  // exist, so every book showed the placeholder regardless of what was known
+  // about it. Covers are resolved once, shrunk to a small WebP and cached on
+  // disk, so the grid loads fast after the first view.
+  const CODEX_COVER_DIR = path.join(CODEX_DIR, '.covers');
+  const CODEX_COVER_MISS_TTL_MS = 30 * 60_000;
+  const codexCoverInflight = new Map<string, Promise<string | null>>();
+  const codexCoverMiss = new Map<string, number>();
+  const codexCoverPath = (id: string) => path.join(CODEX_COVER_DIR, `${id}.webp`);
+
+  function xmlAttrs(tag: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const m of tag.matchAll(/([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) out[m[1].toLowerCase()] = m[2] ?? m[3] ?? '';
+    return out;
+  }
+
+  const IMAGE_ENTRY_RE = /\.(jpe?g|png|webp|gif)$/i;
+
+  // The cover declared by the EPUB itself: EPUB 3 "cover-image" property,
+  // EPUB 2 <meta name="cover">, then anything in the manifest named cover.
+  async function epubCoverBytes(file: string): Promise<Buffer | null> {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip(file);
+    const read = (name: string) => zip.getEntry(name)?.getData() ?? null;
+    const container = read('META-INF/container.xml')?.toString('utf8') ?? '';
+    const opfPath = /full-path\s*=\s*"([^"]+)"/.exec(container)?.[1];
+    if (opfPath) {
+      const opf = read(opfPath)?.toString('utf8') ?? '';
+      const items = [...opf.matchAll(/<item\b[^>]*>/gi)].map((m) => xmlAttrs(m[0]));
+      const metaCoverId = [...opf.matchAll(/<meta\b[^>]*>/gi)].map((m) => xmlAttrs(m[0])).find((a) => a.name === 'cover')?.content;
+      const pick = items.find((a) => (a.properties ?? '').split(/\s+/).includes('cover-image'))
+        ?? (metaCoverId ? items.find((a) => a.id === metaCoverId) : undefined)
+        ?? items.find((a) => /^image\//.test(a['media-type'] ?? '') && /cover/i.test(`${a.id} ${a.href}`));
+      if (pick?.href) {
+        const base = path.posix.dirname(opfPath);
+        const href = decodeURIComponent(pick.href.split('#')[0]);
+        const data = read(path.posix.normalize(base === '.' ? href : `${base}/${href}`));
+        if (data?.length) return data;
+      }
+    }
+    const images = zip.getEntries().filter((e) => !e.isDirectory && IMAGE_ENTRY_RE.test(e.entryName));
+    const named = images.find((e) => /cover/i.test(e.entryName));
+    return (named ?? null)?.getData() ?? null;
+  }
+
+  // Comic archives: the first page is the cover.
+  async function cbzCoverBytes(file: string): Promise<Buffer | null> {
+    const { default: AdmZip } = await import('adm-zip');
+    const zip = new AdmZip(file);
+    const pages = zip.getEntries()
+      .filter((e) => !e.isDirectory && IMAGE_ENTRY_RE.test(e.entryName) && !/(^|\/)(__MACOSX|\.)/.test(e.entryName))
+      .sort((a, b) => a.entryName.localeCompare(b.entryName, undefined, { numeric: true }));
+    return pages[0]?.getData() ?? null;
+  }
+
+  // PDFs: render page 1 with poppler's pdftoppm when the host has it. Without
+  // it the frontend already renders page 1 itself for PDFs with no cover.
+  async function pdfCoverBytes(file: string): Promise<Buffer | null> {
+    const { execFile } = await import('child_process');
+    const prefix = path.join(os.tmpdir(), `nexus-cover-${crypto.randomBytes(6).toString('hex')}`);
+    try {
+      await promisify(execFile)('pdftoppm', ['-f', '1', '-l', '1', '-singlefile', '-png', '-scale-to', '800', file, prefix], { timeout: 20_000 });
+      return await readFile(`${prefix}.png`);
+    } catch {
+      return null;
+    } finally {
+      unlink(`${prefix}.png`).catch(() => {});
+    }
+  }
+
+  async function fetchCoverBytes(url: string): Promise<Buffer | null> {
+    if (!/^https:\/\//i.test(url)) return null;
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(12_000), headers: { 'User-Agent': 'NexusEmu/1.0 (book-reader)' } });
+      if (!r.ok || !(r.headers.get('content-type') ?? '').startsWith('image/')) return null;
+      const buf = Buffer.from(await r.arrayBuffer());
+      // Open Library answers unknown ids with a 1x1 placeholder GIF.
+      return buf.length > 1024 ? buf : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function resolveCodexCover(book: CodexBook): Promise<string | null> {
+    const out = codexCoverPath(book.id);
+    try { await fsAccess(out); return out; } catch { /* build it */ }
+
+    const filePath = await resolveCodexFilePath(book);
+    const sources: Array<() => Promise<Buffer | null>> = [];
+    if (filePath) {
+      if (book.format === 'epub') sources.push(() => epubCoverBytes(filePath));
+      if (book.format === 'cbz') sources.push(() => cbzCoverBytes(filePath));
+    }
+    if (book.coverUrl) sources.push(() => fetchCoverBytes(book.coverUrl!));
+    if (filePath && book.format === 'pdf') sources.push(() => pdfCoverBytes(filePath));
+    sources.push(async () => {
+      const url = await lookupBookCover(book.title, book.author);
+      if (!url) return null;
+      const bytes = await fetchCoverBytes(url);
+      if (bytes) {
+        const books = await loadCodexMeta();
+        const b = books.find((x) => x.id === book.id);
+        if (b && !b.coverUrl) { b.coverUrl = url; await saveCodexMeta(books).catch(() => {}); }
+      }
+      return bytes;
+    });
+
+    const sharp = (await import('sharp')).default;
+    for (const source of sources) {
+      // eslint-disable-next-line no-await-in-loop
+      const raw = await source().catch(() => null);
+      if (!raw) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const webp = await sharp(raw).rotate().resize({ width: 480, withoutEnlargement: true }).webp({ quality: 80 }).toBuffer();
+        // eslint-disable-next-line no-await-in-loop
+        await mkdir(CODEX_COVER_DIR, { recursive: true });
+        const tmp = `${out}.${process.pid}.tmp`;
+        // eslint-disable-next-line no-await-in-loop
+        await writeFile(tmp, webp);
+        // eslint-disable-next-line no-await-in-loop
+        await renameFile(tmp, out);
+        return out;
+      } catch {
+        // not a decodable image; try the next source
+      }
+    }
+    return null;
+  }
+
+  function invalidateCodexCover(id: string) {
+    codexCoverMiss.delete(id);
+    unlink(codexCoverPath(id)).catch(() => {});
+  }
+
+  app.get('/api/codex/books/:id/cover', async (req, res) => {
+    const id = String(req.params.id);
+    const missUntil = codexCoverMiss.get(id);
+    if (missUntil && missUntil > Date.now()) {
+      res.setHeader('Cache-Control', 'public, max-age=600');
+      return res.status(404).json({ error: 'No cover' });
+    }
+    const books = await loadCodexMeta();
+    const book = books.find((b) => b.id === id);
+    if (!book) return res.status(404).json({ error: 'Book not found' });
+
+    let job = codexCoverInflight.get(id);
+    if (!job) {
+      job = resolveCodexCover(book).finally(() => codexCoverInflight.delete(id));
+      codexCoverInflight.set(id, job);
+    }
+    const file = await job;
+    if (!file) {
+      codexCoverMiss.set(id, Date.now() + CODEX_COVER_MISS_TTL_MS);
+      res.setHeader('Cache-Control', 'public, max-age=600');
+      return res.status(404).json({ error: 'No cover' });
+    }
+    res.sendFile(file, {
+      dotfiles: 'allow',
+      cacheControl: false,
+      headers: {
+        'Content-Type': 'image/webp',
+        'Cache-Control': 'public, max-age=86400, stale-while-revalidate=604800',
+      },
+    });
   });
 
   // ─── Music System Mega-Upgrade API ─────────────────────────────────────────
