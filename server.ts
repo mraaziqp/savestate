@@ -3058,6 +3058,8 @@ const DB_SCHEMA = `
     UNIQUE(user_id, rel_path),
     UNIQUE(session_id, rel_path)
   );
+  -- Title-only lookup used by the playback warm-up (/api/media/info).
+  CREATE INDEX IF NOT EXISTS idx_media_watch_progress_rel ON media_watch_progress (rel_path, updated_at DESC);
   CREATE INDEX IF NOT EXISTS idx_media_watch_user ON media_watch_progress(user_id);
   CREATE INDEX IF NOT EXISTS idx_media_watch_session ON media_watch_progress(session_id);
 
@@ -18328,19 +18330,73 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // ── Art Serving ───────────────────────────────────────────────
+  // Box art is saved under a .png name whatever it contains (new art is
+  // re-encoded to WebP), so the type is read from the bytes. Art saved before
+  // that re-encode existed is the raw thumbnail, often several hundred KB;
+  // it is shrunk once into ART_DIR/.small and served from there, so a library
+  // grid no longer pulls tens of MB.
+  const ART_SMALL_DIR = path.join(ART_DIR, ".small");
+  const ART_SHRINK_OVER_BYTES = 120 * 1024;
+  const artShrinkInflight = new Map<string, Promise<string | null>>();
+  function sniffImageType(head: Buffer): string {
+    if (head.length >= 12 && head.toString("latin1", 0, 4) === "RIFF" && head.toString("latin1", 8, 12) === "WEBP") return "image/webp";
+    if (head[0] === 0x89 && head[1] === 0x50) return "image/png";
+    if (head[0] === 0xff && head[1] === 0xd8) return "image/jpeg";
+    if (head.toString("latin1", 0, 3) === "GIF") return "image/gif";
+    return "application/octet-stream";
+  }
+  async function readHead(file: string): Promise<Buffer> {
+    const fh = await fsOpen(file, "r");
+    try {
+      const b = Buffer.alloc(16);
+      const { bytesRead } = await fh.read(b, 0, 16, 0);
+      return b.subarray(0, bytesRead);
+    } finally { await fh.close(); }
+  }
+  async function smallArt(id: string, src: string, srcSize: number, srcMtime: number): Promise<string | null> {
+    const out = path.join(ART_SMALL_DIR, `${id}.webp`);
+    const st = await stat(out).catch(() => null);
+    if (st && st.mtimeMs >= srcMtime) return out;
+    let job = artShrinkInflight.get(id);
+    if (!job) {
+      job = (async () => {
+        try {
+          const sharp = (await import("sharp")).default;
+          const webp = await sharp(src).resize({ height: 640, withoutEnlargement: true }).webp({ quality: 82 }).toBuffer();
+          if (webp.byteLength >= srcSize) return null;
+          await mkdir(ART_SMALL_DIR, { recursive: true });
+          const tmp = `${out}.${process.pid}.tmp`;
+          await writeFile(tmp, webp);
+          await renameFile(tmp, out);
+          return out;
+        } catch { return null; }
+      })().finally(() => artShrinkInflight.delete(id));
+      artShrinkInflight.set(id, job);
+    }
+    return job;
+  }
+
   app.get("/api/art/:gameId", async (req, res) => {
     const id = req.params.gameId.replace(/[^a-zA-Z0-9_-]/g, "");
     await ensureArtDir();
-    const mimes: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg" };
     for (const ext of [".png", ".jpg", ".jpeg"]) {
       const p = path.join(ART_DIR, id + ext);
-      try {
-        await fsAccess(p);
-        res.setHeader("Cache-Control", "public, max-age=604800, immutable");
-        res.setHeader("Content-Type", mimes[ext]);
-        createReadStream(p).pipe(res);
-        return;
-      } catch { /* try next */ }
+      const st = await stat(p).catch(() => null);
+      if (!st?.isFile()) continue;
+      let file = p;
+      if (st.size > ART_SHRINK_OVER_BYTES) file = (await smallArt(id, p, st.size, st.mtimeMs)) ?? p;
+      const type = sniffImageType(await readHead(file).catch(() => Buffer.alloc(0)));
+      // A day fresh, then served from cache while it revalidates (ETag makes
+      // that a 304). "immutable" meant art re-fetched on the host never
+      // showed up for a week.
+      return res.sendFile(file, {
+        dotfiles: "allow",
+        cacheControl: false,
+        headers: {
+          "Content-Type": type,
+          "Cache-Control": "public, max-age=86400, stale-while-revalidate=2592000",
+        },
+      });
     }
     // Art file missing — trigger a background fetch so the next browser request returns real art.
     // artFetchInProgress prevents duplicate concurrent fetches when many cards load at once.
@@ -20130,6 +20186,136 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   const hlsKey = (target: string, quality: string, audioTrack: number, n: number) =>
     `${crypto.createHash("sha1").update(`v3|${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
 
+  /**
+   * Build (or read from cache) HLS segment n of a title at one quality.
+   * Shared by the segment route and the warm-up path so both produce the
+   * same cache key and the same bytes; concurrent requests for one segment
+   * share a single ffmpeg.
+   */
+  function buildHlsSegment(
+    target: string, quality: string, audioTrack: number, segN: number,
+    fmt: { width: number; height: number }, totalDur: number,
+  ): Promise<Buffer> {
+    const segKey = hlsKey(target, quality, audioTrack, segN);
+    const segCache = path.join(HLS_CACHE_DIR, `${segKey}.ts`);
+    const existing = hlsInFlight.get(segKey);
+    if (existing) return existing;
+    const job = (async () => {
+      try {
+        await fsAccess(segCache);
+        return await readFile(segCache);
+      } catch { /* build it */ }
+      const sb = segmentBounds(segN, totalDur || Number.MAX_SAFE_INTEGER);
+      const segStart = sb.start;
+      const encB = videoEncodeArgs({
+        hw: await hwEncodeAvailable(), quality,
+        srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
+      });
+      const args = [
+        "-hide_banner", "-loglevel", "error",
+        ...encB.pre,
+        "-ss", String(segStart),
+        "-i", target,
+        "-t", String(sb.dur),
+        "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
+        ...encB.post,
+        // 5.1 sources were encoded to six-channel AAC with an unknown layout,
+        // which Chrome refuses to decode (MEDIA_ERR_DECODE, then an endless
+        // "Reconnecting..."). Downmix to stereo, which every browser decodes.
+        "-af", "aresample=async=1:first_pts=0",
+        "-c:a", "aac", "-ac", "2", "-b:a", "160k",
+        "-output_ts_offset", String(segStart),
+        "-muxdelay", "0", "-muxpreload", "0",
+        "-f", "mpegts", "pipe:1",
+      ];
+      const chunks: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        const ff = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
+        let errOut = "";
+        ff.stdout.on("data", (d: Buffer) => chunks.push(d));
+        ff.stderr.on("data", (d: Buffer) => { errOut += d.toString(); });
+        ff.on("error", reject);
+        ff.on("close", (code) => {
+          if (code === 0 || chunks.length > 0) resolve();
+          else reject(new Error(errOut.slice(0, 300) || `ffmpeg exited ${code}`));
+        });
+      });
+      const buf = Buffer.concat(chunks);
+      await mkdir(HLS_CACHE_DIR, { recursive: true });
+      const tmp = `${segCache}.${process.pid}.part`;
+      await writeFile(tmp, buf);
+      await renameFile(tmp, segCache);
+      return buf;
+    })();
+    hlsInFlight.set(segKey, job);
+    job.finally(() => hlsInFlight.delete(segKey)).catch(() => {});
+    return job;
+  }
+
+  /** Index of the segment that contains second t. */
+  function segmentIndexAt(t: number, total: number): number {
+    const headSpan = HLS_FAST_START_COUNT * HLS_FAST_START_SECONDS;
+    const n = t < headSpan
+      ? Math.floor(t / HLS_FAST_START_SECONDS)
+      : HLS_FAST_START_COUNT + Math.floor((t - headSpan) / HLS_SEGMENT_SECONDS);
+    return Math.max(0, Math.min(n, Math.max(0, segmentCount(total) - 1)));
+  }
+
+  // hls.js measures bandwidth on its first fragment from the lowest rendition
+  // of the auto master playlist (480p), then steps up, typically to 720p.
+  // Those are the segments a fresh play actually asks for first.
+  const WARM_PLAN: Array<{ quality: string; segments: number[] }> = [
+    { quality: "480", segments: [0, 1, 2] },
+    { quality: "720", segments: [1, 2, 3] },
+  ];
+
+  /**
+   * Build the segments a player is about to request, before it asks: the
+   * opening seconds, and the saved resume point if there is one. Runs one
+   * ffmpeg at a time and stands aside when the server is already encoding
+   * for someone, so it never competes with playback in progress.
+   */
+  async function warmTitle(target: string, opts: { resumeAt?: number; audioTrack?: number } = {}): Promise<void> {
+    const fmt = await probeVideoFormat(target);
+    const total = fmt.duration || 0;
+    if (!(total > 0)) return;
+    const audioTrack = opts.audioTrack ?? 0;
+    const jobs: Array<{ quality: string; n: number }> = [];
+    const resume = opts.resumeAt && opts.resumeAt > 30 && opts.resumeAt < total - 30 ? opts.resumeAt : 0;
+    if (resume) {
+      const r = segmentIndexAt(resume, total);
+      jobs.push({ quality: "480", n: r }, { quality: "480", n: r + 1 }, { quality: "720", n: r + 1 }, { quality: "720", n: r + 2 });
+    } else {
+      for (const plan of WARM_PLAN) for (const n of plan.segments) jobs.push({ quality: plan.quality, n });
+    }
+    const count = segmentCount(total);
+    let built = 0;
+    for (const j of jobs) {
+      if (j.n >= count) continue;
+      if (hlsInFlight.size >= 2) break;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await buildHlsSegment(target, j.quality, audioTrack, j.n, fmt, total);
+        built++;
+      } catch {
+        break;
+      }
+    }
+    log("INFO", `Warm-up: ${built}/${jobs.length} segment(s) ready for ${path.basename(target)}${resume ? ` at ${Math.round(resume)}s` : ""}`, "media");
+  }
+
+  // One warm-up per title per minute, however often it is opened.
+  const warmedAt = new Map<string, number>();
+  function warmTitleOnce(target: string, opts: { resumeAt?: number; audioTrack?: number } = {}) {
+    const key = `${target}|${opts.resumeAt ? Math.floor(opts.resumeAt / 60) : 0}`;
+    const last = warmedAt.get(key) ?? 0;
+    if (Date.now() - last < 60_000) return false;
+    warmedAt.set(key, Date.now());
+    if (warmedAt.size > 500) warmedAt.delete(warmedAt.keys().next().value as string);
+    void warmTitle(target, opts).catch(() => {});
+    return true;
+  }
+
   // ── Prewarm ───────────────────────────────────────────────────────────────
   // Even with the probe cached and short head segments, the very first segment
   // of a cold title costs ~2.7s — almost all of it rclone fetching the opening
@@ -20139,76 +20325,15 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // on a title for a second or two before committing, so starting the work at
   // focus time hides the whole thing behind the user's own decision. Fire and
   // forget: the response says "started", not "done".
-  const prewarmed = new Map<string, number>();
   app.post("/api/media/prewarm", express.json(), async (req, res) => {
     const rel = String(req.body?.rel ?? req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
     const target = resolveMediaTarget(rel);
     if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
-
-    // One prewarm per title per minute, however many times focus lands on it.
-    const last = prewarmed.get(target) ?? 0;
-    if (Date.now() - last < 60_000) return res.json({ ok: true, alreadyWarm: true });
-    prewarmed.set(target, Date.now());
-
-    res.json({ ok: true, started: true });
-
-    // Everything below happens after the response is sent.
-    void (async () => {
-      try {
-        const fmt = await probeVideoFormat(target);          // populates the probe cache
-        const quality = String(req.body?.quality ?? "auto");
-        const audioTrack = Math.max(0, parseInt(String(req.body?.audio_track ?? "0"), 10) || 0);
-        const total = fmt.duration || 0;
-        if (!(total > 0)) return;
-
-        // Just the fast-start head: enough for playback to begin instantly,
-        // not so much that idle browsing encodes the whole library.
-        for (let n = 0; n < HLS_FAST_START_COUNT; n++) {
-          const key = hlsKey(target, quality, audioTrack, n);
-          const cachePath = path.join(HLS_CACHE_DIR, `${key}.ts`);
-          try { await fsAccess(cachePath); continue; } catch { /* build it */ }
-          const sb = segmentBounds(n, total);
-          if (sb.dur <= 0) break;
-          const enc = videoEncodeArgs({
-            hw: await hwEncodeAvailable(), quality,
-            srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
-          });
-          const args = [
-            "-hide_banner", "-loglevel", "error",
-            ...enc.pre,
-            "-ss", String(sb.start), "-i", target, "-t", String(sb.dur),
-            "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
-            ...enc.post,
-            // 5.1 sources (this library is full of E-AC3/AC3 DDP5.1) were encoded to
-            // SIX-channel AAC with an unknown layout, which Chrome refuses to
-            // build a decoder for: "audio decoder initialization failed,
-            // kUnsupportedConfig". The element then raised MEDIA_ERR_DECODE, the
-            // player treated it as a dropped connection and looped on
-            // "Reconnecting..." forever. Downmix to stereo, which every browser
-            // decodes -- the same thing /api/media/stream already did.
-            "-af", "aresample=async=1:first_pts=0",
-            "-c:a", "aac", "-ac", "2", "-b:a", "160k",
-            "-output_ts_offset", String(sb.start),
-            "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", "pipe:1",
-          ];
-          const chunks: Buffer[] = [];
-          await new Promise<void>((resolve) => {
-            const ff = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
-            ff.stdout.on("data", (d: Buffer) => chunks.push(d));
-            ff.on("error", () => resolve());
-            ff.on("close", () => resolve());
-          });
-          if (!chunks.length) break;
-          await mkdir(HLS_CACHE_DIR, { recursive: true });
-          const tmp = `${cachePath}.${process.pid}.part`;
-          await writeFile(tmp, Buffer.concat(chunks));
-          await renameFile(tmp, cachePath);
-        }
-        log("INFO", `Prewarmed ${path.basename(target)}`, "media");
-      } catch { /* speculative work — a failure just means the normal path runs */ }
-    })();
+    const audioTrack = Math.max(0, parseInt(String(req.body?.audio_track ?? "0"), 10) || 0);
+    const resumeAt = Number(req.body?.start ?? 0) || 0;
+    const started = warmTitleOnce(target, { audioTrack, resumeAt });
+    res.json({ ok: true, started, alreadyWarm: !started });
   });
 
   app.get("/api/media/hls/playlist.m3u8", async (req, res) => {
@@ -20350,59 +20475,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const _totalDur = _segDur;
     const { start: startSec, dur: thisDur } = segmentBounds(n, _totalDur || Number.MAX_SAFE_INTEGER);
 
-    const buildSegment = (segN: number): Promise<Buffer> => {
-      const segKey = hlsKey(target, quality, audioTrack, segN);
-      const segCache = path.join(HLS_CACHE_DIR, `${segKey}.ts`);
-      const existing = hlsInFlight.get(segKey);
-      if (existing) return existing;
-      const job = (async () => {
-        try {
-          await fsAccess(segCache);
-          return await readFile(segCache);
-        } catch { /* build it */ }
-        const sb = segmentBounds(segN, _totalDur || Number.MAX_SAFE_INTEGER);
-        const segStart = sb.start;
-        const encB = videoEncodeArgs({
-          hw: await hwEncodeAvailable(), quality,
-          srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
-        });
-        const args = [
-          "-hide_banner", "-loglevel", "error",
-          ...encB.pre,
-          "-ss", String(segStart),
-          "-i", target,
-          "-t", String(sb.dur),
-          "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
-          ...encB.post,
-          "-af", "aresample=async=1:first_pts=0",
-          "-c:a", "aac", "-ac", "2", "-b:a", "160k",
-          "-output_ts_offset", String(segStart),
-          "-muxdelay", "0", "-muxpreload", "0",
-          "-f", "mpegts", "pipe:1",
-        ];
-        const chunks: Buffer[] = [];
-        await new Promise<void>((resolve, reject) => {
-          const ff = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "pipe", "pipe"] });
-          let errOut = "";
-          ff.stdout.on("data", (d: Buffer) => chunks.push(d));
-          ff.stderr.on("data", (d: Buffer) => { errOut += d.toString(); });
-          ff.on("error", reject);
-          ff.on("close", (code) => {
-            if (code === 0 || chunks.length > 0) resolve();
-            else reject(new Error(errOut.slice(0, 300) || `ffmpeg exited ${code}`));
-          });
-        });
-        const buf = Buffer.concat(chunks);
-        await mkdir(HLS_CACHE_DIR, { recursive: true });
-        const tmp = `${segCache}.${process.pid}.part`;
-        await writeFile(tmp, buf);
-        await renameFile(tmp, segCache);
-        return buf;
-      })();
-      hlsInFlight.set(segKey, job);
-      job.finally(() => hlsInFlight.delete(segKey));
-      return job;
-    };
+    const buildSegment = (segN: number): Promise<Buffer> =>
+      buildHlsSegment(target, quality, audioTrack, segN, fmt, _totalDur);
 
     // Build the NEXT couple of segments while this one is being sent. A player
     // resuming after a seek needs several seconds buffered before it will start
@@ -20474,6 +20548,49 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   };
   const _mediaTrackCache = new Map<string, { info: MediaTrackInfo; ts: number }>();
 
+  // The player asks for /api/media/info the moment a title opens, before it
+  // knows whether it can play the file directly. If it can't (HEVC, 10-bit,
+  // or audio a browser won't decode), it falls back to HLS a second or two
+  // later, and those first segments were built from cold: a Drive fetch plus
+  // an encode behind a spinner, and again at the resume point. Start that
+  // work now instead. Nothing here delays the info response.
+  const BROWSER_AUDIO = new Set(["aac", "mp3", "opus", "vorbis", "flac"]);
+  function needsTranscode(info: MediaTrackInfo, target: string) {
+    const audio = info.audioTracks[0]?.codec?.toLowerCase() ?? "aac";
+    return info.videoCodec !== "h264" || info.is10Bit || !BROWSER_AUDIO.has(audio)
+      || /\.(mkv|avi|wmv|flv|ts|m2ts|mpg|mpeg)$/i.test(target);
+  }
+  function warmFromInfo(req: express.Request, target: string, rel: string, info: MediaTrackInfo) {
+    if (process.env.NEXUS_DISABLE_WARMUP === "1" || !needsTranscode(info, target)) return;
+    // /api/media/info is a public route and the player calls it without a
+    // token, so the viewer is known only when one happens to be sent.
+    let userId: string | undefined = (req as any).authPayload?.userId;
+    if (!userId) {
+      const raw = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "").trim() || String(req.query.token ?? "");
+      if (raw) {
+        try { userId = (jwt.verify(raw, JWT_SECRET, { algorithms: ["HS256"] }) as any)?.userId; } catch { /* anonymous */ }
+      }
+    }
+    void (async () => {
+      let resumeAt = 0;
+      if (pool && dbConnected) {
+        // Without a viewer, the most recent unfinished progress on this title
+        // (household-wide) is the best guess. Guessing wrong only costs a few
+        // speculative encodes.
+        const r = await (userId
+          ? pool.query("SELECT watch_time, ended FROM media_watch_progress WHERE user_id=$1 AND rel_path=$2", [userId, rel])
+          : pool.query(
+            `SELECT watch_time, ended FROM media_watch_progress
+              WHERE rel_path=$1 AND ended IS NOT TRUE
+              ORDER BY updated_at DESC LIMIT 1`, [rel])
+        ).catch(() => null);
+        const row = r?.rows?.[0];
+        if (row && !row.ended) resumeAt = Number(row.watch_time) || 0;
+      }
+      warmTitleOnce(target, { resumeAt });
+    })().catch(() => {});
+  }
+
   app.get("/api/media/info", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
@@ -20483,6 +20600,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     const cached = _mediaTrackCache.get(target);
     if (cached && Date.now() - cached.ts < 600_000) {
+      warmFromInfo(req, target, rel, cached.info);
       return res.json({ ok: true, ...cached.info, rel });
     }
 
@@ -20543,6 +20661,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       });
       _mediaTrackCache.set(target, { info, ts: Date.now() });
       if (info.duration > 0) _mediaDurationCache.set(target, { duration: info.duration, ts: Date.now() });
+      warmFromInfo(req, target, rel, info);
       return res.json({ ok: true, ...info, rel });
     } catch (e) {
       return res.status(500).json({ error: String(e) });
