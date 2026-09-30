@@ -87,46 +87,37 @@ curl -s https://savestate.co.za/api/health/full
 
 The second should report `"overall": "healthy"` with every check passing.
 
-### Windows hosts: run the stack in WSL2
+### Windows hosts (native, no WSL)
 
-`setup-host.sh`, the systemd units and the rclone FUSE mount are Linux-only,
-and the PowerShell `host:*` scripts named in `package.json` no longer exist.
-On a Windows PC, run the host inside WSL2 (Ubuntu), where the steps above
-work unchanged.
+One PowerShell command sets up a Windows PC as the host. The script installs
+anything missing with winget: Node, ffmpeg, cloudflared, and rclone + WinFsp
+for the Drive library. It restores the tunnel credential and secrets from the
+USB bundle, which it finds by itself, and builds the server. It registers a
+"SaveState Host" task that starts everything at logon and restarts anything
+that stops, then checks the domain answers from outside.
 
 ```powershell
-# PowerShell as Administrator, then reboot
-wsl --install -d Ubuntu-24.04
+winget install -e --id Git.Git --accept-source-agreements --accept-package-agreements
+$env:Path += ";$env:ProgramFiles\Git\cmd"
+git clone -b claude/eloquent-hamilton-rypbw3 https://github.com/mraaziqp/savestate.git $HOME\NexussEmu
+powershell -NoProfile -ExecutionPolicy Bypass -File $HOME\NexussEmu\scripts\windows\host-up.ps1
 ```
 
-Inside Ubuntu:
+Run it again at any time to repair or update the setup. The files it uses:
 
-```bash
-# systemd must be on (recent WSL images have it already)
-grep -q 'systemd=true' /etc/wsl.conf || printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf
-# then run `wsl --shutdown` in PowerShell and reopen Ubuntu
+| | |
+|---|---|
+| Tunnel credential | `%USERPROFILE%\.cloudflared\<tunnel-id>.json` |
+| Tunnel config | `%USERPROFILE%\.nexus-data\cloudflared\config.yml` (run by tunnel ID, no Cloudflare login needed) |
+| Data | `%USERPROFILE%\.nexus-data` (or `%APPDATA%\NexusEmuHost` from an older install) |
+| Logs | `<data>\logs\server.log`, `tunnel.err.log`, `drive-mount.err.log`, `watchdog.log` |
+| Drive mount | `%USERPROFILE%\nexus-cloud-media` |
 
-git clone git@github.com:mraaziqp/savestate.git ~/NexussEmu   # in ~, not /mnt/c
-cd ~/NexussEmu
-bash scripts/setup-host.sh
-cp /mnt/d/savestate-host-bundle-*.tar.gz.gpg ~/       # D: is the USB stick
-bash scripts/import-host-bundle.sh ~/savestate-host-bundle-*.tar.gz.gpg
-sudo loginctl enable-linger $USER
-```
+Keep the PC signed in and plugged in; the script turns off sleep on mains power.
+Hardware transcoding reports a warning on Windows (VAAPI is Linux-only).
 
-Differences from a Linux host:
-
-- **WSL has to stay running.** It can stop the Ubuntu VM once no Windows
-  program is attached to it, and that takes the site down. Add a Task
-  Scheduler task that runs at startup whether or not anyone is signed in:
-  `wsl.exe -d Ubuntu-24.04 --exec /bin/sleep infinity`. Check that the site
-  stays up after you close every terminal and after a reboot.
-- **Windows must not sleep.** A sleeping PC counts as the host being down,
-  and traffic moves to the AWS standby.
-- **Hardware transcoding reports a warning.** WSL has no VAAPI `/dev/dri`,
-  so ffmpeg encodes in software.
-- Local RetroArch launches and Remote Play drive a Linux desktop inside WSL,
-  not the Windows desktop.
+A Linux host, or WSL2, uses `scripts/setup-host.sh` and `scripts/host-up.sh`
+instead.
 
 ## Services
 

@@ -5626,6 +5626,13 @@ async function startServer() {
     // The public URL check above proves the domain answers, but not WHY when it
     // stops: a dead tunnel and a dead server look identical from outside.
     await check('Domain: Cloudflare tunnel', true, async () => {
+      if (process.platform === "win32") {
+        // pgrep does not exist on Windows, so this check always failed there.
+        const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq cloudflared.exe" /NH').catch(() => ({ stdout: "" }));
+        return /cloudflared\.exe/i.test(String(stdout))
+          ? { ok: true, msg: "Running" }
+          : { ok: false, msg: "cloudflared not running — savestate.co.za will not reach this host" };
+      }
       const { stdout } = await execAsync("pgrep -a cloudflared || true").catch(() => ({ stdout: "" }));
       const line = String(stdout).split("\n").find((l) => l.includes("cloudflared"));
       if (!line) return { ok: false, msg: 'cloudflared not running — savestate.co.za will not reach this host' };
