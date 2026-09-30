@@ -175,50 +175,27 @@ a move, check that the `NexusArchive` folder is still shared with it.
 
 ## Failover
 
-A Cloudflare Worker (`cloudflare-worker/`) sits on the domain's routes and
-picks who answers each request:
+The site runs **only from the home host**. Nothing is served from AWS.
 
-1. **This host**, through the tunnel. Always tried first; normal traffic
-   passes straight through, streaming and Range requests intact.
-2. **`STANDBY_ORIGIN`**: the AWS App Runner copy of the app
-   (`aws-infrastructure.yaml`). It gets everything, API included, but only
-   while this host is down.
-3. **`FALLBACK_ORIGIN`**: the Amplify static build. Page loads only; `/api/*`
-   gets a clean JSON 503 instead of HTML.
-4. The built-in offline page.
+A Cloudflare Worker (`cloudflare-worker/`) sits on the domain's routes. Normal
+traffic passes straight through to this host, streaming and Range requests
+intact. When this host is down it answers with a built-in offline page instead
+of Cloudflare's raw 1033/502 error, and `/api/*` gets a clean JSON 503.
 
-"Down" means the request never reached the app: Cloudflare's 52x/530 (1033 is
-a tunnel with no connector), a failed fetch, or a 502/503/504 **without** the
-`X-SaveState-Origin` header. The app stamps that header on every response, so
-its own 503s ("Database unavailable") pass through instead of triggering a
-failover. Once a Cloudflare location sees this host down, it sends traffic
-straight to the standby for 20 seconds, then tries this host again. Traffic
-comes back here on its own when this host answers again. Nothing needs to be switched by hand.
+"Down" means the request never reached the app: Cloudflare's 52x/530, a
+failed fetch, or a 502/503/504 **without** the `X-SaveState-Origin` header
+that the app stamps on every response. The app's own 503s ("Database
+unavailable") pass through unchanged.
 
-To turn the standby on:
+Deploy or update it (this is what removes the old Amplify fallback from the
+live domain):
 
 ```bash
-bash scripts/deploy-aws-serverless.sh          # prints the App Runner ServiceUrl
-# put that URL in cloudflare-worker/wrangler.toml as STANDBY_ORIGIN, then:
 cd cloudflare-worker && npx wrangler deploy
 ```
 
-Check which machine answered: the `X-SaveState-Origin` response header, or
-`"origin"` in `/api/health`, reads `primary`, `standby` or `static`.
-
-What the standby can't do (it's a managed container with no GPU and no
-desktop): hardware transcoding (software x264 only, about one concurrent
-viewer on 2 vCPU), local RetroArch launches and Remote Play. In-browser games,
-the library, accounts and saves work, because they live in Neon and Google
-Drive, which both machines share. POST bodies over 1 MB (uploads) are not
-replayed to the standby; they get a 503 while this host is down.
-Co-op and Watch Party run over WebSockets. Check that `/ws/coop` connects on
-the App Runner URL before counting on multiplayer during an outage. Their
-sessions live in memory, so sessions already running are dropped when traffic
-moves between machines.
-
-The standby is always running, so it costs money while idle; App Runner bills
-provisioned memory when there is no traffic. Lower `Cpu`/`Memory` in the stack
-if it is only there for failover.
+The Worker can also fall back to a second copy of the app (`STANDBY_ORIGIN`)
+or a static frontend (`FALLBACK_ORIGIN`). Both are deliberately unset. The AWS
+files (`aws-infrastructure.yaml`, `deploy-aws*.sh`, `amplify.yml`) are unused.
 
 Test the Worker without deploying: `node scripts/test-failover-worker.mjs`.

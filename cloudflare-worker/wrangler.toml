@@ -10,12 +10,12 @@ routes = [
   { pattern = "*.savestate.co.za/*", zone_name = "savestate.co.za" },
 ]
 
-# Failover order when the home host is down (see savestate-failover.js):
-#   STANDBY_ORIGIN  - the AWS App Runner service; full app, API included.
-#                     Set it to the stack's ServiceUrl output after
-#                     `bash scripts/deploy-aws-serverless.sh`. Left unset, the
-#                     Worker skips straight to the static shell.
-#   FALLBACK_ORIGIN - Amplify; static frontend only, page loads only.
-[vars]
-FALLBACK_ORIGIN = "https://main.d1o153osqs5hc7.amplifyapp.com"
-# STANDBY_ORIGIN = "https://<id>.<region>.awsapprunner.com"
+# The site runs ONLY from the home host. When it is down, the Worker answers
+# with its built-in offline page (and a JSON 503 for /api/*); nothing is sent
+# to AWS. The Worker still supports two optional fallbacks, left unset on
+# purpose:
+#   STANDBY_ORIGIN  - a second full copy of the app (e.g. AWS App Runner)
+#   FALLBACK_ORIGIN - a static copy of the frontend (e.g. Amplify)
+# [vars]
+# STANDBY_ORIGIN = "https://..."
+# FALLBACK_ORIGIN = "https://..."
