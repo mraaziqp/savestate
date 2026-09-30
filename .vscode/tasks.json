@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SaveState: Host on this Windows PC",
+      "detail": "Install what is missing, restore the tunnel from the USB bundle, start the server + tunnel, verify savestate.co.za",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}\\scripts\\windows\\host-up.ps1"],
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "SaveState: Host on this PC (Linux / WSL)",
+      "type": "shell",
+      "command": "bash scripts/host-up.sh --pull",
+      "presentation": { "reveal": "always", "panel": "dedicated", "focus": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "SaveState: Show host logs (Windows)",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": ["-NoProfile", "-Command", "$d = if (Test-Path \"$HOME\\.nexus-windows-host.json\") { (Get-Content \"$HOME\\.nexus-windows-host.json\" -Raw | ConvertFrom-Json).dataDir } else { \"$HOME\\.nexus-data\" }; Get-ChildItem \"$d\\logs\" | ForEach-Object { Write-Host \"==== $($_.Name)\"; Get-Content $_.FullName -Tail 20 }"],
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "problemMatcher": []
+    }
+  ]
+}
