@@ -1735,7 +1735,14 @@ type MediaItem = {
   tmdbId?: number | null;
 };
 
-const VIDEO_EXT = new Set([".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v"]);
+// Phone and camera formats (.3gp, .mts/.m2ts, .mpg) and older desktop ones
+// (.wmv, .flv) were missing, so uploading an ordinary home video was answered
+// "Unsupported type" and silently skipped. Anything a browser cannot play
+// natively goes through the HLS transcode like HEVC/MKV already does.
+const VIDEO_EXT = new Set([
+  ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v",
+  ".wmv", ".flv", ".ts", ".m2ts", ".mts", ".3gp", ".3g2", ".mpg", ".mpeg", ".ogv",
+]);
 const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]);
 const SUBTITLE_EXT = new Set([".srt", ".vtt", ".ass", ".ssa", ".sub"]);
 const DEFAULT_MEDIA_ROOT = process.env.NEXUS_MEDIA_ROOT?.trim() || path.join(process.cwd(), "data", "media");
@@ -19132,6 +19139,29 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   const UPLOAD_TEMP_DIR = path.join(PERSIST_DIR, "tmp", "uploads");
 
+  /**
+   * Where an uploaded video should go. The media root is normally the rclone
+   * mount of Google Drive, which is mounted read-only on purpose, so every
+   * web upload failed at mkdir ("Could not prepare upload directory"). Use
+   * the requested root when it really is writable; otherwise ~/nexus-uploads,
+   * which the library already scans, so the video still shows up.
+   */
+  const LOCAL_MEDIA_UPLOAD_ROOT = path.join(os.homedir(), "nexus-uploads");
+  async function mediaUploadRoot(requested: string): Promise<{ root: string; fellBack: boolean }> {
+    const probeDir = async (dir: string) => {
+      await mkdir(dir, { recursive: true });
+      const probe = path.join(dir, `.write-probe-${process.pid}-${Date.now()}`);
+      await writeFile(probe, "");
+      await unlink(probe).catch(() => {});
+    };
+    try {
+      await probeDir(requested);
+      return { root: requested, fellBack: false };
+    } catch { /* read-only or missing: fall back */ }
+    await mkdir(LOCAL_MEDIA_UPLOAD_ROOT, { recursive: true });
+    return { root: LOCAL_MEDIA_UPLOAD_ROOT, fellBack: true };
+  }
+
   // 1. Initialize chunked upload
   app.post("/api/media/upload/init", async (req, res) => {
     const authUser = getOptionalAuthUser(req);
@@ -19363,7 +19393,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return res.json({ ok: true, skipped: true, reason: `Unsupported type: ${ext || "(none)"}` });
     }
 
-    const root = path.resolve(meta.root || mediaRoot || DEFAULT_MEDIA_ROOT);
+    const { root, fellBack } = await mediaUploadRoot(path.resolve(meta.root || mediaRoot || DEFAULT_MEDIA_ROOT));
+    if (fellBack) log("INFO", `Media upload routed to ${root} (the media root is not writable)`, "media");
     let relativeTarget = safeName;
     if (meta.rel) {
       const normalized = meta.rel.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -19452,10 +19483,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     }
 
-    mediaRoot = root;
+    // Only adopt the root when it was the one asked for. Adopting the fallback
+    // would make the whole library point at the uploads folder.
+    if (!fellBack) mediaRoot = root;
     log("INFO", `Media uploaded (chunked): ${relativeTarget} (${bytesWritten} bytes)`, "media");
     recordSetupEvent("Media Upload", true, `${relativeTarget} (${bytesWritten} bytes)`, "media");
-    await refreshMediaLibrary(root);
+    await refreshMediaLibrary(fellBack ? true : root);
     await persistHostStateNow(true).catch(() => {});
 
     // Trigger background cover art & TMDB/Gemini metadata enrichment
@@ -19497,7 +19530,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
 
     const requestedRoot = String(req.query.root ?? "").trim();
-    const root = path.resolve(requestedRoot || mediaRoot || DEFAULT_MEDIA_ROOT);
+    const { root, fellBack } = await mediaUploadRoot(path.resolve(requestedRoot || mediaRoot || DEFAULT_MEDIA_ROOT));
+    if (fellBack) log("INFO", `Media upload routed to ${root} (the media root is not writable)`, "media");
 
     let relativeTarget = safeName;
     if (relRaw) {
@@ -19552,10 +19586,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     }
 
-    mediaRoot = root;
+    if (!fellBack) mediaRoot = root;
     log("INFO", `Media uploaded: ${relativeTarget} (${bytesWritten} bytes)`, "media");
     recordSetupEvent("Media Upload", true, `${relativeTarget} (${bytesWritten} bytes)`, "media");
-    await refreshMediaLibrary(root);
+    await refreshMediaLibrary(fellBack ? true : root);
     await persistHostStateNow(true).catch(() => {});
 
     if (isVideo) {
@@ -19634,6 +19668,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       : ext === ".mov" ? "video/quicktime"
       : ext === ".avi" ? "video/x-msvideo"
       : ext === ".mkv" ? "video/x-matroska"
+      : ext === ".wmv" ? "video/x-ms-wmv"
+      : ext === ".flv" ? "video/x-flv"
+      : ext === ".ts" || ext === ".m2ts" || ext === ".mts" ? "video/mp2t"
+      : ext === ".3gp" ? "video/3gpp"
+      : ext === ".3g2" ? "video/3gpp2"
+      : ext === ".mpg" || ext === ".mpeg" ? "video/mpeg"
+      : ext === ".ogv" ? "video/ogg"
       : ext === ".png" ? "image/png"
       : ext === ".webp" ? "image/webp"
       : ext === ".gif" ? "image/gif"
