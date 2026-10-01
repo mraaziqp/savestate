@@ -448,6 +448,8 @@ function getEmulatorPath(platform) {
     ...inEmuDirs('RetroArch', 'retroarch.exe'),
     path.join(emuRoot, 'RetroArch', 'retroarch.exe'),
     path.join(process.env.LOCALAPPDATA || '', 'RetroArch', 'retroarch.exe'),
+    // Default of the official installer (and `winget install Libretro.RetroArch`).
+    'C:\\RetroArch-Win64\\retroarch.exe',
     'C:\\RetroArch\\retroarch.exe',
     'C:\\Program Files\\RetroArch-Win64\\retroarch.exe',
     'C:\\Program Files (x86)\\RetroArch-Win64\\retroarch.exe',
@@ -468,6 +470,8 @@ function getEmulatorPath(platform) {
     cfg.emulators?.dolphin,
     ...inEmuDirs('Dolphin', 'Dolphin.exe'),
     path.join(emuRoot, 'Dolphin', 'Dolphin.exe'),
+    // Default of the official installer.
+    'C:\\Program Files\\Dolphin-x64\\Dolphin.exe',
     'C:\\Program Files\\Dolphin\\Dolphin.exe',
     'C:\\Program Files\\Dolphin Emulator\\Dolphin.exe',
   ] : IS_MAC ? [

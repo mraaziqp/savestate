@@ -72,6 +72,14 @@ $parts += @{
 $procs = @{}
 $backoff = @{}
 Say 'watchdog up'
+
+# Google Drive for Desktop mounts its drive a little after logon. Starting the
+# server before it appears would index an empty library until the next rescan.
+if ($cfg.waitForPath) {
+  for ($i = 0; $i -lt 90 -and -not (Test-Path -LiteralPath $cfg.waitForPath); $i++) { Start-Sleep -Seconds 2 }
+  if (Test-Path -LiteralPath $cfg.waitForPath) { Say "library path ready: $($cfg.waitForPath)" }
+  else { Say "library path not available after 3 min, starting anyway: $($cfg.waitForPath)" }
+}
 while ($true) {
   foreach ($part in $parts) {
     $p = $procs[$part.name]

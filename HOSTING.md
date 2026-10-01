@@ -158,17 +158,55 @@ actually serving, not just what is configured:
 `Cannot resolve entry module index.html` and would replace a working frontend
 with a broken one. `amplify.yml` skips the build for the same reason.
 
-**Drive access uses a service account**, not user OAuth. A refresh token from
+**Fixes to the frontend are made in `dist/assets` directly — then rename.**
+Those files are served `immutable, max-age=1y` and Cloudflare caches them, so
+an edited file never reaches anyone who has visited before. After patching,
+run `node scripts/rev-dist.mjs r<N>` with the next revision number: it renames
+every asset and rewrites every reference, including the service worker's
+precache list. The current revision is the `-rN` suffix in `dist/index.html`.
+
+**The Windows host reads Drive through Google Drive for Desktop**, not rclone.
+rclone's shared client id is so rate-limited (403 `rateLimitExceeded`) that
+reads fell to 0.2–0.7 MB/s and video stalled; Drive for Desktop measured
+~6 MB/s. `~\nexus-cloud-media` is a junction to `I:\My Drive\NexusArchive`;
+its cache lives on `F:\SaveState\DriveFS-cache` (60 GB cap, set in
+`HKCU\Software\Google\DriveFS`). `host-up.ps1` detects Drive for Desktop and
+sets this up instead of an rclone mount.
+
+On the Linux host, **Drive access used a service account**, not user OAuth. A refresh token from
 an app in Google's "Testing" status expires after 7 days; a service account
 never expires and needs no consent screen. It reads whatever is shared with
 `savestate-drive@…iam.gserviceaccount.com`, so if the library goes empty after
 a move, check that the `NexusArchive` folder is still shared with it.
 
+## Streaming
+
+- Files the browser can play are sent as-is (`/api/media/file`, Range
+  requests). Anything else — MKV, HEVC, 10-bit — goes through adaptive HLS: a
+  master playlist with 1080p/720p/480p, and hls.js picks from measured speed.
+- HLS segments past the first three come from **one continuous ffmpeg per
+  viewer** (an "HLS session"), not one ffmpeg per segment: per-segment builds
+  paid file open + seek + encoder start every 6s and ran at about realtime.
+  Sessions stop after 90s idle or 4 min ahead of the viewer, max 3 at once.
+- Encoding uses NVIDIA NVENC when present (VAAPI on Linux, x264 otherwise).
+  NVENC needs `-bf 0` and `-forced-idr 1`, or segments break.
+- The player stays on Auto. A direct-play title that keeps stalling switches
+  itself to the adaptive stream. Desktop Chrome reports native HLS support;
+  the player still uses hls.js there, because the native player never steps
+  down on a weak link.
+
 ## Failover
 
 The site runs **only from the home host**. Nothing is served from AWS.
 
-A Cloudflare Worker (`cloudflare-worker/`) sits on the domain's routes. Normal
+**The failover Worker is no longer on the domain** (routes removed
+2026-10-01). Workers on the free plan allow 100,000 requests a day, and with
+the Worker on every route each video segment, Range read and thumbnail
+counted: the limit ran out and Cloudflare blocked the whole domain with
+error 1027 on every network. Do not put it back on `savestate.co.za/*` unless
+the account has a paid Workers plan, or the routes are narrowed to page loads.
+
+The description below is kept for reference. A Cloudflare Worker (`cloudflare-worker/`) sat on the domain's routes. Normal
 traffic passes straight through to this host, streaming and Range requests
 intact. When this host is down it answers with a built-in offline page instead
 of Cloudflare's raw 1033/502 error, and `/api/*` gets a clean JSON 503.
@@ -178,8 +216,7 @@ failed fetch, or a 502/503/504 **without** the `X-SaveState-Origin` header
 that the app stamps on every response. The app's own 503s ("Database
 unavailable") pass through unchanged.
 
-Deploy or update it (this is what removes the old Amplify fallback from the
-live domain):
+Deploying it again re-adds the routes (see the warning above):
 
 ```bash
 cd cloudflare-worker && npx wrangler deploy

@@ -39,10 +39,11 @@ FROM node:22-slim AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json tsconfig.json server.ts ./
+COPY server ./server
 # esbuild is the only build-time dependency; --packages=external keeps
 # node_modules out of the bundle so the layer stays cacheable.
 RUN npm install --no-save esbuild@^0.25.0 \
- && ./node_modules/.bin/esbuild server.ts \
+ && ./node_modules/.bin/esbuild server.ts --bundle \
       --platform=node --target=node22 --format=esm --packages=external \
       --outfile=dist/server.mjs \
  && test -s dist/server.mjs

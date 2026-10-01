@@ -5,10 +5,15 @@ name = "savestate-failover"
 main = "savestate-failover.js"
 compatibility_date = "2026-09-01"
 
-routes = [
-  { pattern = "savestate.co.za/*", zone_name = "savestate.co.za" },
-  { pattern = "*.savestate.co.za/*", zone_name = "savestate.co.za" },
-]
+# Routes deliberately DISABLED (2026-10-01). On the Workers free plan (100,000
+# requests/day) a Worker on every route counted each video segment, Range read
+# and thumbnail, ran out, and Cloudflare blocked the whole domain with error
+# 1027. Re-enable only on a paid Workers plan. See HOSTING.md, "Failover".
+# routes = [
+#   { pattern = "savestate.co.za/*", zone_name = "savestate.co.za" },
+#   { pattern = "*.savestate.co.za/*", zone_name = "savestate.co.za" },
+# ]
+workers_dev = false
 
 # The site runs ONLY from the home host. When it is down, the Worker answers
 # with its built-in offline page (and a JSON 503 for /api/*); nothing is sent

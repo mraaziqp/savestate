@@ -100,6 +100,17 @@ function Place([string]$src, [string]$dst) {
 
 function Tunnel-Credential {
   if (-not (Test-Path $CfDir)) { return $null }
+  # A PC can hold credentials for several tunnels (other sites). Prefer the one
+  # the existing tunnel config already names, so this never picks another
+  # site's tunnel just because its file sorts first.
+  foreach ($cfg in @((Join-Path $DataDir 'cloudflared\config.yml'), (Join-Path $CfDir 'config.yml'))) {
+    if (-not (Test-Path $cfg)) { continue }
+    $m = Select-String -Path $cfg -Pattern '^\s*tunnel\s*:\s*([0-9a-fA-F-]{36})' | Select-Object -First 1
+    if (-not $m) { continue }
+    $id = $m.Matches[0].Groups[1].Value
+    $f = Join-Path $CfDir "$id.json"
+    if (Test-Path $f) { return @{ file = $f; id = $id } }
+  }
   foreach ($f in Get-ChildItem -Path $CfDir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
     try {
       $j = Get-Content $f.FullName -Raw | ConvertFrom-Json
@@ -261,9 +272,44 @@ if ($svc) { Ok "tunnel forwards to: $($svc.Trim())" }
 
 # -- Google Drive mount (the media and ROM library) --------------------------
 $rcloneConf = Join-Path $HOME '.config\rclone\rclone.conf'
+# rclone's own default on Windows, where `rclone config` puts it.
+$appDataConf = Join-Path $env:APPDATA 'rclone\rclone.conf'
+if (-not (Test-Path $rcloneConf) -and (Test-Path $appDataConf)) { $rcloneConf = $appDataConf }
 $rclone = $null; $remote = $null; $mountPoint = $null
+# Google Drive for Desktop, when signed in, is preferred over an rclone mount:
+# it has its own API quota, while rclone's shared client id is rate-limited so
+# hard that reads fall to a few hundred KB/s (measured 0.2-0.7 MB/s against
+# ~6 MB/s through Drive for Desktop on this line) and video stalls.
+$driveFs = $null
+foreach ($d in (Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+  $p = Join-Path $d.Root 'My Drive\NexusArchive'
+  if (Test-Path -LiteralPath $p) { $driveFs = $p; break }
+}
+$libraryLink = Join-Path $HOME 'nexus-cloud-media'
 if ($SkipDrive) {
   Warn 'Drive mount skipped (-SkipDrive)'
+} elseif ($driveFs) {
+  # The library, the database and the game vault all use ~\nexus-cloud-media,
+  # so it becomes a link to the Drive for Desktop folder instead of a mount.
+  # An rclone mount still sitting on that path is unmounted first.
+  $mounts = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'rclone.exe' -and $_.CommandLine -like '*NexusArchive*' }
+  if ($mounts) {
+    & schtasks.exe /End /TN 'SaveState Host' 2>$null | Out-Null
+    $mounts | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Seconds 3
+  }
+  if (Test-Path -LiteralPath $libraryLink) {
+    $item = Get-Item -LiteralPath $libraryLink -Force
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { & cmd.exe /c rmdir "$libraryLink" | Out-Null }
+    elseif (-not (Get-ChildItem -LiteralPath $libraryLink -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $libraryLink -Force }
+  }
+  if (Test-Path -LiteralPath $libraryLink) {
+    Warn "$libraryLink has files in it, so it cannot link to Google Drive; move them and run again"
+  } else {
+    & cmd.exe /c mklink /J "$libraryLink" "$driveFs" | Out-Null
+    if (Test-Path -LiteralPath (Join-Path $libraryLink 'movies')) { Ok "Google Drive for Desktop: $libraryLink -> $driveFs" }
+    else { Warn "could not link $libraryLink to $driveFs" }
+  }
 } elseif (-not (Test-Path $rcloneConf)) {
   Warn 'no rclone.conf - the media/ROM library will be empty until Google Drive is set up'
 } else {
@@ -320,7 +366,7 @@ Ok 'npm packages installed'
 # lost and dist\ is the committed, working build.
 $serverArgs = @('dist/server.mjs')
 $esbuild = Join-Path $AppDir 'node_modules\.bin\esbuild.cmd'
-& $esbuild server.ts --platform=node --target=node22 --format=esm --packages=external --outfile=dist/server.mjs --log-level=warning
+& $esbuild server.ts --bundle --platform=node --target=node22 --format=esm --packages=external --outfile=dist/server.mjs --log-level=warning
 if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $AppDir 'dist\server.mjs'))) {
   Ok 'server built (dist\server.mjs)'
 } else {
@@ -337,6 +383,7 @@ $hostCfg = [ordered]@{
   cloudflared = $cloudflared; tunnelConfig = $tunnelConfig; ffmpegDir = $ffmpegDir
   rclone = $rclone; rcloneConfig = $(if ($mountPoint) { $rcloneConf } else { $null })
   rcloneRemote = $remote; mountPoint = $mountPoint
+  waitForPath = $(if ($driveFs) { Join-Path $libraryLink 'movies' } else { $null })
 }
 $hostCfg | ConvertTo-Json | Set-Content -Path (Join-Path $HOME '.nexus-windows-host.json') -Encoding ASCII
 New-Item -ItemType Directory -Force -Path (Join-Path $DataDir 'logs') | Out-Null
@@ -346,7 +393,13 @@ $psArgs = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runne
 $registered = $false
 try {
   $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $psArgs
-  $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+  # Logon, plus every 5 minutes: if the watchdog is ever killed (it was, once,
+  # taking the site down overnight) it comes back on its own. A second copy
+  # exits at once because the running one holds the watchdog mutex.
+  $trigger = @(
+    (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5))
+  )
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable
   Register-ScheduledTask -TaskName 'SaveState Host' -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null

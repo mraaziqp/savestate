@@ -1,7 +1,7 @@
 import express from "express";
 import http from "http";
 import https from "https";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import compression from "compression";
 import path from "path";
 import pg from "pg";
@@ -20,10 +20,11 @@ import { GoogleGenAI } from "@google/genai";
 import chokidar from "chokidar";
 import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
+import { registerFilesLibrary, mediaRootsFor } from "./server/files-library.ts";
 
-// ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
-// Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
-// tokens — were stored as plaintext in .nexus-data/*.json and in Neon. Anyone
+// â”€â”€ Secret encryption at rest (AES-256-GCM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Third-party credentials â€” Sonarr/Radarr keys, Steam Web API keys, ecosystem
+// tokens â€” were stored as plaintext in .nexus-data/*.json and in Neon. Anyone
 // with a copy of a backup, or read access to the database, had the keys.
 //
 // GCM rather than CBC because these values are read back and used verbatim:
@@ -33,12 +34,12 @@ import QRCode from "qrcode";
 //
 // The key is derived with scrypt from NEXUS_ENCRYPTION_KEY, falling back to
 // JWT_SECRET so an existing deployment keeps working without new config. That
-// fallback is why rotating JWT_SECRET also invalidates stored secrets — call
+// fallback is why rotating JWT_SECRET also invalidates stored secrets â€” call
 // that out rather than let it surprise someone.
-// ── Emulator BIOS requirements ──────────────────────────────────────────────
+// â”€â”€ Emulator BIOS requirements â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Shared by the launch interceptor and the readiness dashboard. Previously this
 // table lived inside the readiness endpoint, so the launch path had no idea a
-// platform needed a BIOS at all — a PS1 game with no BIOS launched RetroArch,
+// platform needed a BIOS at all â€” a PS1 game with no BIOS launched RetroArch,
 // which died on its own with nothing useful surfaced to the player.
 //
 // "anyOf": regional variants are interchangeable, so any one of them satisfies
@@ -59,7 +60,7 @@ function secretKey(): Buffer {
   if (_secretKey) return _secretKey;
   const material = process.env.NEXUS_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "";
   if (!material) {
-    throw new Error("No NEXUS_ENCRYPTION_KEY or JWT_SECRET — refusing to store secrets unencrypted");
+    throw new Error("No NEXUS_ENCRYPTION_KEY or JWT_SECRET â€” refusing to store secrets unencrypted");
   }
   // Fixed salt: the key must be derivable identically on every boot, and the
   // material is already high-entropy, so a per-value salt would buy nothing
@@ -107,17 +108,17 @@ function isEncryptedSecret(v: string | null | undefined): boolean {
   return String(v ?? "").startsWith(SECRET_ENC_PREFIX);
 }
 
-// ── Drive Recovery Layer (added 2026-09-20) ─────────────────────────────────
+// â”€â”€ Drive Recovery Layer (added 2026-09-20) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // "/media/moh/EMULATION dRIVE" was physically destroyed. Every hardcoded
 // reference to that mount point has been replaced by the OS-agnostic paths
 // below. scripts/test-emergency-recovery.cjs fails if the name reappears.
 const NEXUS_HOME = os.homedir();
 
-/** Local fallback vault — stands in for the dead drive when disk is unavoidable. */
+/** Local fallback vault â€” stands in for the dead drive when disk is unavoidable. */
 const NEXUS_LOCAL_VAULT =
   process.env.NEXUS_VAULT_FALLBACK ?? path.join(NEXUS_HOME, ".nexus-vault");
 
-/** rclone mount of gdrive:NexusArchive — the primary store now local space is gone. */
+/** rclone mount of gdrive:NexusArchive â€” the primary store now local space is gone. */
 const NEXUS_GDRIVE_ROOT =
   process.env.NEXUS_GDRIVE_ROOT ?? path.join(NEXUS_HOME, "nexus-cloud-media");
 
@@ -151,7 +152,7 @@ function isDeadDrivePath(p: string | null | undefined): boolean {
 function livePaths<T extends string | null | undefined>(list: T[]): string[] {
   return list.filter((p): p is string & T => Boolean(p) && !isDeadDrivePath(p));
 }
-// ── Bounded Connection Pool & Resource Manager (Phase 8) ────────────────────
+// â”€â”€ Bounded Connection Pool & Resource Manager (Phase 8) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const ECOSYSTEM_POOL_CONFIG = {
   keepAlive: true,
   keepAliveMsecs: 2000,
@@ -304,7 +305,7 @@ async function sendEcosystemInvite(
   const cleanUrl = apiUrl.replace(/\/+$/, "");
   const agent = cleanUrl.startsWith("https") ? ecosystemHttpsAgent : ecosystemHttpAgent;
 
-  const textMessage = `🎮 ${invite.senderName || "A friend"} invited you to ${invite.type === "coop" ? "join Co-Op session" : "watch media stream"}: "${invite.title}"\n\nClick to launch: ${invite.inviteUrl}`;
+  const textMessage = `ðŸŽ® ${invite.senderName || "A friend"} invited you to ${invite.type === "coop" ? "join Co-Op session" : "watch media stream"}: "${invite.title}"\n\nClick to launch: ${invite.inviteUrl}`;
 
   if (!apiKey) {
     return { ok: true, messageId: `mock_dm_${Date.now()}` };
@@ -354,7 +355,7 @@ dotenv.config();
 
 // This host has no working IPv6 route, but DNS for the Neon Postgres pooler
 // hostname resolves AAAA records that Node's default resolver order can still
-// pick first — every new pool connection then has a chance of dialing a dead
+// pick first â€” every new pool connection then has a chance of dialing a dead
 // IPv6 address and failing, which is what caused the recurring "Connection
 // terminated unexpectedly" pool errors (and full disconnects) seen in
 // production. Forcing IPv4-first resolution fixes it at the source rather
@@ -367,7 +368,7 @@ const { Pool } = pg;
 const FFMPEG_BIN = process.platform === "win32" ? "ffmpeg" : (existsSync("/usr/bin/ffmpeg") ? "/usr/bin/ffmpeg" : "ffmpeg");
 const FFPROBE_BIN = process.platform === "win32" ? "ffprobe" : (existsSync("/usr/bin/ffprobe") ? "/usr/bin/ffprobe" : "ffprobe");
 
-// ─── Gemini AI ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ Gemini AI â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const ai = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
@@ -408,6 +409,10 @@ const PERSIST_DIR = (NEXUS_DATA_DIR_ENV && isPathValidForThisPlatform(NEXUS_DATA
   ? NEXUS_DATA_DIR_ENV
   : path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "NexusEmuHost");
 const PERSIST_FILE = path.join(PERSIST_DIR, "host-state.json");
+/** Files library (uploads in category folders). Set NEXUS_FILES_ROOT to put it on a bigger disk. */
+const FILES_ROOT = (process.env.NEXUS_FILES_ROOT?.trim() && isPathValidForThisPlatform(process.env.NEXUS_FILES_ROOT))
+  ? process.env.NEXUS_FILES_ROOT.trim()
+  : path.join(PERSIST_DIR, "files");
 const LEGACY_PERSIST_DIR = path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "NexusEmuHost");
 
 const BOOTSTRAP_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -470,7 +475,7 @@ async function saveLocalPersistState(state: LocalPersistState): Promise<void> {
   await renameFile(tempPath, PERSIST_FILE);
 }
 
-// ─── CPU Load Sampling ──────────────────────────────────────────────────────
+// â”€â”€â”€ CPU Load Sampling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 let cpuLoadCache = 0;
 let gpuLoadCache = -1;
 let lastCpuInfo = os.cpus().map((c) => ({ ...c.times }));
@@ -512,7 +517,7 @@ async function pollGpu() {
   }
 }
 
-// ─── ROM Helpers ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ ROM Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const ROM_EXT = new Set([
   ".nes", ".sfc", ".smc", ".z64", ".n64", ".v64",
   ".gba", ".gbc", ".gb", ".nds", ".3ds",
@@ -524,13 +529,13 @@ const ROM_EXT = new Set([
   ".pbp", ".cso",
   ".gcm", ".gcz", ".rvz", ".wbfs", ".wad",
   ".32x",
-  // Switch — previously missing, so the SWITCH folder never indexed anything.
+  // Switch â€” previously missing, so the SWITCH folder never indexed anything.
   ".nsp", ".xci",
   // Dreamcast disc sets and original-Xbox images.
   ".gdi", ".cdi", ".xiso",
   // Multi-disc playlists (PS1/Saturn/Sega CD) launch as a single entry.
   ".m3u",
-  // Archived dumps — some Switch/PS2 titles are stored compressed.
+  // Archived dumps â€” some Switch/PS2 titles are stored compressed.
   ".rar",
 ]);
 
@@ -557,11 +562,11 @@ const EXT_PLATFORM: Record<string, string> = {
   ".nsp": "switch",    ".xci": "switch",
   ".gdi": "dreamcast", ".cdi": "dreamcast",
   ".xiso": "xbox",
-  // Archives and playlists are container formats — platform comes from the path.
+  // Archives and playlists are container formats â€” platform comes from the path.
   ".m3u": "unknown",   ".rar": "unknown",
 };
 
-// Platform → RetroArch core + optional standalone emulator
+// Platform â†’ RetroArch core + optional standalone emulator
 export const PLATFORM_CORES: Record<string, { coreId: string; coreName: string; standalone?: string }> = {
   nes:          { coreId: "fceumm",              coreName: "FCEUmm" },
   snes:         { coreId: "snes9x",              coreName: "Snes9x" },
@@ -600,7 +605,7 @@ export const PLATFORM_CORES: Record<string, { coreId: string; coreName: string; 
   unknown:      { coreId: "detect",             coreName: "Auto-Detect" },
 };
 
-// Folder-name / path fragments → platform key (applied before extension lookup)
+// Folder-name / path fragments â†’ platform key (applied before extension lookup)
 const PATH_PLATFORM: Array<[RegExp, string]> = [
   // Sony
   [/playstation[\s_\-]*3|\bps3\b/i,         "ps3"],
@@ -629,7 +634,7 @@ const PATH_PLATFORM: Array<[RegExp, string]> = [
   [/sega[\s_\-]*dreamcast|dreamcast/i,     "dreamcast"],
   [/sega[\s_\-]*32x|\b32x\b/i,            "sega32x"],
   [/sega[\s_\-]*cd|\bsega\s*cd\b|mega[\s_\-]*cd|\bmega\s*cd\b|\bsegacd\b/i,      "segacd"],
-  // Bare "GENESIS" / "MEGADRIVE" folder names must match too — requiring the
+  // Bare "GENESIS" / "MEGADRIVE" folder names must match too â€” requiring the
   // "sega" prefix left I:/ROMS/GENESIS (1000+ games) detected as "unknown".
   [/sega[\s_\-]*(genesis|mega[\s_\-]*drive)|\bmega[\s_\-]*drive\b|\bmegadrive\b|\bgenesis\b/i, "genesis"],
   [/game[\s_\-]*gear/i,                    "gamegear"],
@@ -649,20 +654,20 @@ const PATH_PLATFORM: Array<[RegExp, string]> = [
   [/wonder[\s_\-]*swan/i,                  "wonderswan"],
 ];
 
-// ─── Header / magic-byte platform detection ───────────────────────────────────
+// â”€â”€â”€ Header / magic-byte platform detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Extension alone cannot distinguish the disc formats: ".iso" is PS2, GameCube,
 // Wii, PSP, Xbox or plain data depending only on its contents, and ".bin"/".img"
 // are worse. Classifying those by folder name is what put games under the wrong
 // console and therefore booted them with the wrong core. These checks read a few
 // bytes from the file itself, so the answer comes from the dump, not its path.
 //
-// Only consulted for AMBIGUOUS_EXT below — unambiguous extensions (.nes, .sfc,
-// .gba …) already map 1:1 and are not worth an I/O hit per file.
+// Only consulted for AMBIGUOUS_EXT below â€” unambiguous extensions (.nes, .sfc,
+// .gba â€¦) already map 1:1 and are not worth an I/O hit per file.
 const AMBIGUOUS_EXT = new Set([".iso", ".bin", ".img", ".chd", ".cue", ".mdf", ".rom"]);
 
-// ── Archive-aware header reading ────────────────────────────────────────────
+// â”€â”€ Archive-aware header reading â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The overwhelming majority of this library is stored ZIPPED (8k+ .zip files),
-// and every magic-byte check below reads raw bytes — so on a zipped ROM they
+// and every magic-byte check below reads raw bytes â€” so on a zipped ROM they
 // all saw "PK\x03\x04" and returned null. Header detection was therefore dead
 // for cartridge systems, and platform fell back to file extension / folder
 // name, which is exactly how games end up in the wrong vault.
@@ -773,7 +778,7 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
     if (discMagic.readUInt32BE(4) === 0xc2339f3d) return "gamecube";
   }
 
-  // Nintendo 64 — same ROM in three byte orders, all still N64.
+  // Nintendo 64 â€” same ROM in three byte orders, all still N64.
   const n64 = await readBytesAt(filePath, 0, 4);
   if (n64 && n64.length === 4) {
     const m = n64.readUInt32BE(0);
@@ -790,7 +795,7 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
   // its root directory, so parse the filesystem properly rather than scanning
   // blindly: SYSTEM.CNF's contents live megabytes in, at a different offset on
   // every disc (measured: 0x1c0800 on one title, 0x9e0800 on another), and both
-  // PS1 and PS2 discs carry the string "PLAYSTATION" in the volume descriptor —
+  // PS1 and PS2 discs carry the string "PLAYSTATION" in the volume descriptor â€”
   // so a naive text scan reports every PS2 disc as PS1.
   const root = await readIso9660Root(filePath);
   if (root) {
@@ -806,7 +811,7 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
     if (root["IP.BIN"]) return "dreamcast";
 
     // SYSTEM.CNF unreadable. That happens on partially-downloaded discs where
-    // the ISO9660 directory survives but the file data is zeroed — the root
+    // the ISO9660 directory survives but the file data is zeroed â€” the root
     // listing is still intact, so identify the console from the files it names.
     const names = Object.keys(root);
 
@@ -817,14 +822,14 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
 
     // A bare Sony boot executable (SLUS_123.45 / SCES_.. / SLPS_..) is NOT
     // enough on its own: PS1 and PS2 discs use the same naming, so guessing a
-    // console from it alone is a coin flip — and guessing wrong assigns the
+    // console from it alone is a coin flip â€” and guessing wrong assigns the
     // wrong core, which fails to boot. Undetermined is strictly better than
     // confidently wrong here, so fall through to path detection instead.
 
-    return null; // a data ISO we cannot attribute — let path detection decide
+    return null; // a data ISO we cannot attribute â€” let path detection decide
   }
 
-  // ── Cartridge systems ────────────────────────────────────────────────────
+  // â”€â”€ Cartridge systems â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Everything above identifies DISC images. Cartridge ROMs were previously
   // trusted on file extension alone, which is where games land in the wrong
   // vault: .bin is used by Genesis, PS1 tracks, and firmware blobs alike, and
@@ -833,11 +838,11 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
   // Each check below reads a documented magic sequence, so a match is proof
   // rather than a guess.
 
-  // NES / Famicom — iNES and NES 2.0 both start "NES\x1A".
+  // NES / Famicom â€” iNES and NES 2.0 both start "NES\x1A".
   const ines = await readBytesAt(filePath, 0, 4);
   if (ines && ines.length === 4 && ines.toString("latin1") === "NES\x1a") return "nes";
 
-  // Game Boy / Game Boy Color — the Nintendo logo the boot ROM verifies sits
+  // Game Boy / Game Boy Color â€” the Nintendo logo the boot ROM verifies sits
   // at 0x104. Byte 0x143 then distinguishes them: 0x80 = GBC-enhanced,
   // 0xC0 = GBC-only, anything else = original Game Boy.
   const gbLogo = await readBytesAt(filePath, 0x104, 4);
@@ -848,21 +853,21 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
     return (flag === 0x80 || flag === 0xc0) ? "gbc" : "gb";
   }
 
-  // Game Boy Advance — the logo the BIOS checks begins 24 FF AE 51 at 0x04.
+  // Game Boy Advance â€” the logo the BIOS checks begins 24 FF AE 51 at 0x04.
   const gbaLogo = await readBytesAt(filePath, 0x04, 4);
   if (gbaLogo && gbaLogo.length === 4 && gbaLogo.readUInt32BE(0) === 0x24ffae51) return "gba";
 
-  // Nintendo DS — carries the same Nintendo logo, but at 0xC0, and stores that
+  // Nintendo DS â€” carries the same Nintendo logo, but at 0xC0, and stores that
   // logo's CRC16 (0xCF56) at 0x15C. Checking the CRC avoids confusing it with
   // a Game Boy ROM, which has no such field.
   const ndsCrc = await readBytesAt(filePath, 0x15c, 2);
   if (ndsCrc && ndsCrc.length === 2 && ndsCrc.readUInt16LE(0) === 0xcf56) return "nds";
 
-  // Mega Drive / Genesis — "SEGA" at 0x100 in the cartridge header.
+  // Mega Drive / Genesis â€” "SEGA" at 0x100 in the cartridge header.
   const md = await readBytesAt(filePath, 0x100, 4);
   if (md && md.toString("latin1") === "SEGA") return "genesis";
 
-  // Master System / Game Gear — "TMR SEGA" appears at one of three offsets
+  // Master System / Game Gear â€” "TMR SEGA" appears at one of three offsets
   // depending on ROM size.
   for (const off of [0x7ff0, 0x3ff0, 0x1ff0]) {
     const tmr = await readBytesAt(filePath, off, 8);
@@ -870,14 +875,14 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
       // Region nibble: 3/4 = Master System (Japan/Export),
       // 5/6/7 = Game Gear (Japan/Export/International).
       // Measured against this library: every Game Gear title reads 7 and every
-      // Master System title reads 4 — omitting 7 misfiled the whole GG set.
+      // Master System title reads 4 â€” omitting 7 misfiled the whole GG set.
       const region = await readBytesAt(filePath, off + 0x0f, 1);
       const hi = ((region?.[0] ?? 0) >> 4) & 0x0f;
       return (hi === 0x5 || hi === 0x6 || hi === 0x7) ? "gamegear" : "mastersystem";
     }
   }
 
-  // SNES — no magic string, so validate the header checksum instead: the
+  // SNES â€” no magic string, so validate the header checksum instead: the
   // checksum and its complement must XOR to 0xFFFF. Tried at both LoROM and
   // HiROM positions, each also offset by 512 for copier-headered dumps.
   for (const base of [0x7fc0, 0xffc0, 0x7fc0 + 512, 0xffc0 + 512]) {
@@ -889,7 +894,7 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
     }
   }
 
-  // Atari Lynx — "LYNX" magic in the LNX header.
+  // Atari Lynx â€” "LYNX" magic in the LNX header.
   const lynx = await readBytesAt(filePath, 0, 4);
   if (lynx && lynx.toString("latin1") === "LYNX") return "lynx";
 
@@ -913,9 +918,9 @@ async function detectPlatformFromHeader(filePath: string): Promise<string | null
 // Extensions that identify a console on their own, so a folder name must not
 // override them. EXT_PLATFORM already maps genuinely cross-platform containers
 // (.iso/.bin/.chd/.cue/.img/.rar/.m3u) to "unknown", so anything there that
-// names a real console is definitive — with two deliberate exceptions:
-//   .wad  — a Wii channel AND a Doom data file
-//   .ngc  — Neo Geo Pocket Color, but also used for GameCube dumps
+// names a real console is definitive â€” with two deliberate exceptions:
+//   .wad  â€” a Wii channel AND a Doom data file
+//   .ngc  â€” Neo Geo Pocket Color, but also used for GameCube dumps
 // Both stay path-driven because the extension genuinely does not settle them.
 const EXT_AMBIGUOUS_DESPITE_MAPPING = new Set(['.wad', '.ngc']);
 function definitivePlatformFromExt(filename: string): string | null {
@@ -929,7 +934,7 @@ function detectPlatform(filename: string, relativePath?: string): string {
   const normalizedPath = String(relativePath ?? '').replace(/\\/g, '/');
 
   // 0. An unambiguous extension outranks the folder it happens to sit in.
-  // Emulator homebrew bundles nest one console's ROMs inside another's tree —
+  // Emulator homebrew bundles nest one console's ROMs inside another's tree â€”
   // e.g. ROMS/PSP/psp/GAME/"GBA For PSP"/GBA/ROM/*.gba, which are Game Boy
   // Advance ROMs for a GBA emulator that RUNS on the PSP. Matching the "PSP"
   // directory first tagged all of them psp/ppsspp, and PPSSPP cannot load a
@@ -939,7 +944,7 @@ function detectPlatform(filename: string, relativePath?: string): string {
   const fromExt = definitivePlatformFromExt(filename);
   if (fromExt) return fromExt;
 
-  // 1. Search directory segments first — filenames often contain misleading tokens
+  // 1. Search directory segments first â€” filenames often contain misleading tokens
   // like "(Wii)" or strings such as "poleps2a" that should not drive platform.
   const dirOnly = normalizedPath ? path.posix.dirname(normalizedPath) : '';
   for (const [re, key] of PATH_PLATFORM) {
@@ -961,7 +966,7 @@ function detectPlatform(filename: string, relativePath?: string): string {
  * formats where the extension is genuinely ambiguous (.iso/.bin/.img/.chd...).
  *
  * Path/extension detection stays authoritative for unambiguous ROMs (.nes,
- * .sfc, .gba...) — no point paying an I/O hit for those. For a disc image the
+ * .sfc, .gba...) â€” no point paying an I/O hit for those. For a disc image the
  * header wins over the folder name, because a mis-sorted file in a "PS2"
  * folder is exactly how a GameCube ISO ends up being launched with the PCSX2
  * core. Falls back to path detection when the header is inconclusive.
@@ -973,7 +978,7 @@ function detectPlatform(filename: string, relativePath?: string): string {
  * A zipped ROM carries no platform signal of its own: ".zip" isn't in
  * EXT_PLATFORM, so detection fell back entirely to the folder name. That works
  * for a tidy ROMS/<platform>/ tree and fails completely for archives sitting
- * loose at the vault root — measured on a real library, 1244 of 2800 titles
+ * loose at the vault root â€” measured on a real library, 1244 of 2800 titles
  * (44%) came back "unknown", and an unknown platform has no core and no
  * emulator, so every one of them was unplayable.
  *
@@ -1002,7 +1007,7 @@ async function detectPlatformFromArchive(absolutePath: string): Promise<string |
     const innerExt = path.extname(entryName).toLowerCase();
     const mapped = EXT_PLATFORM[innerExt];
     // "unknown" entries (.bin/.iso/.cue) are real mappings meaning "ambiguous",
-    // so don't treat them as a result — let the caller keep its path answer.
+    // so don't treat them as a result â€” let the caller keep its path answer.
     return mapped && mapped !== 'unknown' ? mapped : null;
   } catch {
     return null;
@@ -1019,7 +1024,7 @@ async function detectPlatformWithHeader(
   const pathBased = detectPlatform(filename, relativePath);
   const ext = path.extname(filename).toLowerCase();
 
-  // Only worth opening the archive when nothing else identified it — a zip
+  // Only worth opening the archive when nothing else identified it â€” a zip
   // inside ROMS/GBA/ is already answered by the folder, and re-reading every
   // archive in a large library would slow a full scan for no gain.
   if (pathBased === 'unknown' && ext === '.zip' && absolutePath) {
@@ -1036,7 +1041,7 @@ async function detectPlatformWithHeader(
       }
       return fromHeader;
     }
-  } catch { /* unreadable — keep path result */ }
+  } catch { /* unreadable â€” keep path result */ }
   return pathBased;
 }
 
@@ -1267,10 +1272,10 @@ async function hashFileMd5(filePath: string): Promise<string> {
   return hash.digest("hex").toUpperCase();
 }
 
-// ─── Art Infrastructure ──────────────────────────────────────────────────────
+// â”€â”€â”€ Art Infrastructure â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // The repo ships a "data" entry that is a Linux symlink into the drive's own
 // NexusData folder. On Windows that resolves to a FILE, not a directory, so
-// mkdir(<cwd>/data/art) fails — and because the caller swallows the error,
+// mkdir(<cwd>/data/art) fails â€” and because the caller swallows the error,
 // every artwork write failed silently and the cache stayed permanently empty.
 // Fall back to the per-machine persist dir whenever <cwd>/data is not a real
 // directory, so art caching works on whichever OS is currently hosting.
@@ -1279,7 +1284,7 @@ async function hashFileMd5(filePath: string): Promise<string> {
  *
  * Several top-level entries here (data, releases, backups, .nexus-data) are
  * symlinks into the drive's NexusData folder. On Windows those resolve to a
- * FILE rather than a directory, so every write against them fails — silently,
+ * FILE rather than a directory, so every write against them fails â€” silently,
  * because callers wrap the mkdir in a catch. Fall back to the per-machine
  * persist dir whenever the repo-relative path is not a usable directory.
  */
@@ -1288,7 +1293,7 @@ function resolvePortableDir(...segments: string[]): string {
   try {
     const head = path.join(process.cwd(), segments[0]);
     if (!existsSync(head) || statSync(head).isDirectory()) return preferred;
-  } catch { /* broken link — use the per-machine location */ }
+  } catch { /* broken link â€” use the per-machine location */ }
   return path.join(PERSIST_DIR, ...segments);
 }
 
@@ -1296,7 +1301,7 @@ const ART_DIR = resolvePortableDir("data", "art");
 
 // Live state for the background art fetch. Previously the job reported only
 // into the server log, so from the UI a run that had silently died looked
-// identical to one still working — which is exactly how it sat "fetching
+// identical to one still working â€” which is exactly how it sat "fetching
 // 2500 box-art images" for a month with no way to tell what was happening.
 const artProgress = {
   running: false,
@@ -1404,7 +1409,7 @@ const LIBRETRO_SYSTEMS: Record<string, string> = {
   "turbo grafx 16":    "NEC - PC Engine - TurboGrafx 16",
 };
 
-// LaunchBox platform name → Nexus platform key
+// LaunchBox platform name â†’ Nexus platform key
 const LB_PLATFORM_MAP: Record<string, string> = {
   "Sony Playstation 2": "ps2",  "Sony PlayStation 2": "ps2",
   "Sony Playstation":   "ps1",  "Sony PlayStation":   "ps1",
@@ -1476,7 +1481,7 @@ async function fetchAndSaveArt(gameId: string, title: string, platform: string):
       if (buf.byteLength < 300) return null; // too small to be a real image
       const dest = path.join(ART_DIR, `${gameId}.png`);
       // Box art was written out as the raw source PNG at whatever size the
-      // thumbnail server returned — routinely several hundred KB each, and
+      // thumbnail server returned â€” routinely several hundred KB each, and
       // with a library this size that is gigabytes of disk on a host that has
       // already run out of space. Re-encoded to a capped-height WebP, which
       // is typically 10-20x smaller with no visible difference at the size
@@ -1519,7 +1524,7 @@ async function fetchAndSaveArt(gameId: string, title: string, platform: string):
   const shortTitle = title.split(/ [-:] /)[0].trim();
   const regions = ["", " (USA)", " (Europe)", " (World)", " (Japan)"];
 
-  // Priority order: Named_Boxarts → Named_Snaps → Named_Titles
+  // Priority order: Named_Boxarts â†’ Named_Snaps â†’ Named_Titles
   for (const category of ["Named_Boxarts", "Named_Snaps", "Named_Titles"]) {
     for (const baseTitle of [title, bare, shortTitle].filter((t, i, a) => t && a.indexOf(t) === i)) {
       for (const region of regions) {
@@ -1529,10 +1534,10 @@ async function fetchAndSaveArt(gameId: string, title: string, platform: string):
     }
   }
 
-  // ── Fallback: match against the system's actual file index ───────────────
+  // â”€â”€ Fallback: match against the system's actual file index â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The guesses above only hit when the filename matches exactly, including a
   // region tag from a short hardcoded list. But libretro uses No-Intro names,
-  // where regions are frequently COMBINED — "Sonic The Hedgehog (Japan,
+  // where regions are frequently COMBINED â€” "Sonic The Hedgehog (Japan,
   // Europe, Korea).png", "(USA, Europe)", "(World) (Rev 1)" and so on. Those
   // can never be guessed, which is why ~1187 games sat at 0 filled forever
   // despite the art existing upstream.
@@ -1559,7 +1564,7 @@ async function fetchAndSaveArt(gameId: string, title: string, platform: string):
 /** Strip region/revision tags and punctuation so titles compare reliably. */
 function normaliseArtTitle(t: string): string {
   return t
-    .replace(/\([^)]*\)/g, " ")   // (USA, Europe), (Rev 1), (En) …
+    .replace(/\([^)]*\)/g, " ")   // (USA, Europe), (Rev 1), (En) â€¦
     .replace(/\[[^\]]*\]/g, " ")
     .replace(/[^a-z0-9]+/gi, " ")
     .trim()
@@ -1726,7 +1731,7 @@ type MediaItem = {
   updatedAt: string;
   // Optional rich metadata, backfilled from the per-title metadata.json sidecar
   // (see ensureMediaArtworkAndMetadata / fetchTmdbDetailsRaw). Absent for items
-  // that haven't been enriched yet — callers must treat these as optional.
+  // that haven't been enriched yet â€” callers must treat these as optional.
   rating?: number | null;
   genres?: string[];
   overview?: string;
@@ -1898,12 +1903,12 @@ function tmdbImgMedia(p: string | null | undefined, size = "w500"): string | nul
 }
 
 /**
- * Full TMDB lookup (search → append_to_response=credits) shared by the live
+ * Full TMDB lookup (search â†’ append_to_response=credits) shared by the live
  * `/api/media/details` endpoint and the background sidecar-enrichment job
  * below. Module-level (not inside the route-setup closure that owns the
  * near-identical `tmdbGet`/`tmdbImg` helpers) so `ensureMediaArtworkAndMetadata`
- * — itself module-level, called during scans that happen outside any request
- * — can call it too. Same TMDB_KEY_MEDIA constant `ensureMediaArtworkAndMetadata`
+ * â€” itself module-level, called during scans that happen outside any request
+ * â€” can call it too. Same TMDB_KEY_MEDIA constant `ensureMediaArtworkAndMetadata`
  * already used for its poster-only lookup; this just fetches the rest of what
  * that same search result already carries.
  */
@@ -1915,7 +1920,7 @@ async function fetchTmdbDetailsRaw(title: string, type: "movie" | "series", year
 }> {
   const endpoint = type === "series" ? "tv" : "movie";
   const tmdbFetch = async (query: string, yearFilter?: string) => {
-    // Use TMDB's own structured year filter, not text concatenation — jamming
+    // Use TMDB's own structured year filter, not text concatenation â€” jamming
     // "Title Year" into the free-text query can outright match a wrong result
     // that happens to literally contain the year digits (confirmed live: title
     // "Beast 2022" top-matched an unrelated film titled that way instead of
@@ -1933,13 +1938,13 @@ async function fetchTmdbDetailsRaw(title: string, type: "movie" | "series", year
   };
   // Note: only an empty search result is treated as "not found" (found: false).
   // Network/API failures are intentionally left to throw so callers can tell a
-  // real title miss apart from a transient TMDB outage — the route handler
+  // real title miss apart from a transient TMDB outage â€” the route handler
   // caches "not found" for 24h, so swallowing errors here would turn a blip
   // into a day-long false negative.
   let searchData = await tmdbFetch(title, year);
   let best = (searchData.results ?? [])[0];
   if (!best && year) {
-    // Retry without the year filter — some libraries' cleaned titles don't line up with TMDB's exact date
+    // Retry without the year filter â€” some libraries' cleaned titles don't line up with TMDB's exact date
     searchData = await tmdbFetch(title);
     best = (searchData.results ?? [])[0];
   }
@@ -1991,10 +1996,10 @@ async function ensureMediaArtworkAndMetadata(baseDir: string, mediaType: "movie"
     try { await fsAccess(posterPath); } catch { needsPosterDownload = true; }
 
     // Only look up TMDB at all if either the poster image or the richer
-    // fields (rating/genres/overview/etc — previously never fetched here at
+    // fields (rating/genres/overview/etc â€” previously never fetched here at
     // all despite the UI's "Gemini Media Scraper" button claiming this
     // backfills overview/genre/year) are actually missing. One shared lookup
-    // now covers both — the old code ran its own separate poster-only search
+    // now covers both â€” the old code ran its own separate poster-only search
     // even though this same result already carried everything else needed.
     const needsDetails = existing.rating == null || !Array.isArray(existing.genres);
     if (needsPosterDownload || needsDetails) {
@@ -2210,7 +2215,7 @@ async function pruneEmptyDirs(root: string): Promise<void> {
   await walk(rootResolved);
 }
 
-/** Folder name → human-readable series title */
+/** Folder name â†’ human-readable series title */
 function folderToTitle(folder: string): string {
   return folder
     .replace(/[._]+/g, " ")
@@ -2490,7 +2495,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
     }
   }
 
-  // ── Third pass: group titleless series episodes in the same folder ─────────
+  // â”€â”€ Third pass: group titleless series episodes in the same folder â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // If multiple series videos share the same directory and have no seriesTitle,
   // treat them as one show and derive the title from the folder name.
   const titlelessByDir = new Map<string, MediaItem[]>();
@@ -2508,7 +2513,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
       const normalized = normalizeSeriesTitle(derivedTitle) || "Unknown Series";
       for (const item of group) item.seriesTitle = normalized;
     } else if (group.length > 1) {
-      // No folder title — strip SxxExx prefix then try longest common prefix of episode titles
+      // No folder title â€” strip SxxExx prefix then try longest common prefix of episode titles
       const names = group.map(g =>
         cleanTitleFromName(path.basename(g.name, path.extname(g.name)))
           .replace(/^S\d{1,2}E\d{1,2}[\s._-]*/i, "")  // strip leading S01E01
@@ -2532,7 +2537,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
     }
   }
 
-  // ── Fourth pass: attach series-level cover art to season episodes ─────────
+  // â”€â”€ Fourth pass: attach series-level cover art to season episodes â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const seriesCoverByTitle = new Map<string, string>();
   for (const item of out) {
     if (item.kind !== "image") continue;
@@ -2564,7 +2569,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
     if (cover) video.relatedCoverRelPath = cover;
   }
 
-  // ── Fifth pass: backfill rich metadata from each title's metadata.json ────
+  // â”€â”€ Fifth pass: backfill rich metadata from each title's metadata.json â”€â”€â”€â”€
   // Folder layout is always <Movies|Series|TV Shows>/<title>/[Season X/]file,
   // so the sidecar lives exactly two path segments below root regardless of
   // how deep the video itself is nested (season subfolders, etc).
@@ -2596,13 +2601,13 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
   return out;
 }
 
-// ─── DB Mapper ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ DB Mapper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function rowToGame(row: Record<string, any>) {
   const platform = inferPlatformFromRecord(row.platform, row.relative_path, row.title, row.core_id);
   // Derive the core from the (possibly just-repaired) platform whenever the
   // stored core_id is blank or disagrees with it. Rows imported before core_id
   // was populated had it empty, and reclassifying a game's platform never
-  // rewrote the column — so the launcher received no core at all and had
+  // rewrote the column â€” so the launcher received no core at all and had
   // nothing to start. Platform is the source of truth; core follows from it.
   const storedCore = String(row.core_id ?? row.coreId ?? "").trim();
   const expectedCore = (PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown).coreId;
@@ -2679,7 +2684,7 @@ function dedupeGamesForClient(games: ReturnType<typeof rowToGame>[]): ReturnType
   return Array.from(byKey.values());
 }
 
-// ─── DB Schema ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ DB Schema â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const DB_SCHEMA = `
   CREATE TABLE IF NOT EXISTS vault_config (
     id INT PRIMARY KEY DEFAULT 1,
@@ -2721,14 +2726,14 @@ const DB_SCHEMA = `
   -- games.core_id was written and read all over the codebase but never actually
   -- existed on this schema. Every read returned undefined (so the launcher got
   -- no core at all), and any UPDATE naming the column raised an error that the
-  -- surrounding .catch() swallowed — which silently discarded the platform
+  -- surrounding .catch() swallowed â€” which silently discarded the platform
   -- repair in the same statement. Adding it makes both work.
   --
   -- MUST stay after CREATE TABLE games. This ALTER used to sit ABOVE it, which
   -- worked only on databases where games already existed. On a FRESH database
   -- it raised 42P01 "relation games does not exist", and because the whole of
   -- DB_SCHEMA is executed as one multi-statement query (a single implicit
-  -- transaction), that one error rolled back EVERY table in this file — so a
+  -- transaction), that one error rolled back EVERY table in this file â€” so a
   -- brand-new host created no schema at all, fell back to "Memory-only mode",
   -- and retried the identical broken schema forever. Confirmed against a clean
   -- PostgreSQL 14 instance.
@@ -2974,10 +2979,10 @@ const DB_SCHEMA = `
   -- music_tracks drifted from the writers above on long-lived installs, and the
   -- mismatch made EVERY insert fail (uploads, deep scan, YouTube grabs), so the
   -- library could never fill no matter what the client did:
-  --   * a legacy NOT NULL rel_path with no default — nothing populates it any more,
+  --   * a legacy NOT NULL rel_path with no default â€” nothing populates it any more,
   --     and it isn't in the CREATE TABLE above, so writers can't name it either;
-  --   * a PARTIAL unique index on abs_path (…WHERE abs_path IS NOT NULL), which
-  --     ON CONFLICT (abs_path) cannot infer — Postgres rejects the whole statement
+  --   * a PARTIAL unique index on abs_path (â€¦WHERE abs_path IS NOT NULL), which
+  --     ON CONFLICT (abs_path) cannot infer â€” Postgres rejects the whole statement
   --     with "no unique or exclusion constraint matching the ON CONFLICT
   --     specification". The deep scan swallowed that in a .catch(), and the upload
   --     endpoint turned it into a 500 the client counted as "not uploaded".
@@ -3075,7 +3080,7 @@ const DB_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_media_watch_user ON media_watch_progress(user_id);
   CREATE INDEX IF NOT EXISTS idx_media_watch_session ON media_watch_progress(session_id);
 
-  -- ── Social / Community System ──────────────────────────────────────────────
+  -- â”€â”€ Social / Community System â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   -- Role hierarchy: ultra_admin > admin > moderator > vip > user > guest
   CREATE TABLE IF NOT EXISTS social_roles (
@@ -3083,18 +3088,18 @@ const DB_SCHEMA = `
     name        TEXT UNIQUE NOT NULL,
     display_name TEXT NOT NULL,
     color       TEXT NOT NULL DEFAULT '#6b7280',
-    icon        TEXT NOT NULL DEFAULT '👤',
+    icon        TEXT NOT NULL DEFAULT 'ðŸ‘¤',
     level       INT NOT NULL DEFAULT 0,
     permissions TEXT[] DEFAULT '{}',
     created_at  TIMESTAMPTZ DEFAULT NOW()
   );
   INSERT INTO social_roles (name, display_name, color, icon, level, permissions) VALUES
-    ('ultra_admin', 'Ultra Admin', '#f59e0b', '👑', 100, ARRAY['*']),
-    ('admin',       'Admin',       '#ef4444', '🛡️', 80, ARRAY['manage_users','manage_content','manage_groups']),
-    ('moderator',   'Moderator',   '#8b5cf6', '🔨', 60, ARRAY['manage_content','manage_groups']),
-    ('vip',         'VIP',         '#06b6d4', '⭐', 40, ARRAY['create_groups','pin_messages']),
-    ('user',        'Member',      '#22c55e', '🎮', 20, ARRAY['send_messages','create_groups']),
-    ('guest',       'Guest',       '#6b7280', '👤', 0,  ARRAY['read_messages'])
+    ('ultra_admin', 'Ultra Admin', '#f59e0b', 'ðŸ‘‘', 100, ARRAY['*']),
+    ('admin',       'Admin',       '#ef4444', 'ðŸ›¡ï¸', 80, ARRAY['manage_users','manage_content','manage_groups']),
+    ('moderator',   'Moderator',   '#8b5cf6', 'ðŸ”¨', 60, ARRAY['manage_content','manage_groups']),
+    ('vip',         'VIP',         '#06b6d4', 'â­', 40, ARRAY['create_groups','pin_messages']),
+    ('user',        'Member',      '#22c55e', 'ðŸŽ®', 20, ARRAY['send_messages','create_groups']),
+    ('guest',       'Guest',       '#6b7280', 'ðŸ‘¤', 0,  ARRAY['read_messages'])
   ON CONFLICT (name) DO NOTHING;
 
   -- Groups / Channels
@@ -3103,7 +3108,7 @@ const DB_SCHEMA = `
     name        TEXT NOT NULL,
     slug        TEXT UNIQUE,
     description TEXT DEFAULT '',
-    icon        TEXT DEFAULT '💬',
+    icon        TEXT DEFAULT 'ðŸ’¬',
     color       TEXT DEFAULT '#4d7cff',
     owner_id    UUID REFERENCES users(id) ON DELETE SET NULL,
     is_public   BOOLEAN DEFAULT TRUE,
@@ -3112,12 +3117,12 @@ const DB_SCHEMA = `
     created_at  TIMESTAMPTZ DEFAULT NOW()
   );
   INSERT INTO social_groups (name, slug, description, icon, color, is_official) VALUES
-    ('General',    'general',    'General chat for everyone', '💬', '#4d7cff', TRUE),
-    ('Gaming',     'gaming',     'Talk games, share clips, find players', '🎮', '#8b5cf6', TRUE),
-    ('Movies & TV','movies-tv',  'Discuss your favourite shows and films', '🎬', '#ef4444', TRUE),
-    ('Music',      'music',      'Share playlists and discoveries', '🎵', '#a855f7', TRUE),
-    ('Multiplayer','multiplayer','Find co-op and versus partners', '🕹️', '#06b6d4', TRUE),
-    ('Anime',      'anime',      'Anime recommendations and discussions', '🎌', '#f97316', TRUE)
+    ('General',    'general',    'General chat for everyone', 'ðŸ’¬', '#4d7cff', TRUE),
+    ('Gaming',     'gaming',     'Talk games, share clips, find players', 'ðŸŽ®', '#8b5cf6', TRUE),
+    ('Movies & TV','movies-tv',  'Discuss your favourite shows and films', 'ðŸŽ¬', '#ef4444', TRUE),
+    ('Music',      'music',      'Share playlists and discoveries', 'ðŸŽµ', '#a855f7', TRUE),
+    ('Multiplayer','multiplayer','Find co-op and versus partners', 'ðŸ•¹ï¸', '#06b6d4', TRUE),
+    ('Anime',      'anime',      'Anime recommendations and discussions', 'ðŸŽŒ', '#f97316', TRUE)
   ON CONFLICT (slug) DO NOTHING;
 
   -- Group members
@@ -3177,7 +3182,7 @@ const DB_SCHEMA = `
     id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name        TEXT NOT NULL,
     description TEXT DEFAULT '',
-    icon        TEXT DEFAULT '🏠',
+    icon        TEXT DEFAULT 'ðŸ ',
     color       TEXT DEFAULT '#4d7cff',
     owner_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     allow_media_access  BOOLEAN DEFAULT TRUE,
@@ -3207,7 +3212,7 @@ const DB_SCHEMA = `
     is_public       BOOLEAN DEFAULT FALSE,
     allow_requests  BOOLEAN DEFAULT TRUE,
     internet_url    TEXT DEFAULT '',
-    icon            TEXT DEFAULT '🖥️',
+    icon            TEXT DEFAULT 'ðŸ–¥ï¸',
     banner_color    TEXT DEFAULT '#4d7cff',
     max_users       INTEGER DEFAULT 5,
     tags            TEXT[] DEFAULT '{}',
@@ -3230,12 +3235,12 @@ const DB_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_har_host ON host_access_requests(host_id);
   CREATE INDEX IF NOT EXISTS idx_har_requester ON host_access_requests(requester_id);
 
-  -- MegaHosts: pooled hosting groups — multiple contributors, one subscription product
+  -- MegaHosts: pooled hosting groups â€” multiple contributors, one subscription product
   CREATE TABLE IF NOT EXISTS mega_hosts (
     id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     name            TEXT NOT NULL,
     description     TEXT DEFAULT '',
-    icon            TEXT DEFAULT '🌐',
+    icon            TEXT DEFAULT 'ðŸŒ',
     owner_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     price_rands     INTEGER DEFAULT 0,
     nexus_cut_pct   INTEGER DEFAULT 15,
@@ -3285,7 +3290,7 @@ const DB_SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON activity_logs(created_at DESC);
 `;
 
-// ─── Password Helpers (PBKDF2 — no extra packages) ─────────────────────────
+// â”€â”€â”€ Password Helpers (PBKDF2 â€” no extra packages) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512').toString('hex');
@@ -3330,12 +3335,12 @@ function isTransientDbError(err: unknown): boolean {
     || /connection terminated unexpectedly|read econnreset|socket hang up|terminating connection/i.test(message);
 }
 
-// ─── Portable emulator lookup roots ───────────────────────────────────────────
+// â”€â”€â”€ Portable emulator lookup roots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Emulators shipped alongside the app (vendor/) must be found FIRST so the whole
 // stack travels with the drive and works on any machine it is plugged into.
 // The per-emulator lists below were also missing the two locations Windows
-// installers actually use — "%PROGRAMFILES%\<name>" and the winget package
-// store — so an emulator could be installed and still report as "not found".
+// installers actually use â€” "%PROGRAMFILES%\<name>" and the winget package
+// store â€” so an emulator could be installed and still report as "not found".
 function emulatorCandidatePaths(dirNames: string[], exeNames: string[]): string[] {
   const out: string[] = [];
   const appRoot = process.cwd();
@@ -3380,7 +3385,7 @@ function emulatorCandidatePaths(dirNames: string[], exeNames: string[]): string[
   return out;
 }
 
-// ─── RetroArch auto-detect candidate paths ────────────────────────────────────
+// â”€â”€â”€ RetroArch auto-detect candidate paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const RETROARCH_CANDIDATES = [
   process.env.EMULATOR_PATH,
   ...emulatorCandidatePaths(["RetroArch", "RetroArch-Win64"], ["retroarch.exe"]),
@@ -3406,7 +3411,7 @@ const RETROARCH_CANDIDATES = [
   path.join(process.env.LOCALAPPDATA ?? '', 'RetroArch', 'retroarch.exe'),
 ].filter(Boolean) as string[];
 
-// RPCS3 standalone — checked on all common drive letters since user may have it on I:\ or similar
+// RPCS3 standalone â€” checked on all common drive letters since user may have it on I:\ or similar
 const RPCS3_CANDIDATES: string[] = [
   process.env.RPCS3_PATH,
   ...emulatorCandidatePaths(["rpcs3", "RPCS3"], ["rpcs3.exe"]),
@@ -3419,7 +3424,7 @@ const RPCS3_CANDIDATES: string[] = [
   ]),
   path.join(process.env.PROGRAMFILES ?? 'C:\\Program Files', 'rpcs3', 'rpcs3.exe'),
   path.join(process.env.LOCALAPPDATA ?? '', 'rpcs3', 'rpcs3.exe'),
-  // Linux — this list used to be 100% Windows paths, so RPCS3 could never be
+  // Linux â€” this list used to be 100% Windows paths, so RPCS3 could never be
   // auto-detected on Linux even when genuinely installed (flatpak export
   // wrapper, distro package, AppImage in the usual spots).
   '/var/lib/flatpak/exports/bin/net.rpcs3.RPCS3',
@@ -3433,7 +3438,7 @@ const RPCS3_CANDIDATES: string[] = [
   path.join(os.homedir(), 'Downloads/rpcs3.AppImage'),
 ].filter(Boolean) as string[];
 
-// PCSX2 detection — Windows exe via LaunchBox/Wine + Linux native
+// PCSX2 detection â€” Windows exe via LaunchBox/Wine + Linux native
 const PCSX2_CANDIDATES: string[] = [
   process.env.PCSX2_PATH,
   ...emulatorCandidatePaths(["PCSX2", "pcsx2"], ["pcsx2-qt.exe", "pcsx2.exe"]),
@@ -3453,7 +3458,7 @@ const PCSX2_CANDIDATES: string[] = [
   path.join(process.env.LOCALAPPDATA ?? '', 'PCSX2', 'pcsx2-qt.exe'),
 ].filter(Boolean) as string[];
 
-// Xenia (Xbox 360) — Windows-primary; no official Linux build, but xenia-canary
+// Xenia (Xbox 360) â€” Windows-primary; no official Linux build, but xenia-canary
 // community builds run fine under Proton/Wine, hence the wine-launched candidates.
 const XENIA_CANDIDATES: string[] = [
   process.env.XENIA_PATH,
@@ -3468,7 +3473,7 @@ const XENIA_CANDIDATES: string[] = [
   '/media/moh/500GB Hardrive/Emu/LaunchBox/Emulators/Xenia/xenia.exe',
 ].filter(Boolean) as string[];
 
-// xemu (original Xbox) — genuinely cross-platform, real Linux packages exist.
+// xemu (original Xbox) â€” genuinely cross-platform, real Linux packages exist.
 const XEMU_CANDIDATES: string[] = [
   process.env.XEMU_PATH,
   ...emulatorCandidatePaths(["xemu"], ["xemu.exe"]),
@@ -3482,7 +3487,7 @@ const XEMU_CANDIDATES: string[] = [
   path.join(process.env.LOCALAPPDATA ?? '', 'xemu', 'xemu.exe'),
 ].filter(Boolean) as string[];
 
-// Switch — original Yuzu/Ryujinx were both taken down in 2024 after Nintendo's
+// Switch â€” original Yuzu/Ryujinx were both taken down in 2024 after Nintendo's
 // legal action; "io.github.ryubing.Ryujinx" (the actively-maintained Ryujinx
 // continuation) is what's actually installable today, hence it's listed
 // first. Yuzu-lineage forks (Suyu/Sudachi/Citron) are included too since
@@ -3503,7 +3508,7 @@ const RYUJINX_CANDIDATES: string[] = [
 
 // PPSSPP (PSP) and DuckStation (PS1) had no detection at all, so a standalone
 // launch for those platforms could never resolve an executable even when one
-// was installed — the launcher fell back to RetroArch cores unconditionally.
+// was installed â€” the launcher fell back to RetroArch cores unconditionally.
 const PPSSPP_CANDIDATES: string[] = [
   process.env.PPSSPP_PATH,
   ...emulatorCandidatePaths(["PPSSPP"], ["PPSSPPWindows64.exe", "PPSSPPWindows.exe"]),
@@ -3538,10 +3543,10 @@ const YUZU_FORK_CANDIDATES: string[] = [
   ...['I','J','D','E','F','G','H','C'].flatMap(d => [`${d}:\\Citron\\citron.exe`, `${d}:\\Emulators\\Citron\\citron.exe`]),
 ].filter(Boolean) as string[];
 
-// ─── Main Server ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ Main Server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 async function startServer() {
   const app = express();
-  // Gzip text responses (JS/CSS/JSON). Skip already-compressed binary types — ROMs,
+  // Gzip text responses (JS/CSS/JSON). Skip already-compressed binary types â€” ROMs,
   // video, audio and images are already compressed; gzipping them wastes CPU and adds latency.
   app.use(compression({
     level: 6,
@@ -3558,7 +3563,7 @@ async function startServer() {
       // written bytes inside zlib until it has a full chunk to emit, so an SSE
       // heartbeat (": heartbeat\n\n", well under the 512-byte threshold) never
       // actually reaches the wire. Cloudflare then sees a connection that has
-      // produced no bytes for 100s and kills it with a 524 — which is exactly
+      // produced no bytes for 100s and kills it with a 524 â€” which is exactly
       // what /api/ai/stream and /api/daemon/stream were doing for every remote
       // client. text/event-stream matches compressible()'s `^text/` rule, so it
       // has to be excluded explicitly.
@@ -3593,7 +3598,7 @@ async function startServer() {
     next();
   });
 
-  // ── Subdomain Multi-Tenancy Middleware (savestate.co.za & localhost) ──
+  // â”€â”€ Subdomain Multi-Tenancy Middleware (savestate.co.za & localhost) â”€â”€
   app.use((req, _res, next) => {
     const rawHost = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
     const hostname = rawHost.split(":")[0].toLowerCase();
@@ -3624,11 +3629,11 @@ async function startServer() {
   const PORT = parseInt(process.env.PORT ?? "3000", 10);
   const persisted = await loadLocalPersistState();
 
-  // ── Database ──────────────────────────────────────────────────
+  // â”€â”€ Database â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let pool: pg.Pool | null = null;
   let dbConnected = false;
 
-  // ── Activity Logging ─────────────────────────────────────────
+  // â”€â”€ Activity Logging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   function parseUserAgent(ua: string | undefined): { deviceType: string; os: string; browser: string } {
     if (!ua) return { deviceType: 'Unknown', os: 'Unknown', browser: 'Unknown' };
     const s = ua.toLowerCase();
@@ -3702,8 +3707,8 @@ async function startServer() {
       connectionTimeoutMillis: 20000,
       // Was 30000. Measured directly against this host's live link to Neon
       // (eu-west-2) on 2026-09-04: the full `SELECT * FROM games` (~8.6k
-      // rows, ~4.5MB) executes on Neon's side in ~11ms every time — confirmed
-      // via EXPLAIN ANALYZE — but transferring the result back over this
+      // rows, ~4.5MB) executes on Neon's side in ~11ms every time â€” confirmed
+      // via EXPLAIN ANALYZE â€” but transferring the result back over this
       // specific international route took ~40s under degraded conditions
       // (general internet was fine: 41ms/3.4MB/s to Cloudflare same moment),
       // consistent with packet loss collapsing TCP throughput on a long-haul
@@ -3711,7 +3716,7 @@ async function startServer() {
       // was killing a query that would have succeeded 10s later, turning a
       // slow-but-working load into a hard "Games fetch failed" for every
       // caller. Raised with real margin above the measured worst case rather
-      // than guessed — still bounded, so a genuinely stuck query still fails
+      // than guessed â€” still bounded, so a genuinely stuck query still fails
       // instead of hanging forever.
       statement_timeout: 90000,
       query_timeout: 90000,
@@ -3723,10 +3728,10 @@ async function startServer() {
     const handlePoolError = (err: unknown) => {
       const message = String((err as { message?: unknown })?.message ?? err ?? "Unknown DB error");
       if (isTransientDbError(err)) {
-        console.warn("[NEXUS] ⚠ Transient DB pool error; keeping server alive:", message);
+        console.warn("[NEXUS] âš  Transient DB pool error; keeping server alive:", message);
         return;
       }
-      console.error("[NEXUS] ⚠ DB pool error (continuing in degraded mode):", message);
+      console.error("[NEXUS] âš  DB pool error (continuing in degraded mode):", message);
     };
 
     pool.on('error', handlePoolError);
@@ -3753,7 +3758,7 @@ async function startServer() {
       client.release();
       dbConnected = true;
       schemaApplied = true;
-      console.log("[NEXUS] ✓ Neon PostgreSQL schema ready");
+      console.log("[NEXUS] âœ“ Neon PostgreSQL schema ready");
     } catch (err) {
       console.error("[NEXUS] DB init error:", err);
       // Retry once after 15s (handles Neon cold-start)
@@ -3765,24 +3770,24 @@ async function startServer() {
           client.release();
           dbConnected = true;
           schemaApplied = true;
-          console.log("[NEXUS] ✓ Neon PostgreSQL connected (retry)");
+          console.log("[NEXUS] âœ“ Neon PostgreSQL connected (retry)");
         } catch (e2) {
           // Do NOT null the pool here. The reconnect watchdog below starts with
-          // `if (dbConnected || !pool) return;` — discarding the pool is what
+          // `if (dbConnected || !pool) return;` â€” discarding the pool is what
           // made "memory-only mode" permanent until a manual restart, which in
           // turn made every admin check fail (isAdminUser returns false with no
           // DB) and left new tables uncreated.
-          console.error("[NEXUS] DB retry failed — watchdog will keep retrying:", String(e2));
+          console.error("[NEXUS] DB retry failed â€” watchdog will keep retrying:", String(e2));
           schemaApplied = false;
         }
       }, 15000);
     }
   } else {
-    console.warn("[NEXUS] ⚠ DATABASE_URL not set — running in memory-only mode");
+    console.warn("[NEXUS] âš  DATABASE_URL not set â€” running in memory-only mode");
   }
 
   // DB reconnect watchdog: if DB becomes disconnected, retry every 5 seconds.
-  // Shortened from 30s — every DB-gated route (including login/register) hard-fails
+  // Shortened from 30s â€” every DB-gated route (including login/register) hard-fails
   // with 503 while dbConnected is false, so the retry cadence directly sets how long
   // a real user sees "Database not connected" for. This only does anything while
   // already disconnected, so a shorter interval costs nothing when healthy.
@@ -3791,7 +3796,7 @@ async function startServer() {
     try {
       const client = await pool.connect();
       if (!schemaApplied) {
-        // First successful connection of this process — create/patch tables.
+        // First successful connection of this process â€” create/patch tables.
         await client.query(DB_SCHEMA);
         schemaApplied = true;
         log("INFO", "DB: schema applied on reconnect", "kernel");
@@ -3847,7 +3852,7 @@ async function startServer() {
         if (!r.rows.length) {
           artProgress.running = false;
           artProgress.done = true;
-          log("INFO", `Art auto-fill complete — ${artProgress.filled} filled, ${unfetchable.size} without art`, "art");
+          log("INFO", `Art auto-fill complete â€” ${artProgress.filled} filled, ${unfetchable.size} without art`, "art");
           break;
         }
 
@@ -3873,7 +3878,7 @@ async function startServer() {
               artProgress.filled++;
               await pool.query("UPDATE games SET box_art=$1, updated_at=NOW() WHERE id=$2", [artUrl, game.id]).catch(() => {});
             } else {
-              // No art source had it — don't let it block the queue forever.
+              // No art source had it â€” don't let it block the queue forever.
               unfetchable.add(game.id);
               artProgress.missing = unfetchable.size;
             }
@@ -3890,7 +3895,7 @@ async function startServer() {
     }
   })();
 
-  // ── Portable path resolution ──────────────────────────────────────────────
+  // â”€â”€ Portable path resolution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // This drive moves between a Linux host and Windows clients, so the absolute
   // paths baked into .env are only valid on the machine that wrote them. An env
   // var pointing at a path that does not exist on THIS os (e.g. a Linux
@@ -3904,7 +3909,7 @@ async function startServer() {
   const portablePath = (envValue: string | undefined, fallback: string): string => {
     if (existsSyncSafe(envValue)) return String(envValue).trim();
     if (existsSyncSafe(fallback)) return fallback;
-    // Neither resolves here — keep the env value as a hint so the setup UI can
+    // Neither resolves here â€” keep the env value as a hint so the setup UI can
     // show what was configured, but auto-detection downstream will override it.
     return String(envValue ?? "").trim() || fallback;
   };
@@ -3970,10 +3975,10 @@ async function startServer() {
     persistHostStateNow().catch(() => {});
   }, 20_000).unref();
 
-  // ── SSE Daemon Log Broadcast ──────────────────────────────────
+  // â”€â”€ SSE Daemon Log Broadcast â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const sseClients = new Set<express.Response>();
 
-  // ── Jarvis per-user command push (for cross-client remote control) ─────────
+  // â”€â”€ Jarvis per-user command push (for cross-client remote control) â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const nexusCommandSubs = new Map<string, Set<express.Response>>();
   function pushAICommand(userId: string, cmd: object) {
     const subs = nexusCommandSubs.get(userId);
@@ -4007,7 +4012,7 @@ async function startServer() {
     console.log(`[${level}][${source}] ${message}`);
   }
 
-  // Client-submitted crash/error telemetry (desktop app + webapp) — separate
+  // Client-submitted crash/error telemetry (desktop app + webapp) â€” separate
   // from log()/daemon_logs above because these carry much richer per-report
   // structure (stack traces, launcher diagnostics tails, device/app version)
   // that would be lossy squeezed into a single human-readable message string.
@@ -4037,7 +4042,7 @@ async function startServer() {
   const MEDIA_CATEGORY_DIRS = new Set(["tv shows", "tv", "series", "shows", "movies", "films", "anime"]);
 
   /**
-   * Resolve the TITLE folder for a video — the show or film directory, not the
+   * Resolve the TITLE folder for a video â€” the show or film directory, not the
    * season/extras folder the file happens to sit in.
    *
    *   TV Shows/Game Of Thrones/Season 01/ep.mkv  ->  TV Shows/Game Of Thrones
@@ -4078,7 +4083,7 @@ async function startServer() {
           seen.add(dir);
 
           // Only a real poster counts as "already has art". The previous check
-          // treated ANY jpg/png in the folder as art — episode thumbnails and
+          // treated ANY jpg/png in the folder as art â€” episode thumbnails and
           // subtitle images are everywhere, so it skipped almost every show and
           // the library ended up with essentially no posters at all.
           const hasPoster = await Promise.any(
@@ -4088,7 +4093,7 @@ async function startServer() {
           if (hasPoster) continue;
 
           // Search by the SHOW/FILM name from the folder, not the episode
-          // filename — "Game Of Thrones" matches TMDB, "Game.Of.Thrones.S01E01
+          // filename â€” "Game Of Thrones" matches TMDB, "Game.Of.Thrones.S01E01
           // .1080p.WEB-DL" does not. Movie folders are usually raw release
           // names, so the year is extracted and passed as a filter: it both
           // rescues the match and disambiguates remakes.
@@ -4121,7 +4126,7 @@ async function startServer() {
 
             const imgR = await fetch(`https://image.tmdb.org/t/p/w500${posterPath}`, { signal: AbortSignal.timeout(15000) });
             if (!imgR.ok) continue;
-            // Always "poster.jpg" at the title folder — one predictable name the
+            // Always "poster.jpg" at the title folder â€” one predictable name the
             // UI can rely on, instead of one named after an arbitrary episode.
             await writeFile(path.join(dir, "poster.jpg"), Buffer.from(await imgR.arrayBuffer()));
             saved++;
@@ -4153,6 +4158,8 @@ async function startServer() {
 
   const MEDIA_DRIVE_ROOTS = [
     ...ENV_MEDIA_ROOTS,
+    // Files library: only its Movies and Series categories belong in Movies & TV.
+    ...mediaRootsFor(FILES_ROOT),
     path.join(os.homedir(), 'nexus-media'),
     path.join(os.homedir(), 'nexus-downloads'),
     path.join(os.homedir(), 'nexus-uploads'),
@@ -4190,23 +4197,37 @@ async function startServer() {
     if (!fullPath) return false;
     let clean = String(fullPath).replace(/^[/\\]+([a-zA-Z]:)/, "$1");
     const normalized = path.normalize(path.resolve(clean)).toLowerCase();
+    // Media folders only. This list used to include whole drives (c:\, d:\)
+    // and the home directory, and several routes that use it are public, so
+    // anyone on the internet could read any file on the host â€” .env, the
+    // tunnel credential, rclone tokens. A root that is a drive root or the
+    // home directory itself is ignored, whatever configured it.
+    const home = path.normalize(os.homedir()).toLowerCase();
     const roots = [
       path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT),
       ...MEDIA_DRIVE_ROOTS.map(r => path.resolve(r)),
-      'n:\\',
-      'i:\\',
-      'd:\\',
-      'c:\\',
-      '/media/moh',
-      '/home/moh',
-    ];
+    ].filter(r => {
+      const nr = path.normalize(r).toLowerCase();
+      return nr !== home && path.parse(nr).root !== nr;
+    });
     return roots.some(r => {
       const nr = path.normalize(path.resolve(r)).toLowerCase();
       return normalized.startsWith(nr.endsWith(path.sep) ? nr : nr + path.sep) || normalized === nr;
     });
   }
 
-  // Guard against concurrent background scans — share in-flight promise
+  /**
+   * For routes that hand a file to an unauthenticated caller (or to ffmpeg on
+   * their behalf): inside a media folder AND a media type. The media folders
+   * include places like ~/Downloads, which hold more than media.
+   */
+  function isServableMediaPath(fullPath: string): boolean {
+    if (!isAllowedMediaPath(fullPath)) return false;
+    const ext = path.extname(String(fullPath)).toLowerCase();
+    return VIDEO_EXT.has(ext) || IMAGE_EXT.has(ext) || SUBTITLE_EXT.has(ext);
+  }
+
+  // Guard against concurrent background scans â€” share in-flight promise
   let _mediaScanPromise: Promise<MediaItem[]> | null = null;
   let _lastMediaScanAt = 0;
   let _hasCompletedFirstMediaScan = false;
@@ -4220,7 +4241,7 @@ async function startServer() {
       if (usable) {
         mediaRoot = candidate;
       } else {
-        log("WARN", `Ignoring media root "${rootCandidateOrForce}" — not a reachable directory; keeping ${mediaRoot}`, "media");
+        log("WARN", `Ignoring media root "${rootCandidateOrForce}" â€” not a reachable directory; keeping ${mediaRoot}`, "media");
       }
     }
 
@@ -4249,7 +4270,7 @@ async function startServer() {
             // A MISSING scan root must never be conjured into existence here.
             // Several roots live inside the rclone Google Drive mount
             // (~/nexus-cloud-media/...). When that mount drops, this mkdir
-            // recreated its subfolders as ordinary empty directories — and FUSE
+            // recreated its subfolders as ordinary empty directories â€” and FUSE
             // then refuses to remount over a non-empty mountpoint
             // ("is not empty, use --allow-non-empty"). The mount unit retried
             // and failed 1,948 times in a row, so ~88GB of archived TV silently
@@ -4343,9 +4364,9 @@ async function startServer() {
 
   // Removed: duplicate setInterval moved to the unified periodic scan below
 
-  // ── Vault Config Helper ───────────────────────────────────────
+  // â”€â”€ Vault Config Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // vault_config is a SINGLE SHARED ROW in the cloud DB, used by every machine
-  // that connects — the Linux host and every Windows/Android client alike. The
+  // that connects â€” the Linux host and every Windows/Android client alike. The
   // row therefore holds whichever host wrote it last, so a client would read
   // a ROMS folder on the old media drive and resolve nothing: every ROM 404'd,
   // Play did nothing, and scans found zero games. The launch path already
@@ -4354,7 +4375,7 @@ async function startServer() {
   // Rule: a stored path is only honoured when it actually resolves on THIS
   // machine. Otherwise fall back to the host-local value (host-state.json,
   // which IS per-machine) so each device uses its own real paths. The shared
-  // row is never rewritten from here — that would break the other host.
+  // row is never rewritten from here â€” that would break the other host.
   function preferLocalPath(dbValue: unknown, localValue: unknown): string {
     const dbPath = String(dbValue ?? '').trim();
     const localPath = String(localValue ?? '').trim();
@@ -4406,7 +4427,7 @@ async function startServer() {
     const liveConfig = await getVaultConfig();
     // Never let a path that does not resolve on THIS machine overwrite a local
     // one that does. This function persists into host-state.json, which is the
-    // per-machine store — copying the shared cloud row in verbatim is what kept
+    // per-machine store â€” copying the shared cloud row in verbatim is what kept
     // resetting a working "I:\ROMS" back to the Linux host's own path, so every
     // ROM lookup failed again after the next sync tick.
     mem.vaultConfig.root_path = preferLocalPath(liveConfig.root_path, mem.vaultConfig.root_path);
@@ -4452,7 +4473,7 @@ async function startServer() {
       try { await fsAccess(candidate); return candidate; } catch { /* no */ }
     }
     // Catch-all for any Linux install method not covered by the fixed
-    // candidate list above (AUR packages, custom PATH entries, etc.) —
+    // candidate list above (AUR packages, custom PATH entries, etc.) â€”
     // matches the same fallback detectRetroArchPath() already relies on.
     if (process.platform !== 'win32') {
       try {
@@ -4492,7 +4513,7 @@ async function startServer() {
   }
 
   // Returns the emulator path plus which flavor was found, since the auto-fix
-  // install step and any UI showing "which Switch emulator" need to know —
+  // install step and any UI showing "which Switch emulator" need to know â€”
   // Ryujinx and the Yuzu-lineage forks have different CLI invocations.
   async function detectSwitchEmuPath(): Promise<{ path: string; flavor: 'ryujinx' | 'yuzu-fork' } | null> {
     const cfg = await getVaultConfig();
@@ -4518,7 +4539,7 @@ async function startServer() {
   }
 
   async function detectPcsx2Path(): Promise<{ path: string; isWine: boolean; isRetroArchCore: boolean } | null> {
-    // 1. Check if pcsx2_libretro core is available (best on Linux — no Wine needed)
+    // 1. Check if pcsx2_libretro core is available (best on Linux â€” no Wine needed)
     const coresDir = await getCoresDir().catch(() => null);
     if (coresDir) {
       const corePath = path.join(coresDir, `pcsx2_libretro.so`);
@@ -4610,10 +4631,10 @@ async function startServer() {
     return found;
   }
 
-  // ── Media Compression — shrink huge movies/episodes via HEVC re-encode ──────
+  // â”€â”€ Media Compression â€” shrink huge movies/episodes via HEVC re-encode â”€â”€â”€â”€â”€â”€
   // Uses Intel VAAPI hardware encoding when available (fast, low CPU/heat on a
   // laptop), falls back to software libx265. All streams (audio, subs, chapters)
-  // are stream-copied untouched — only video is re-encoded. The original file is
+  // are stream-copied untouched â€” only video is re-encoded. The original file is
   // only replaced after the new file's duration is verified to match; anything
   // that looks wrong leaves the original completely untouched.
   type CompressJobStatus = 'queued' | 'probing' | 'encoding' | 'verifying' | 'done' | 'error' | 'skipped' | 'cancelled';
@@ -4656,13 +4677,13 @@ async function startServer() {
     try { await fsAccess(VAAPI_DEVICE); return true; } catch { return false; }
   }
 
-  // NVENC (NVIDIA's hardware HEVC encoder) works on both Windows and Linux —
+  // NVENC (NVIDIA's hardware HEVC encoder) works on both Windows and Linux â€”
   // unlike VAAPI, which is Linux-only and Intel/AMD-oriented, so it never
   // helps an NVIDIA GPU (like the RTX 3060 Ti this host commonly runs on) and
   // never applies at all when this server runs on Windows. Checked once by
   // asking the actual ffmpeg build what encoders it was compiled with
-  // (having the binary listed is necessary but not sufficient — the GPU/
-  // driver might still be missing — so runCompressJob still falls back to
+  // (having the binary listed is necessary but not sufficient â€” the GPU/
+  // driver might still be missing â€” so runCompressJob still falls back to
   // software if the real encode attempt fails).
   let nvencAvailableCache: boolean | null = null;
   async function nvencAvailable(): Promise<boolean> {
@@ -4683,7 +4704,7 @@ async function startServer() {
     const common = ["-y", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1"];
     if (mode === 'nvenc') {
       // p5/vbr/cq mirror libx265's crf=23 quality target on NVENC's own rate
-      // control — stream-copy everything but video, same as the other modes.
+      // control â€” stream-copy everything but video, same as the other modes.
       return [...common, "-i", absPath, "-map", "0", "-c", "copy",
         "-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", scratchOut];
     }
@@ -4715,11 +4736,11 @@ async function startServer() {
     updateCompressJob(relPath, { status: 'probing', startedAt: Date.now() });
     const { codec, duration } = await probeMedia(absPath);
     if (!duration) {
-      updateCompressJob(relPath, { status: 'error', error: 'Could not read file — may be missing or corrupt', finishedAt: Date.now() });
+      updateCompressJob(relPath, { status: 'error', error: 'Could not read file â€” may be missing or corrupt', finishedAt: Date.now() });
       return;
     }
     if (codec === 'hevc' || codec === 'h265') {
-      updateCompressJob(relPath, { status: 'skipped', error: 'Already HEVC — no compression needed', finishedAt: Date.now() });
+      updateCompressJob(relPath, { status: 'skipped', error: 'Already HEVC â€” no compression needed', finishedAt: Date.now() });
       return;
     }
 
@@ -4731,7 +4752,7 @@ async function startServer() {
     // NVIDIA GPU) > VAAPI (Linux-only, Intel/AMD) > software libx265. A
     // hardware encoder failing at actual encode time (driver mismatch,
     // GPU busy, etc.) falls back to software once rather than failing the
-    // whole job outright — the job only ever reports 'error' if software
+    // whole job outright â€” the job only ever reports 'error' if software
     // encoding itself also fails.
     const preferredMode: 'nvenc' | 'vaapi' | 'software' = (await nvencAvailable())
       ? 'nvenc'
@@ -4783,13 +4804,13 @@ async function startServer() {
 
     if (!outStat || !outStat.size || !durationOk) {
       try { await unlink(scratchOut); } catch {}
-      updateCompressJob(relPath, { status: 'error', error: 'Verification failed — original left untouched', finishedAt: Date.now() });
+      updateCompressJob(relPath, { status: 'error', error: 'Verification failed â€” original left untouched', finishedAt: Date.now() });
       return;
     }
 
     if (outStat.size >= job.originalSize) {
       try { await unlink(scratchOut); } catch {}
-      updateCompressJob(relPath, { status: 'skipped', error: 'Compressed file was not smaller — kept original', finishedAt: Date.now() });
+      updateCompressJob(relPath, { status: 'skipped', error: 'Compressed file was not smaller â€” kept original', finishedAt: Date.now() });
       return;
     }
 
@@ -4886,7 +4907,7 @@ async function startServer() {
    *
    * Deliberately host-local only. vault_config is one shared row used by every
    * machine on this database, so writing an auto-detected path there published
-   * this host's filesystem to all the others — a Windows client detecting
+   * this host's filesystem to all the others â€” a Windows client detecting
    * "I:\RetroArch\retroarch.exe" overwrote the Linux host's
    * "/snap/bin/retroarch" in the shared row. Executable locations are inherently
    * per-machine, so they belong in host-state.json, which is per-machine.
@@ -4897,7 +4918,7 @@ async function startServer() {
     persistHostStateNow().catch(() => {});
   }
 
-  // The buildbot's "stable" tree only keeps the most recent handful of releases —
+  // The buildbot's "stable" tree only keeps the most recent handful of releases â€”
   // a hardcoded version number (previously "1.19.1") silently goes stale as new
   // stable releases ship and old ones are pruned, turning every stable-fallback
   // download into a permanent 404 with no obvious cause. Discover the actual
@@ -4905,11 +4926,11 @@ async function startServer() {
   // so this doesn't add a request to every core download. FALLBACK is only used
   // if the live lookup itself fails (e.g. no internet reachable right now).
   //
-  // THIS EXACT FIX WAS ALREADY MADE AND VERIFIED ONCE THIS SESSION — a later
+  // THIS EXACT FIX WAS ALREADY MADE AND VERIFIED ONCE THIS SESSION â€” a later
   // rewrite reintroduced the original bug (both the stale-version AND the
   // separate .zip-vs-.7z bug below) by regenerating this function from an
   // older base. If this comment is gone again, check git blame before
-  // assuming the bug is new — it may be the third time, not the first.
+  // assuming the bug is new â€” it may be the third time, not the first.
   let _cachedStableVersion: { version: string; ts: number } | null = null;
   async function getLatestRetroArchStableVersion(): Promise<string> {
     const FALLBACK = "1.22.2";
@@ -4930,13 +4951,13 @@ async function startServer() {
         _cachedStableVersion = { version: latest, ts: Date.now() };
         return latest;
       }
-    } catch { /* offline or buildbot unreachable — use the last-known-good fallback */ }
+    } catch { /* offline or buildbot unreachable â€” use the last-known-good fallback */ }
     return FALLBACK;
   }
 
   // As of 2026, the buildbot no longer ships a plain RetroArch.zip for Windows
   // at all (only RetroArch.7z, RetroArch-Win64-setup.exe, and RetroArch_cores.7z)
-  // — requesting the old .zip URL 404s unconditionally, independent of (and on
+  // â€” requesting the old .zip URL 404s unconditionally, independent of (and on
   // top of) the version-staleness bug above. Uses the same 7zip-bin-backed
   // extraction as installRetroArchLinuxPortable instead of adm-zip, which can't
   // open 7z archives.
@@ -4957,7 +4978,7 @@ async function startServer() {
 
     let downloaded = false;
     // Collects every attempt's failure instead of overwriting a single
-    // lastErr — otherwise a failure on the first (nightly) URL was silently
+    // lastErr â€” otherwise a failure on the first (nightly) URL was silently
     // discarded the moment the second (stable) URL also failed, so the
     // reported error looked like only the stable download had a problem.
     const errors: string[] = [];
@@ -5000,7 +5021,7 @@ async function startServer() {
     return exePath;
   }
 
-  // Extracts a .7z archive without requiring a system 7z/p7zip install — uses
+  // Extracts a .7z archive without requiring a system 7z/p7zip install â€” uses
   // the prebuilt 7za binary that 7zip-bin already ships (it's a transitive
   // dependency via electron-builder, so it's present after any `npm install`
   // with zero extra setup).
@@ -5013,7 +5034,7 @@ async function startServer() {
   }
 
   // Downloads a portable AppImage-based RetroArch build and unpacks it to a
-  // directly-runnable binary — no snap/apt/root privileges needed. The
+  // directly-runnable binary â€” no snap/apt/root privileges needed. The
   // official buildbot ships RetroArch as an AppImage, which normally needs
   // FUSE to self-mount; `--appimage-extract` sidesteps that entirely by
   // unpacking it once up front (into squashfs-root/usr/bin/retroarch) rather
@@ -5028,7 +5049,7 @@ async function startServer() {
     await mkdir(downloadDir, { recursive: true });
     const archivePath = path.join(downloadDir, "RetroArch.7z");
 
-    log("INFO", "Downloading portable RetroArch (no snap/root needed)…", "launcher");
+    log("INFO", "Downloading portable RetroArch (no snap/root needed)â€¦", "launcher");
     const r = await fetch("https://buildbot.libretro.com/nightly/linux/x86_64/RetroArch.7z", { signal: AbortSignal.timeout(120_000) });
     if (!r.ok) throw new Error(`RetroArch download failed: HTTP ${r.status}`);
     await writeFile(archivePath, Buffer.from(await r.arrayBuffer()));
@@ -5049,7 +5070,7 @@ async function startServer() {
   }
 
   // Bulk-fetches every libretro core in one archive instead of downloading
-  // them one at a time via downloadCoreById — the buildbot publishes exactly
+  // them one at a time via downloadCoreById â€” the buildbot publishes exactly
   // this as RetroArch_cores.7z, so a fresh portable install lands with every
   // core already usable instead of the user hitting a "core not installed"
   // wall on their first launch of each platform.
@@ -5058,13 +5079,13 @@ async function startServer() {
     await mkdir(downloadDir, { recursive: true });
     const archivePath = path.join(downloadDir, "RetroArch_cores.7z");
 
-    log("INFO", "Downloading libretro core bundle…", "launcher");
+    log("INFO", "Downloading libretro core bundleâ€¦", "launcher");
     const r = await fetch("https://buildbot.libretro.com/nightly/linux/x86_64/RetroArch_cores.7z", { signal: AbortSignal.timeout(180_000) });
     if (!r.ok) throw new Error(`Cores bundle download failed: HTTP ${r.status}`);
     await writeFile(archivePath, Buffer.from(await r.arrayBuffer()));
 
-    // The archive isn't a flat folder of .so files — it's packaged as a full
-    // AppImage home-directory tree (…/.config/retroarch/cores/*.so several
+    // The archive isn't a flat folder of .so files â€” it's packaged as a full
+    // AppImage home-directory tree (â€¦/.config/retroarch/cores/*.so several
     // levels deep), same layout the AppImage itself would create at runtime.
     // Extract to a scratch dir, then flatten every *_libretro.so it contains
     // straight into coresDir, since that nested path isn't what getCoresDir()
@@ -5103,7 +5124,7 @@ async function startServer() {
       if (found) { await fsAccess(found); return found; }
       throw new Error("snap reported success but no retroarch binary was found");
     } catch (snapErr: any) {
-      log("WARN", `snap install failed (${String(snapErr?.stderr ?? snapErr?.message ?? snapErr)}) — falling back to portable AppImage install`, "launcher");
+      log("WARN", `snap install failed (${String(snapErr?.stderr ?? snapErr?.message ?? snapErr)}) â€” falling back to portable AppImage install`, "launcher");
       return installRetroArchLinuxPortable();
     }
   }
@@ -5126,7 +5147,7 @@ async function startServer() {
   // candidate list only ever checked Windows drive letters (I:\, D:\, C:\), so auto-detect
   // was silently broken on Linux/macOS hosts (e.g. this host's real ROM path lives under
   // /media/<user>/<volume>/ROMS). This walks the real OS-specific mount roots looking for a
-  // subfolder matching one of `names` (case variants), and returns full candidate paths —
+  // subfolder matching one of `names` (case variants), and returns full candidate paths â€”
   // still validated by detectExistingDir() afterwards.
   async function scanMountedVolumesFor(names: string[]): Promise<string[]> {
     const found: string[] = [];
@@ -5136,7 +5157,7 @@ async function startServer() {
     };
     for (const root of roots) {
       const level1 = await tryReaddir(root);
-      if (!level1) continue; // root doesn't exist on this OS/host — skip
+      if (!level1) continue; // root doesn't exist on this OS/host â€” skip
       for (const entry of level1) {
         if (!entry.isDirectory()) continue;
         const entryPath = path.join(root, entry.name);
@@ -5159,26 +5180,26 @@ async function startServer() {
     return found;
   }
 
-  // ── Auth ──────────────────────────────────────────────────────
+  // â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Falling back to a random secret means every restart invalidates all
   // sessions (and, since encryptSecret falls back to this same value,
   // every stored secret too). Fine for a single long-lived laptop process;
-  // fatal on AWS where containers restart/scale routinely — JWT_SECRET must
+  // fatal on AWS where containers restart/scale routinely â€” JWT_SECRET must
   // be pinned in env there.
   if (!process.env.JWT_SECRET) {
-    log("WARN", "JWT_SECRET is not set in env — using a random secret for this process only. All sessions and encrypted secrets will be invalidated on restart. Set JWT_SECRET explicitly before deploying to AWS.", "auth");
+    log("WARN", "JWT_SECRET is not set in env â€” using a random secret for this process only. All sessions and encrypted secrets will be invalidated on restart. Set JWT_SECRET explicitly before deploying to AWS.", "auth");
   }
   const JWT_SECRET = process.env.JWT_SECRET ?? crypto.randomBytes(32).toString("hex");
   const ACCESS_PIN = process.env.ACCESS_PIN ?? "";
 
-  // ── Global API auth gate ───────────────────────────────────────
+  // â”€â”€ Global API auth gate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // All /api/* routes require a valid JWT (PIN session or user account).
   // Token accepted via Authorization header or ?token= query param (for SSE/EventSource).
   const PUBLIC_API_PREFIXES = [
     "/api/health",              // includes /api/health/full
     "/api/auth/login",
     "/api/auth/register",
-    // Reset endpoints MUST be public — the whole point is that the user cannot
+    // Reset endpoints MUST be public â€” the whole point is that the user cannot
     // log in. They are safe to expose: /forgot returns an identical response
     // whether or not the account exists, and /reset requires a single-use
     // token whose SHA-256 is the only thing stored.
@@ -5197,16 +5218,16 @@ async function startServer() {
     // JWT here would simply push every device back to the external dependency
     // this route exists to remove. Nothing user-specific is exposed.
     "/api/emulator/native-core/",
-    "/api/downloads/",    // APK / installer downloads — public so any device can get the app
+    "/api/downloads/",    // APK / installer downloads â€” public so any device can get the app
     "/api/webhooks/arr",        // called by Sonarr/Radarr; authenticated by shared secret, not JWT
     "/api/host/readiness",      // polled by setup wizard before first login
     "/api/host/info",           // public host identity for welcome screens
-    "/api/host/public-profile", // join-step host card — called before user has a token
+    "/api/host/public-profile", // join-step host card â€” called before user has a token
     "/api/invite/",             // invite lookup + redemption handled separately
     "/api/torrent/download-status", // polled by Sidebar/DiscoverFeed (no sensitive data)
-    "/api/nas/ping",            // NAS key validation — uses X-NAS-Key, not JWT
-    "/api/nas/manifest",        // NAS auto-config manifest — public endpoint
-    // Media/file serving — browser <img>/<video> tags cannot send custom headers;
+    "/api/nas/ping",            // NAS key validation â€” uses X-NAS-Key, not JWT
+    "/api/nas/manifest",        // NAS auto-config manifest â€” public endpoint
+    // Media/file serving â€” browser <img>/<video> tags cannot send custom headers;
     // these are byte-range file servers, not sensitive configuration
     "/api/media/file",
     // HLS playlist + segments: <video>/hls.js fetch these directly and cannot
@@ -5236,23 +5257,23 @@ async function startServer() {
     "/api/photos/",             // photo serving
     "/api/storage/public/",     // public storage files
     "/api/storage/download/",   // file downloads
-    "/api/media/img-proxy",     // external image proxy (TMDB/etc — no sensitive data)
-    "/api/daemon/stream",       // SSE — sends token as ?token= query param (EventSource can't set headers)
-    "/api/shared-folders",      // share listing — auth checked per-share inside handler
+    "/api/media/img-proxy",     // external image proxy (TMDB/etc â€” no sensitive data)
+    "/api/daemon/stream",       // SSE â€” sends token as ?token= query param (EventSource can't set headers)
+    "/api/shared-folders",      // share listing â€” auth checked per-share inside handler
     "/api/social/groups/",      // SSE group chat streams
-    "/api/media/upload",        // upload — auth + privilege checked inside handler (stream must not be blocked here)
-    "/api/hosts/public-listings", // marketplace — public read, no login needed
-    "/api/invite/",               // invite redemption info — public so unauth users can see the invite before logging in
-    "/api/ai/stream",             // Jarvis command SSE — auth checked inside handler (EventSource can't set headers)
+    "/api/media/upload",        // upload â€” auth + privilege checked inside handler (stream must not be blocked here)
+    "/api/hosts/public-listings", // marketplace â€” public read, no login needed
+    "/api/invite/",               // invite redemption info â€” public so unauth users can see the invite before logging in
+    "/api/ai/stream",             // Jarvis command SSE â€” auth checked inside handler (EventSource can't set headers)
     "/api/ai/navigate",           // Gemini natural language navigator
     "/api/ai/chat",               // AI Assistant / AI Buddy chat
     "/api/ai/guide",              // AI Game Guide query endpoint
     "/api/ai/scrape",             // AI metadata scraper endpoint
     "/api/discover/",             // Discover & Matchmaker public endpoints
     "/api/media/title-info",      // Media title info lookup
-    "/api/emulator/bios/serve/",  // BIOS files — fetched by EmulatorJS which cannot inject auth headers; route validates ?token=/header itself (see handler)
-    "/api/art/",                  // game cover art — served by <img> tags which cannot send auth headers
-    "/api/client-issues/report",  // crash/error telemetry — must work from a session with no valid token yet (that's often exactly when something broke)
+    "/api/emulator/bios/serve/",  // BIOS files â€” fetched by EmulatorJS which cannot inject auth headers; route validates ?token=/header itself (see handler)
+    "/api/art/",                  // game cover art â€” served by <img> tags which cannot send auth headers
+    "/api/client-issues/report",  // crash/error telemetry â€” must work from a session with no valid token yet (that's often exactly when something broke)
     "/api/tenant/info",           // Tenant inspection endpoint
     "/api/user/config",           // User configuration & monetization info
     "/api/user/settings",         // Consolidated settings & account management
@@ -5303,7 +5324,7 @@ async function startServer() {
     }
   });
 
-  // ── Activity tracking middleware — runs after auth, logs every authenticated API call ──
+  // â”€â”€ Activity tracking middleware â€” runs after auth, logs every authenticated API call â”€â”€
   // High-frequency polling endpoints are excluded to avoid log noise
   const SKIP_LOG_PREFIXES = [
     '/api/health', '/api/torrent/download-status', '/api/daemon/stream',
@@ -5331,7 +5352,7 @@ async function startServer() {
     if (!payload) return next();
     const userId = payload.userId ?? (payload.brain ? 'host' : payload.nexus ? 'host' : null);
     const username = payload.username ?? (payload.brain ? 'host' : payload.nexus ? 'host' : null);
-    // Skip repeated GET polls — only log once per 5m per user+path
+    // Skip repeated GET polls â€” only log once per 5m per user+path
     if (req.method === 'GET') {
       const dedupKey = `${userId}:${req.path}`;
       const last = _recentLogCache.get(dedupKey) ?? 0;
@@ -5351,7 +5372,7 @@ async function startServer() {
     next();
   });
 
-  // ── Ghost Scanner (chokidar OS-level file watcher) ────────────
+  // â”€â”€ Ghost Scanner (chokidar OS-level file watcher) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let fileWatcher: ReturnType<typeof chokidar.watch> | null = null;
   let watcherRoot = "";
   const debounceMap = new Map<string, ReturnType<typeof setTimeout>>();
@@ -5445,7 +5466,7 @@ async function startServer() {
       persistHostStateNow().catch(() => {});
     }
 
-    // Broadcast typed SSE event — frontend intercepts this
+    // Broadcast typed SSE event â€” frontend intercepts this
     const payload = JSON.stringify({ type: "new-rom-detected", game: rowToGame(game) });
     sseClients.forEach((c) => { try { c.write(`data: ${payload}\n\n`); } catch { sseClients.delete(c); } });
     log("INFO", `\u2728 New title added: "${game.title}" [${platform.toUpperCase()}] \u2192 ${core.coreName}`, "watcher");
@@ -5462,7 +5483,7 @@ async function startServer() {
           const g = mem.games.find((g) => g.id === gameId);
           if (g) (g as any).boxArt = localArt;
         }
-        log("INFO", `🖼️ Local art found: "${game.title}"`, "art");
+        log("INFO", `ðŸ–¼ï¸ Local art found: "${game.title}"`, "art");
       } else {
         // Priority 2: Fetch from LibretroThumbnails (fire-and-forget with better retry)
         fetchAndSaveArt(gameId, String(game.title), platform).then(async (artUrl) => {
@@ -5529,12 +5550,12 @@ async function startServer() {
     log("INFO", `Ghost Scanner activated \u2014 watching ${vaultRoot}`, "watcher");
   }
 
-  // ─────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // API ROUTES
-  // ─────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  // ── Health ───────────────────────────────────────────────────
-  // ── Full system health check (used by HostHealthCheck dashboard) ──────────
+  // â”€â”€ Health â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â”€â”€ Full system health check (used by HostHealthCheck dashboard) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Declared outside the handler so it survives between polls.
   let _driveHealthCache: { result: { ok: boolean; msg: string; warn?: boolean }; ts: number } | null = null;
   const DRIVE_HEALTH_TTL_MS = 60_000;
@@ -5572,32 +5593,32 @@ async function startServer() {
     // Emulator
     await check('Emulator: RetroArch', true, async () => {
       const p = await detectRetroArchPath();
-      return { ok: !!p, msg: p ? `Found: ${p}` : 'Not installed — click Run Setup to install via snap' };
+      return { ok: !!p, msg: p ? `Found: ${p}` : 'Not installed â€” click Run Setup to install via snap' };
     });
 
     // Essential cores
     const essentialCores = ['fceumm', 'snes9x', 'mupen64plus_next', 'mgba', 'genesis_plus_gx', 'pcsx_rearmed'];
     await check('Emulator: Cores', false, async () => {
       const coresDir = await getCoresDir().catch(() => null);
-      if (!coresDir) return { ok: false, warn: true, msg: 'Cores dir not found — run setup' };
+      if (!coresDir) return { ok: false, warn: true, msg: 'Cores dir not found â€” run setup' };
       const ext = process.platform === 'win32' ? '.dll' : '.so';
       const installed = (await Promise.all(essentialCores.map(async id => {
         try { await fsAccess(path.join(coresDir, `${id}_libretro${ext}`)); return true; } catch { return false; }
       }))).filter(Boolean).length;
       const ok = installed === essentialCores.length;
-      return { ok, warn: !ok, msg: `${installed}/${essentialCores.length} essential cores installed${ok ? '' : ' — click Run Setup to download missing'}` };
+      return { ok, warn: !ok, msg: `${installed}/${essentialCores.length} essential cores installed${ok ? '' : ' â€” click Run Setup to download missing'}` };
     });
 
     // FFmpeg
     await check('Streaming: FFmpeg', false, async () => {
       const p = await detectFfmpegPath();
-      return { ok: !!p, warn: !p, msg: p ? `Found: ${p}` : 'Not found — streaming/recording unavailable' };
+      return { ok: !!p, warn: !p, msg: p ? `Found: ${p}` : 'Not found â€” streaming/recording unavailable' };
     });
 
     // Vault root
     await check('Games: Vault Root', true, async () => {
       const cfg = await getVaultConfig();
-      if (!cfg.root_path) return { ok: false, msg: 'ROM vault path not configured — set it in Vaults' };
+      if (!cfg.root_path) return { ok: false, msg: 'ROM vault path not configured â€” set it in Vaults' };
       try { await fsAccess(cfg.root_path); return { ok: true, msg: cfg.root_path }; }
       catch { return { ok: false, msg: `Path not accessible: ${cfg.root_path}` }; }
     });
@@ -5605,7 +5626,7 @@ async function startServer() {
     // Public URL
     await check('Domain: Public URL', false, async () => {
       const url = process.env.NEXUS_PUBLIC_URL?.trim();
-      if (!url) return { ok: false, warn: true, msg: 'NEXUS_PUBLIC_URL not set — remote access unavailable' };
+      if (!url) return { ok: false, warn: true, msg: 'NEXUS_PUBLIC_URL not set â€” remote access unavailable' };
       try {
         const r = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(8000) });
         return { ok: r.ok, msg: r.ok ? `Reachable: ${url}` : `HTTP ${r.status}` };
@@ -5615,10 +5636,10 @@ async function startServer() {
     // Auth
     await check('Auth: PIN', true, async () => {
       const pin = process.env.ACCESS_PIN?.trim();
-      return { ok: !!pin, msg: pin ? 'PIN configured' : 'ACCESS_PIN not set — all clients can connect without PIN' };
+      return { ok: !!pin, msg: pin ? 'PIN configured' : 'ACCESS_PIN not set â€” all clients can connect without PIN' };
     });
 
-    // ── Checks below answer "what is actually serving right now" ──────────
+    // â”€â”€ Checks below answer "what is actually serving right now" â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // The set above proves the box is configured; these prove the paths users
     // depend on are live, which is the difference between a dashboard that
     // looks green and one that tells you why playback just broke.
@@ -5631,11 +5652,11 @@ async function startServer() {
         const { stdout } = await execAsync('tasklist /FI "IMAGENAME eq cloudflared.exe" /NH').catch(() => ({ stdout: "" }));
         return /cloudflared\.exe/i.test(String(stdout))
           ? { ok: true, msg: "Running" }
-          : { ok: false, msg: "cloudflared not running — savestate.co.za will not reach this host" };
+          : { ok: false, msg: "cloudflared not running â€” savestate.co.za will not reach this host" };
       }
       const { stdout } = await execAsync("pgrep -a cloudflared || true").catch(() => ({ stdout: "" }));
       const line = String(stdout).split("\n").find((l) => l.includes("cloudflared"));
-      if (!line) return { ok: false, msg: 'cloudflared not running — savestate.co.za will not reach this host' };
+      if (!line) return { ok: false, msg: 'cloudflared not running â€” savestate.co.za will not reach this host' };
       const named = /run\s+(\S+)\s*$/.exec(line.trim());
       return { ok: true, msg: `Running${named ? ` (tunnel: ${named[1]})` : ''}` };
     });
@@ -5655,7 +5676,7 @@ async function startServer() {
       let result: { ok: boolean; msg: string; warn?: boolean };
 
       if (!usingSa && !usingOauth) {
-        result = { ok: false, warn: true, msg: 'No Drive credentials — Drive-hosted media unavailable' };
+        result = { ok: false, warn: true, msg: 'No Drive credentials â€” Drive-hosted media unavailable' };
       } else {
         const client = await getGoogleDriveClient();
         if (!client) {
@@ -5681,7 +5702,7 @@ async function startServer() {
 
     await check('Media: Library', false, async () => {
       // Read the in-memory index rather than rescanning. The first version of
-      // this check called scanMediaDir() directly, which walks the media root —
+      // this check called scanMediaDir() directly, which walks the media root â€”
       // and that root is a Google Drive FUSE mount, so every health poll became
       // a network filesystem walk and the endpoint took ~4.7s. mem.media is
       // maintained by the scanner on its own interval and is free to read.
@@ -5694,12 +5715,12 @@ async function startServer() {
     // difference between smooth playback and a spinner under any real load.
     await check('Streaming: Hardware transcode', false, async () => {
       if (process.env.NEXUS_DISABLE_HW_TRANSCODE === '1') {
-        return { ok: false, warn: true, msg: 'Disabled by NEXUS_DISABLE_HW_TRANSCODE — software encoding only' };
+        return { ok: false, warn: true, msg: 'Disabled by NEXUS_DISABLE_HW_TRANSCODE â€” software encoding only' };
       }
       const hw = await hwEncodeAvailable().catch(() => false);
       return {
         ok: hw, warn: !hw,
-        msg: hw ? `VAAPI available (${VAAPI_DEVICE})` : 'No usable VAAPI device — software encoding only (much slower)',
+        msg: hw ? (_hwKind === "nvenc" ? "NVIDIA NVENC available" : `VAAPI available (${VAAPI_DEVICE})`) : 'No usable VAAPI or NVENC â€” software encoding only (much slower)',
       };
     });
 
@@ -5715,7 +5736,7 @@ async function startServer() {
       const gb = bytes / 1024 ** 3;
       const capGb = HLS_CACHE_MAX_BYTES / 1024 ** 3;
       // The pruner runs hourly, so the cache legitimately drifts above the cap
-      // between sweeps — warning at 8.1/8.0 GB is noise, and a dashboard that
+      // between sweeps â€” warning at 8.1/8.0 GB is noise, and a dashboard that
       // cries wolf stops being read. Only flag a genuine overrun, meaning the
       // pruner is not keeping up with what playback is producing.
       const overrun = gb > capGb * 1.25;
@@ -5744,8 +5765,8 @@ async function startServer() {
         // Neon periodically drops idle pooled connections server-side; the pool's
         // *next* checkout normally gets a fresh client transparently. Retrying once
         // here before declaring the whole app "disconnected" avoids a single stale
-        // connection on this health probe taking down dbConnected — and therefore
-        // every DB-gated route (login/register included) — for up to 30s until the
+        // connection on this health probe taking down dbConnected â€” and therefore
+        // every DB-gated route (login/register included) â€” for up to 30s until the
         // reconnect watchdog's next tick, when a second attempt would likely have
         // just worked.
         try {
@@ -5770,14 +5791,14 @@ async function startServer() {
     });
   });
 
-  // ── System Stats ─────────────────────────────────────────────
+  // â”€â”€ System Stats â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let _diskStatCache: { total: number; free: number; ts: number } | null = null;
   app.get("/api/system/stats", async (_req, res) => {
     const memTotal = os.totalmem();
     const memFree = os.freemem();
     let diskTotal = 0, diskFree = 0;
     try {
-      // Cache disk stats for 10s — statfs on external HDD is slow and called frequently
+      // Cache disk stats for 10s â€” statfs on external HDD is slow and called frequently
       if (!_diskStatCache || Date.now() - _diskStatCache.ts > 10_000) {
         const fs = await statfs(process.cwd());
         _diskStatCache = { total: fs.blocks * fs.bsize, free: fs.bfree * fs.bsize, ts: Date.now() };
@@ -5802,7 +5823,7 @@ async function startServer() {
     });
   });
 
-  // ── Daemon SSE Stream ─────────────────────────────────────────
+  // â”€â”€ Daemon SSE Stream â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/daemon/stream", (req, res) => {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -5830,10 +5851,10 @@ async function startServer() {
     res.json(mem.logs.slice(-100));
   });
 
-  // ── Client crash/error telemetry ─────────────────────────────────────────
+  // â”€â”€ Client crash/error telemetry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Public and deliberately tolerant: this has to work from a desktop client
   // whose launcher just crashed, or a webapp tab that hit an uncaught error
-  // before the user ever logged in — requiring auth here would silently drop
+  // before the user ever logged in â€” requiring auth here would silently drop
   // exactly the reports that matter most. Auth is read opportunistically only
   // to attribute a report to a user when a valid token happens to be present.
   app.post("/api/client-issues/report", async (req, res) => {
@@ -5847,7 +5868,7 @@ async function startServer() {
       const app_version = body.appVersion ? String(body.appVersion).trim().slice(0, 40) : null;
       const device_id = body.deviceId ? String(body.deviceId).trim().slice(0, 100) : null;
       // detail is arbitrary structured JSON (stack, diagnostics tail, game/platform
-      // being launched, etc.) — capped so one bad report can't bloat storage.
+      // being launched, etc.) â€” capped so one bad report can't bloat storage.
       let detail: unknown = null;
       if (body.detail != null) {
         const raw = JSON.stringify(body.detail);
@@ -5862,7 +5883,7 @@ async function startServer() {
     }
   });
 
-  // ── Admin: view recent client issue reports ──────────────────────────────
+  // â”€â”€ Admin: view recent client issue reports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/client-issues", async (req, res) => {
     const auth = requireAuthenticatedUser(req, res); if (!auth) return;
     if (!pool || !dbConnected) return res.json(mem.clientIssues.slice(-200).reverse());
@@ -5880,7 +5901,7 @@ async function startServer() {
     }
   });
 
-  // ── Games ─────────────────────────────────────────────────────
+  // â”€â”€ Games â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Lets the UI show what the background art fetch is actually doing, rather
   // than a static "fetching N images" that can't tell progress from a stall.
   app.get("/api/art/progress", async (_req, res) => {
@@ -5900,7 +5921,7 @@ async function startServer() {
     res.set('Cache-Control', 'public, max-age=10, stale-while-revalidate=30');
 
     // `limit` (and `offset`) were accepted by callers but never implemented
-    // here — the handler took `_req` and always returned the ENTIRE library.
+    // here â€” the handler took `_req` and always returned the ENTIRE library.
     // Measured against a real library: a request for ?limit=500 returned all
     // 8,564 games as 3.61 MB of JSON, taking 2.5s warm and 9.0s cold, on
     // every library load and every refresh. That single fact was the largest
@@ -5909,7 +5930,7 @@ async function startServer() {
     //
     // Omitting `limit` still returns everything, so existing callers that
     // rely on the full list are unaffected. The response stays a bare array
-    // for the same reason — callers read it directly.
+    // for the same reason â€” callers read it directly.
     const parseCount = (raw: unknown, fallback: number) => {
       const n = Number.parseInt(String(raw ?? ''), 10);
       return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -5956,7 +5977,7 @@ async function startServer() {
     const { id } = req.params;
     const { minutes } = req.body as { minutes: number };
     if (typeof minutes !== 'number' || !isFinite(minutes) || minutes < 0 || minutes > 1440) {
-      return res.status(400).json({ error: 'minutes must be a number 0–1440' });
+      return res.status(400).json({ error: 'minutes must be a number 0â€“1440' });
     }
     if (dbConnected && pool) {
       try {
@@ -5973,7 +5994,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // ── Now Playing ───────────────────────────────────────────────
+  // â”€â”€ Now Playing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/games/now-playing", (_req, res) => {
     const running = [...runningEmulatorPids.entries()].map(([game_id, s]) => ({
       game_id,
@@ -5986,7 +6007,7 @@ async function startServer() {
     res.json({ running });
   });
 
-  // ── Session History ───────────────────────────────────────────
+  // â”€â”€ Session History â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/games/sessions", async (req, res) => {
     const limit = Math.min(100, Number(req.query.limit ?? 50));
     const game_id = req.query.game_id as string | undefined;
@@ -6043,7 +6064,7 @@ async function startServer() {
     } catch { res.json({ sessions: [], totalSeconds: 0 }); }
   });
 
-  // ── RetroAchievements Config ──────────────────────────────────
+  // â”€â”€ RetroAchievements Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/gaming/retroachievements", async (_req, res) => {
     if (!dbConnected || !pool) return res.json({ username: '', apiKey: '', enabled: false });
     try {
@@ -6104,7 +6125,7 @@ async function startServer() {
     }
   });
 
-  // Device Info & Role Detection ──
+  // Device Info & Role Detection â”€â”€
   app.get("/api/system/device-info", async (req, res) => {
     const crypto = await import("crypto");
     const os = await import("os");
@@ -6126,7 +6147,7 @@ async function startServer() {
     } as any);
   });
 
-  // ── Native Folder / File Picker (Windows PowerShell dialog) ──
+  // â”€â”€ Native Folder / File Picker (Windows PowerShell dialog) â”€â”€
   app.get("/api/system/pick-folder", async (req, res) => {
     const description = (req.query.description as string | undefined) ?? "Select a folder";
     try {
@@ -6214,7 +6235,7 @@ async function startServer() {
     res.json({ path: null, found: false, hint: "RetroArch not found. Please install it or select the path manually." });
   });
 
-  // ── Vault ─────────────────────────────────────────────────────
+  // â”€â”€ Vault â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/vault/config", async (_req, res) => {
     res.json(await getVaultConfig());
   });
@@ -6246,7 +6267,7 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Scan progress stub — scan completes synchronously in the POST response; this endpoint
+  // Scan progress stub â€” scan completes synchronously in the POST response; this endpoint
   // exists so the client polling loop doesn't flood 404s while waiting.
   app.get("/api/vault/scan/progress", (_req, res) => {
     res.json({ done: true, scanned: 0, total: 0, current: '' });
@@ -6277,9 +6298,9 @@ async function startServer() {
       const added: ReturnType<typeof rowToGame>[] = [];
       let reclassified = 0;
 
-      // ── Batch existence check: one query instead of N individual SELECTs ────
+      // â”€â”€ Batch existence check: one query instead of N individual SELECTs â”€â”€â”€â”€
       const allGameIds = roms.map((r) => crypto.createHash("md5").update(r.relativePath).digest("hex"));
-      const existingDbMap = new Map<string, string>(); // id → platform
+      const existingDbMap = new Map<string, string>(); // id â†’ platform
       if (dbConnected && pool && allGameIds.length > 0) {
         try {
           const batchRes = await pool.query(
@@ -6309,7 +6330,7 @@ async function startServer() {
               ? platform
               : inferPlatformFromRecord(currentPlatform, rom.relativePath, cleanTitle);
             if (inferredPlatform !== currentPlatform) {
-              // Repair core_id alongside platform — leaving a stale core is what
+              // Repair core_id alongside platform â€” leaving a stale core is what
               // booted a reclassified game with the previous console's core.
               const repairedCore = (PLATFORM_CORES[inferredPlatform] ?? PLATFORM_CORES.unknown).coreId;
               pool.query(
@@ -6403,7 +6424,7 @@ async function startServer() {
         }
         added.push(rowToGame(game));
 
-        // Async art fetch — don't block the scan
+        // Async art fetch â€” don't block the scan
         fetchAndSaveArt(game.id, game.title, game.platform).then(async (artUrl) => {
           if (!artUrl) return;
           if (dbConnected && pool) {
@@ -6420,8 +6441,8 @@ async function startServer() {
       // This used to DELETE them outright, which was safe only while every ROM
       // lived on one always-present local disk. It is catastrophic now: the
       // library is cloud-first and most ROM files were lost with the media
-      // drive, so a single scan wiped 8,651 rows — every title, box art,
-      // playtime and rating — and cascaded into user_game_progress,
+      // drive, so a single scan wiped 8,651 rows â€” every title, box art,
+      // playtime and rating â€” and cascaded into user_game_progress,
       // user_achievements, user_favorites and user_ratings. The metadata is the
       // valuable part and it is NOT recoverable from the files, which is
       // exactly backwards from what the old behaviour assumed.
@@ -6440,7 +6461,7 @@ async function startServer() {
               [scannedIds]
             );
             removed = Number(del.rowCount ?? 0);
-            log("WARN", `Hard prune removed ${removed} game row(s) — metadata is gone`, "scanner");
+            log("WARN", `Hard prune removed ${removed} game row(s) â€” metadata is gone`, "scanner");
           } else {
             const upd = await pool.query(
               `UPDATE games SET sync_status='missing_media', updated_at=NOW()
@@ -6494,7 +6515,7 @@ async function startServer() {
         log("INFO", "nexus-vault.json manifest written", "vault");
       } catch { /* read-only drive */ }
 
-      log("INFO", `Scan complete — ${added.length} new, ${reclassified} reclassified, ${flagged} flagged missing, ${removed} removed`, "scanner");
+      log("INFO", `Scan complete â€” ${added.length} new, ${reclassified} reclassified, ${flagged} flagged missing, ${removed} removed`, "scanner");
       persistHostStateNow().catch(() => {});
       res.json({ scanned: roms.length, added: added.length, reclassified, flagged, removed, games: added });
     } catch (err) {
@@ -6507,7 +6528,7 @@ async function startServer() {
     const { new_root_path } = req.body as { new_root_path: string };
     if (!new_root_path) return res.status(400).json({ error: "new_root_path required" });
 
-    log("INFO", `Healing vault paths → ${new_root_path}`, "vault");
+    log("INFO", `Healing vault paths â†’ ${new_root_path}`, "vault");
     if (dbConnected && pool) {
       try {
         await pool.query("UPDATE vault_config SET root_path=$1, updated_at=NOW() WHERE id=1", [
@@ -6809,7 +6830,7 @@ async function startServer() {
     });
   });
 
-  // ── BIOS Verification ─────────────────────────────────────────
+  // â”€â”€ BIOS Verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Well-known BIOS MD5 hashes (partial list; extend as needed)
   const KNOWN_BIOS: Record<string, { name: string; md5: string }> = {
     "scph5501.bin":  { name: "PS1 BIOS v3.0 (USA)",     md5: "490F666E1AFB15B7362B406ED1CEA246" },
@@ -6853,7 +6874,7 @@ async function startServer() {
     res.json({ bios_path: biosDir, files: results });
   });
 
-  // ── Running emulator PID tracker + session recorder ──────────
+  // â”€â”€ Running emulator PID tracker + session recorder â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   type RunningSession = { pid: number; startedAt: number; userId?: string; title: string; platform: string };
   const runningEmulatorPids = new Map<string, RunningSession>();
 
@@ -6874,7 +6895,7 @@ async function startServer() {
   const recentHostLaunches = new Map<string, number>();
   const HOST_LAUNCH_CLAIM_MS = 5000;
 
-  /** Stops every emulator this server started — a host has one screen. */
+  /** Stops every emulator this server started â€” a host has one screen. */
   function killAllRunningEmulators(exceptGameId?: string) {
     for (const [gid, sess] of [...runningEmulatorPids.entries()]) {
       if (exceptGameId && gid === exceptGameId) continue;
@@ -6921,18 +6942,18 @@ async function startServer() {
       if (g) { g.playtime += durationMinutes; g.lastPlayed = new Date().toISOString(); }
       persistHostStateNow().catch(() => {});
     }
-    log("INFO", `Session ended: ${session.title} — ${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`, "launcher");
+    log("INFO", `Session ended: ${session.title} â€” ${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`, "launcher");
   }
 
   // Spawn a process, wait waitMs, verify it's still alive.
   // Captures the first chunk of stderr so callers can show a real error message.
-  // waitMs was previously 900-1200ms at every call site — too short to reliably
+  // waitMs was previously 900-1200ms at every call site â€” too short to reliably
   // catch crashes in GPU-accelerated emulators (RetroArch cores, Dolphin, RPCS3,
   // etc.), whose OpenGL/Vulkan context creation can legitimately take a couple
   // seconds, but whose *crashes* during that same window are just as often
   // delayed past the old cutoff. Confirmed concretely: a real PCSX2-via-RetroArch
   // SIGABRT (reproducible outside NexusEmu entirely, unrelated to any code here)
-  // landed at ~2.6s in one run — past the old 1200ms check — so the launch
+  // landed at ~2.6s in one run â€” past the old 1200ms check â€” so the launch
   // endpoint reported "success" and handed back a PID that was already dead by
   // the time the response reached the client, with zero error shown to the user.
   // 3000ms catches this reliably while still being a short, reasonable wait.
@@ -6969,7 +6990,7 @@ async function startServer() {
   }
 
   // Shared by every platform that launches via a standalone (non-RetroArch)
-  // emulator — PS3/RPCS3, GameCube+Wii/Dolphin, Xbox/xemu, Xbox 360/Xenia.
+  // emulator â€” PS3/RPCS3, GameCube+Wii/Dolphin, Xbox/xemu, Xbox 360/Xenia.
   // Each used to be its own hand-copied ~30-line block; factored out once a
   // fourth copy (Xbox) was about to make it five.
   async function launchStandaloneEmulatorAndRespond(
@@ -6987,7 +7008,7 @@ async function startServer() {
         : process.env;
       const { pid, alive, stderr } = await spawnAndVerify(exe, args, env, 3000);
       if (!alive) {
-        log('ERROR', `${emulatorLabel} exited immediately — ${stderr}`, 'launcher');
+        log('ERROR', `${emulatorLabel} exited immediately â€” ${stderr}`, 'launcher');
         res.status(500).json({ success: false, error: `${emulatorLabel} crashed on start: ${stderr || 'unknown error'}` });
         return;
       }
@@ -6996,7 +7017,7 @@ async function startServer() {
         const session: RunningSession = { pid, startedAt: Date.now(), userId: launchPayload?.userId, title: game.title ?? game_id, platform: game.platform ?? 'unknown' };
         runningEmulatorPids.set(game_id, session);
       }
-      log('INFO', `${emulatorLabel} running (PID:${pid}) — ${game.title}`, 'launcher');
+      log('INFO', `${emulatorLabel} running (PID:${pid}) â€” ${game.title}`, 'launcher');
       res.json({ success: true, pid, emulator: emulatorLabel.toLowerCase() });
     } catch (err) {
       log('ERROR', `${emulatorLabel} launch failed: ${err}`, 'launcher');
@@ -7004,7 +7025,7 @@ async function startServer() {
     }
   }
 
-  // ── Game Launch ───────────────────────────────────────────────
+  // â”€â”€ Game Launch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/games/launch", async (req, res) => {
     const { game_id, gpu_profile, client_rom_folder, prefer_client, client_has_rom, netplay } = req.body as {
       game_id: string;
@@ -7017,14 +7038,14 @@ async function startServer() {
       // reimplement input sync itself. role 'host' binds a netplay server on
       // `port`; 'client' connects out to `hostAddress:port`. Both instances
       // still go through the normal launch path below (core resolution, save
-      // isolation, BIOS checks) — netplay is just extra args on top.
+      // isolation, BIOS checks) â€” netplay is just extra args on top.
       netplay?: { role: "host" | "client"; hostAddress?: string; port?: number; nick?: string };
     };
 
     // Collapse duplicate launches for the same game. A single click in the UI
     // can reach here more than once (retry-on-focus, a double tap, two devices
     // pressing Play together); without this each one spawns its own emulator.
-    // Netplay launches opt out — host and client are genuinely two instances.
+    // Netplay launches opt out â€” host and client are genuinely two instances.
     if (game_id && !netplay) {
       const inFlight = inFlightHostLaunches.get(game_id);
       if (inFlight) {
@@ -7041,7 +7062,7 @@ async function startServer() {
 
     let config = await getVaultConfig();
 
-    if (!config.root_path) return res.status(400).json({ error: "Vault root not configured — set it in the Vault Manager" });
+    if (!config.root_path) return res.status(400).json({ error: "Vault root not configured â€” set it in the Vault Manager" });
 
     let game: Record<string, any> | null = null;
     if (dbConnected && pool) {
@@ -7076,14 +7097,14 @@ async function startServer() {
     // Best effort auto-detect host emulator path. In client-preferred mode we do not fail
     // if this is missing, because browser play/download paths can still work.
     let hostEmulatorPath = String(config.emulator_path ?? "");
-    // vault_config is a single shared row, not per-host — a path saved from one
+    // vault_config is a single shared row, not per-host â€” a path saved from one
     // machine (e.g. a Windows K:\retroarch\retroarch.exe) gets blindly trusted on
     // every other machine reading the same config, failing with ENOENT instead of
     // falling back to auto-detect. Validate it actually exists here first.
     if (hostEmulatorPath) {
       try { await fsAccess(hostEmulatorPath); }
       catch {
-        log("WARN", `Configured emulator path not found on this host: ${hostEmulatorPath} — falling back to auto-detect`, "launcher");
+        log("WARN", `Configured emulator path not found on this host: ${hostEmulatorPath} â€” falling back to auto-detect`, "launcher");
         hostEmulatorPath = "";
       }
     }
@@ -7108,7 +7129,7 @@ async function startServer() {
     }
 
     // Client-preferred mode: never launch on host, return explicit options for client UX.
-    // NOTE: We cannot check the client's local filesystem from the server — the client
+    // NOTE: We cannot check the client's local filesystem from the server â€” the client
     //       tracks its own downloaded ROMs via localStorage. Always offer in-browser play
     //       when the ROM is on the host so EmulatorJS can fetch it directly.
     if (prefer_client) {
@@ -7124,7 +7145,7 @@ async function startServer() {
             canPlayInBrowser: false,
           },
           error: client_has_rom
-            ? "ROM is on this device — launch locally or stream from host."
+            ? "ROM is on this device â€” launch locally or stream from host."
             : "ROM not on this device. Download it to this PC first, or stream from host.",
         });
       }
@@ -7160,7 +7181,7 @@ async function startServer() {
     }
 
 
-  // ── PS2: use pcsx2 RetroArch core (installed) or standalone PCSX2 ─────
+  // â”€â”€ PS2: use pcsx2 RetroArch core (installed) or standalone PCSX2 â”€â”€â”€â”€â”€
     // An explicit choice from the Launch Failed screen goes straight to that
     // emulator, rather than walking the chain from the top and failing again on
     // the one the user just watched crash.
@@ -7207,7 +7228,7 @@ async function startServer() {
             exe = 'wine';
             // -batch boots straight into the game; without it, passing just
             // the ROM path can load the game behind PCSX2's own library
-            // window instead of actually starting it — indistinguishable
+            // window instead of actually starting it â€” indistinguishable
             // from "the emulator window is just black" from the outside.
             spawnArgs = [pcsx2Info.path, '--', '-batch', romPath];
           } else {
@@ -7217,10 +7238,10 @@ async function startServer() {
 
           const { pid, alive, stderr } = await spawnAndVerify(exe, spawnArgs, spawnEnv, 3000);
           if (!alive) {
-            log('ERROR', `PS2 emulator exited immediately — ${stderr}`, 'launcher');
+            log('ERROR', `PS2 emulator exited immediately â€” ${stderr}`, 'launcher');
             // The old hint always assumed a missing BIOS/core, which is wrong (and
             // actively misleading) whenever both are actually present and the crash
-            // has a different cause — confirmed reproducible once already: this
+            // has a different cause â€” confirmed reproducible once already: this
             // exact core+BIOS+ROM combo can SIGABRT consistently even launched
             // directly outside NexusEmu entirely, pointing at a GPU/driver-level
             // OpenGL context crash, not a missing-file problem. Check what's
@@ -7232,13 +7253,13 @@ async function startServer() {
               if (!biosPresent) {
                 hint = `Ensure a PS2 BIOS (.bin) is in RetroArch's system/pcsx2/bios/ folder${biosCheck?.dir ? ` (${biosCheck.dir})` : ''} and the pcsx2_libretro core is installed.`;
               } else {
-                hint = 'BIOS and core are both present and correctly detected — this crash is happening after that point, most likely a GPU driver / OpenGL compatibility issue with the pcsx2_libretro core on this machine. Try: updating your GPU driver, or switching the core\'s renderer to Software in RetroArch\'s Quick Menu → Core Options (Renderer), or using standalone PCSX2 instead where the renderer can be changed before first launch.';
+                hint = 'BIOS and core are both present and correctly detected â€” this crash is happening after that point, most likely a GPU driver / OpenGL compatibility issue with the pcsx2_libretro core on this machine. Try: updating your GPU driver, or switching the core\'s renderer to Software in RetroArch\'s Quick Menu â†’ Core Options (Renderer), or using standalone PCSX2 instead where the renderer can be changed before first launch.';
               }
             } else {
-              hint = 'PCSX2 needs a PS2 BIOS dump configured before it can run any game. Open PCSX2 itself (Settings → BIOS) and set a valid BIOS file — a SIGABRT crash with no other output almost always means PCSX2 has none configured yet. Try launching PCSX2 directly (outside NexusEmu) once to confirm it starts cleanly.';
+              hint = 'PCSX2 needs a PS2 BIOS dump configured before it can run any game. Open PCSX2 itself (Settings â†’ BIOS) and set a valid BIOS file â€” a SIGABRT crash with no other output almost always means PCSX2 has none configured yet. Try launching PCSX2 directly (outside NexusEmu) once to confirm it starts cleanly.';
             }
             // PCSX2 died. Before surfacing an error, walk the rest of the
-            // fallback chain — Play! uses a different renderer and commonly
+            // fallback chain â€” Play! uses a different renderer and commonly
             // runs where the pcsx2 core hits this machine's OpenGL crash.
             const fb = await launchWithFallback('ps2', romPath, spawnEnv);
             if (fb.ok) {
@@ -7249,13 +7270,13 @@ async function startServer() {
                   userId: fbPayload?.userId, title: game.title ?? game_id, platform: 'ps2',
                 });
               }
-              log('INFO', `PS2 running via ${fb.label} (PID:${fb.pid}) — ${game.title}`, 'launcher');
+              log('INFO', `PS2 running via ${fb.label} (PID:${fb.pid}) â€” ${game.title}`, 'launcher');
               return res.json({
                 success: true, pid: fb.pid, emulator: fb.emulator, mode: 'fallback',
                 fellBackFrom: 'pcsx2', tried: fb.tried,
               });
             }
-            // Every option is exhausted — now the error is real.
+            // Every option is exhausted â€” now the error is real.
             return res.status(500).json({
               success: false,
               error: `PS2 emulator crashed on start: ${stderr || 'check BIOS and core'}`,
@@ -7270,7 +7291,7 @@ async function startServer() {
             const sess2: RunningSession = { pid, startedAt: Date.now(), userId: launchPayload2?.userId, title: game.title ?? game_id, platform: 'ps2' };
             runningEmulatorPids.set(game_id, sess2);
           }
-          log('INFO', `PS2 running (${pcsx2Info.isRetroArchCore ? 'RetroArch/pcsx2' : pcsx2Info.isWine ? 'wine' : 'native'}, PID:${pid}) — ${game.title}`, 'launcher');
+          log('INFO', `PS2 running (${pcsx2Info.isRetroArchCore ? 'RetroArch/pcsx2' : pcsx2Info.isWine ? 'wine' : 'native'}, PID:${pid}) â€” ${game.title}`, 'launcher');
           return res.json({ success: true, pid, emulator: 'pcsx2', mode: pcsx2Info.isRetroArchCore ? 'retroarch_core' : 'standalone' });
         } catch (err) {
           log('ERROR', `PS2 launch failed: ${err}`, 'launcher');
@@ -7280,9 +7301,9 @@ async function startServer() {
       // If standalone not available, fall through to normal RetroArch launch with pcsx2 core
     }
 
-    // ── Standalone (non-RetroArch) emulators ─────────────────────
+    // â”€â”€ Standalone (non-RetroArch) emulators â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // PS3/RPCS3, GameCube+Wii/Dolphin, Xbox/xemu, Xbox 360/Xenia all launch
-    // this way instead of via a libretro core — each used to be (or, for
+    // this way instead of via a libretro core â€” each used to be (or, for
     // Xbox, would have become) its own ~30-line hand-copied block; see
     // launchStandaloneEmulatorAndRespond above.
     const standalonePlatform = (game.platform ?? '').toLowerCase();
@@ -7321,12 +7342,12 @@ async function startServer() {
         label: 'Xenia',
         detect: detectXeniaPath,
         buildArgs: (rom) => [rom],
-        installHint: 'Xenia has no official Linux build — install it on Windows/Proton, or run it via Wine and set XENIA_PATH.',
+        installHint: 'Xenia has no official Linux build â€” install it on Windows/Proton, or run it via Wine and set XENIA_PATH.',
       },
       switch: {
         label: 'Ryujinx',
         // Ryujinx and the Yuzu-lineage forks both just take the ROM path as
-        // a positional arg, so the flavor distinction doesn't matter here —
+        // a positional arg, so the flavor distinction doesn't matter here â€”
         // only for the auto-fix install step, which needs to know which
         // flatpak ID to install.
         detect: async () => (await detectSwitchEmuPath())?.path ?? null,
@@ -7363,11 +7384,11 @@ async function startServer() {
       });
     }
 
-    // ROM found on client only (non-prefer_client path, legacy) — tell client to launch locally
+    // ROM found on client only (non-prefer_client path, legacy) â€” tell client to launch locally
     // (This path is now unreachable for remote clients since prefer_client handles them above,
     //  but keep for direct localhost access with a configured client_rom_folder)
 
-    // ROM exists on host — proceed with launch on host
+    // ROM exists on host â€” proceed with launch on host
     if (!romPath) {
       return res.status(404).json({ error: "ROM file not found on host. Reconnect or copy ROMs into the laptop vault." });
     }
@@ -7383,7 +7404,7 @@ async function startServer() {
 
     // Failsafe: stop EVERY running emulator before relaunching, not just one
     // matching this game_id. The host drives a single display, so a second
-    // emulator is never wanted — it just steals focus and input from the first.
+    // emulator is never wanted â€” it just steals focus and input from the first.
     const hadRunning = runningEmulatorPids.size > 0;
     killAllRunningEmulators();
     if (hadRunning) await new Promise(r => setTimeout(r, 400));
@@ -7393,7 +7414,7 @@ async function startServer() {
     const coreInfo = PLATFORM_CORES[game.platform ?? "unknown"] ?? PLATFORM_CORES.unknown;
     const launchUserId = String((req as any).authPayload?.userId ?? "shared");
 
-    // ── BIOS interceptor ──────────────────────────────────────────────────
+    // â”€â”€ BIOS interceptor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // A platform that needs a BIOS used to launch anyway and die inside the
     // emulator, which surfaced as a blank screen or a generic crash. Answer
     // 202 instead: the launch has not failed, it is waiting on the player to
@@ -7435,14 +7456,14 @@ async function startServer() {
       try {
         await fsAccess(corePath);
       } catch {
-        log("INFO", `Core missing — auto-installing ${coreInfo.coreId}…`, "launcher");
+        log("INFO", `Core missing â€” auto-installing ${coreInfo.coreId}â€¦`, "launcher");
         const coreInstall = await downloadCoreById(coreInfo.coreId).catch((err) => ({ ok: false, path: undefined, error: String(err) }));
         if (coreInstall?.ok && coreInstall.path) {
           resolvedCorePath = coreInstall.path;
         } else {
           return res.status(422).json({
             success: false,
-            error: `Core not installed: ${coreInfo.coreName} (${coreInfo.coreId}) — auto-install failed${coreInstall?.error ? `: ${coreInstall.error}` : ""}`,
+            error: `Core not installed: ${coreInfo.coreName} (${coreInfo.coreId}) â€” auto-install failed${coreInstall?.error ? `: ${coreInstall.error}` : ""}`,
             core_id: coreInfo.coreId, core_name: coreInfo.coreName, platform: game.platform,
             options: { canDownload: true, canStream: false, canLaunchLocal: false, canPlayInBrowser },
           });
@@ -7455,7 +7476,7 @@ async function startServer() {
       // other's progress. --appendconfig is RetroArch's documented way to
       // override directories per-launch without touching the global config.
       // The override content only depends on launchUserId, so it's the same
-      // file on every launch for a given user — skip the mkdir/write once
+      // file on every launch for a given user â€” skip the mkdir/write once
       // it's already been created this process lifetime.
       const nativeSaveDir = path.join(PERSIST_DIR, "native-saves", launchUserId);
       const nativeStateDir = path.join(PERSIST_DIR, "native-states", launchUserId);
@@ -7506,7 +7527,7 @@ async function startServer() {
       const { pid, alive, stderr } = await spawnAndVerify(emulatorExe, args, spawnEnv, 3000);
 
       if (!alive) {
-        log("ERROR", `Emulator exited immediately — ${stderr}`, "launcher");
+        log("ERROR", `Emulator exited immediately â€” ${stderr}`, "launcher");
         return res.status(500).json({
           success: false,
           error: `Emulator crashed on start: ${stderr || 'unknown error'}`,
@@ -7519,7 +7540,7 @@ async function startServer() {
         const newSession: RunningSession = { pid, startedAt: Date.now(), userId: launchPayload?.userId, title: game.title ?? game_id, platform: game.platform ?? 'unknown' };
         runningEmulatorPids.set(game_id, newSession);
       }
-      log("INFO", `Emulator running (PID: ${pid}) — ${game.title}`, "launcher");
+      log("INFO", `Emulator running (PID: ${pid}) â€” ${game.title}`, "launcher");
       logActivity({ userId: launchPayload?.userId, username: launchPayload?.username, ip: (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.ip, userAgent: req.headers['user-agent'], method: 'POST', path: '/api/games/launch', eventType: 'game_launch', targetType: 'game', targetId: game_id, targetName: game.title });
       res.json({ success: true, pid });
     } catch (err) {
@@ -7528,7 +7549,7 @@ async function startServer() {
     }
   });
 
-  // ── Launch Pre-flight Check ─────────────────────────────────────
+  // â”€â”€ Launch Pre-flight Check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Returns structured readiness info before attempting a launch.
   app.get("/api/games/launch/check/:game_id", async (req, res) => {
     const { game_id } = req.params;
@@ -7548,11 +7569,11 @@ async function startServer() {
     const checks: { name: string; ok: boolean; detail: string }[] = [];
 
     // 1. ROM
-    checks.push({ name: 'ROM file', ok: !!romPath, detail: romPath ? `Found: ${path.basename(romPath)}` : 'ROM not in vault — add it or re-scan' });
+    checks.push({ name: 'ROM file', ok: !!romPath, detail: romPath ? `Found: ${path.basename(romPath)}` : 'ROM not in vault â€” add it or re-scan' });
 
-    // 2/3. Emulator + core — this used to always assume the generic
+    // 2/3. Emulator + core â€” this used to always assume the generic
     // RetroArch-core path, so it reported PS3/GameCube/Wii (which actually
-    // launch via standalone RPCS3/Dolphin — see /api/games/launch) as
+    // launch via standalone RPCS3/Dolphin â€” see /api/games/launch) as
     // "core not installed" even when they were fully playable, and reported
     // them fixed once a completely unrelated libretro core got downloaded.
     // Mirror the same per-platform branching /api/games/launch actually uses.
@@ -7561,33 +7582,33 @@ async function startServer() {
     let coreDetail = '';
     if (platform === 'ps3') {
       emuPath = await detectRpcs3Path();
-      checks.push({ name: 'Emulator (RPCS3)', ok: !!emuPath, detail: emuPath ? emuPath : 'RPCS3 not found — install it or set RPCS3_PATH' });
+      checks.push({ name: 'Emulator (RPCS3)', ok: !!emuPath, detail: emuPath ? emuPath : 'RPCS3 not found â€” install it or set RPCS3_PATH' });
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'gamecube' || platform === 'wii') {
       emuPath = await detectDolphinPath();
-      checks.push({ name: 'Emulator (Dolphin)', ok: !!emuPath, detail: emuPath ? emuPath : 'Dolphin not found — install it or set DOLPHIN_PATH' });
+      checks.push({ name: 'Emulator (Dolphin)', ok: !!emuPath, detail: emuPath ? emuPath : 'Dolphin not found â€” install it or set DOLPHIN_PATH' });
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'xbox') {
       emuPath = await detectXemuPath();
-      checks.push({ name: 'Emulator (xemu)', ok: !!emuPath, detail: emuPath ? emuPath : 'xemu not found — install it or set XEMU_PATH' });
+      checks.push({ name: 'Emulator (xemu)', ok: !!emuPath, detail: emuPath ? emuPath : 'xemu not found â€” install it or set XEMU_PATH' });
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'xbox360') {
       emuPath = await detectXeniaPath();
-      checks.push({ name: 'Emulator (Xenia)', ok: !!emuPath, detail: emuPath ? emuPath : 'Xenia not found — no Linux build exists, run via Windows/Proton and set XENIA_PATH' });
+      checks.push({ name: 'Emulator (Xenia)', ok: !!emuPath, detail: emuPath ? emuPath : 'Xenia not found â€” no Linux build exists, run via Windows/Proton and set XENIA_PATH' });
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'switch') {
       const switchEmu = await detectSwitchEmuPath();
       emuPath = switchEmu?.path ?? null;
-      checks.push({ name: 'Emulator (Ryujinx)', ok: !!emuPath, detail: emuPath ? `${emuPath} (${switchEmu!.flavor})` : 'No Switch emulator found — install Ryujinx or set RYUJINX_PATH' });
+      checks.push({ name: 'Emulator (Ryujinx)', ok: !!emuPath, detail: emuPath ? `${emuPath} (${switchEmu!.flavor})` : 'No Switch emulator found â€” install Ryujinx or set RYUJINX_PATH' });
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'ps2') {
       const pcsx2Info = await detectPcsx2Path();
       emuPath = pcsx2Info?.path ?? null;
-      checks.push({ name: 'Emulator (PCSX2)', ok: !!emuPath, detail: emuPath ? emuPath : 'PCSX2 not found — install standalone or use the RetroArch core' });
+      checks.push({ name: 'Emulator (PCSX2)', ok: !!emuPath, detail: emuPath ? emuPath : 'PCSX2 not found â€” install standalone or use the RetroArch core' });
       coreOk = !!emuPath; coreDetail = pcsx2Info?.isRetroArchCore ? 'Using RetroArch pcsx2 core' : 'Not required (standalone emulator)';
     } else {
       emuPath = await detectRetroArchPath();
-      checks.push({ name: 'Emulator (RetroArch)', ok: !!emuPath, detail: emuPath ? emuPath : 'RetroArch not found — install via snap or set path in Settings' });
+      checks.push({ name: 'Emulator (RetroArch)', ok: !!emuPath, detail: emuPath ? emuPath : 'RetroArch not found â€” install via snap or set path in Settings' });
       if (emuPath) {
         const coresDir = await getCoresDir().catch(() => null);
         const coreInfo = PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown;
@@ -7597,7 +7618,7 @@ async function startServer() {
           if (corePath) { await fsAccess(corePath); coreOk = true; coreDetail = `${coreInfo.coreName} installed`; }
           else coreDetail = 'Cores dir not found';
         } catch {
-          coreDetail = `${coreInfo.coreName} core not installed — open Core Forge to download it`;
+          coreDetail = `${coreInfo.coreName} core not installed â€” open Core Forge to download it`;
         }
       } else {
         coreDetail = 'Skipped (no emulator)';
@@ -7614,9 +7635,9 @@ async function startServer() {
         biosOk = !!biosResult.file;
         biosDetail = biosResult.file
           ? `BIOS: ${biosResult.file}`
-          : `No .bin BIOS found in ${biosResult.dir} — place PS2 BIOS (.bin) there`;
+          : `No .bin BIOS found in ${biosResult.dir} â€” place PS2 BIOS (.bin) there`;
       } else {
-        // Dir doesn't exist — compute canonical expected path for user guidance
+        // Dir doesn't exist â€” compute canonical expected path for user guidance
         const coresDir = await getCoresDir().catch(() => null);
         const canonicalPath = coresDir
           ? path.join(path.dirname(coresDir), 'system', 'pcsx2', 'bios')
@@ -7630,11 +7651,11 @@ async function startServer() {
     res.json({ ok: allOk, checks, game: { id: game.id, title: game.title, platform: game.platform }, romPath });
   });
 
-  // ── Setup Request — client asks host to install emulator/core ─
+  // â”€â”€ Setup Request â€” client asks host to install emulator/core â”€
   // In-memory queue; host clients receive via SSE /api/events stream
   const setupRequests: { id: string; game_id: string; game_title: string; platform: string; need: 'emulator' | 'core'; core_id?: string; requestedAt: string; clientIp: string }[] = [];
 
-  // ROM request queue — clients can flag a missing ROM for the host to source
+  // ROM request queue â€” clients can flag a missing ROM for the host to source
   const romRequestQueue: { id: string; title: string; platform: string; requestedAt: number; deduped?: boolean }[] = [];
   app.post("/api/roms/request", express.json(), (req, res) => {
     const { title, platform } = req.body as { title?: string; platform?: string };
@@ -7694,13 +7715,13 @@ async function startServer() {
       ? {
           what: 'RetroArch emulator',
           install_steps: process.platform === 'linux'
-            ? ['sudo snap install retroarch', '  — or —', 'flatpak install flathub org.libretro.RetroArch']
+            ? ['sudo snap install retroarch', '  â€” or â€”', 'flatpak install flathub org.libretro.RetroArch']
             : ['Download from retroarch.com', 'Install to default location'],
           folder: process.platform === 'linux' ? '/snap/bin/retroarch  (or /usr/bin/retroarch)' : 'C:\\RetroArch\\retroarch.exe',
         }
       : {
           what: `${coreInfo.coreName} core  (${coreInfo.coreId}_libretro)`,
-          install_steps: ['Open NexusEmu → Core Forge', `Search for "${coreInfo.coreName}"`, 'Click Download'],
+          install_steps: ['Open NexusEmu â†’ Core Forge', `Search for "${coreInfo.coreName}"`, 'Click Download'],
           folder: coresDir ?? 'RetroArch/cores/',
           rom_folder: vaultRoot ? path.join(vaultRoot, platform.toUpperCase()) : `ROMs/${platform.toUpperCase()}/`,
         };
@@ -7732,7 +7753,7 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // ── Game Streaming — MJPEG screen capture via ffmpeg ──────────
+  // â”€â”€ Game Streaming â€” MJPEG screen capture via ffmpeg â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Track active stream session per connection
   const activeStreams = new Map<express.Response, ReturnType<typeof spawn>>();
   const activeStreamStartedAt = new Map<express.Response, number>();
@@ -7936,7 +7957,7 @@ async function startServer() {
         "-fflags", "nobuffer",
         // No "-flags low_delay" here. Placed after -i it lands on the MJPEG
         // ENCODER, which rejects it ("low delay forcing is only available for
-        // mpeg2") and then fails to open at all — ffmpeg exits with
+        // mpeg2") and then fails to open at all â€” ffmpeg exits with
         // "Conversion failed!" before writing a single frame. stderr is
         // discarded here, so the only symptom was a 200 response that streamed
         // zero bytes: every viewer joining a host in stream mode got a
@@ -7959,7 +7980,7 @@ async function startServer() {
         "-fflags", "nobuffer",
         // No "-flags low_delay" here. Placed after -i it lands on the MJPEG
         // ENCODER, which rejects it ("low delay forcing is only available for
-        // mpeg2") and then fails to open at all — ffmpeg exits with
+        // mpeg2") and then fails to open at all â€” ffmpeg exits with
         // "Conversion failed!" before writing a single frame. stderr is
         // discarded here, so the only symptom was a 200 response that streamed
         // zero bytes: every viewer joining a host in stream mode got a
@@ -7982,7 +8003,7 @@ async function startServer() {
         "-fflags", "nobuffer",
         // No "-flags low_delay" here. Placed after -i it lands on the MJPEG
         // ENCODER, which rejects it ("low delay forcing is only available for
-        // mpeg2") and then fails to open at all — ffmpeg exits with
+        // mpeg2") and then fails to open at all â€” ffmpeg exits with
         // "Conversion failed!" before writing a single frame. stderr is
         // discarded here, so the only symptom was a 200 response that streamed
         // zero bytes: every viewer joining a host in stream mode got a
@@ -8103,7 +8124,7 @@ async function startServer() {
     });
     ffmpegProc.on("error", () => {
       try {
-        res.write("--mjpegframe\r\nContent-Type: text/plain\r\n\r\nffmpeg error — is ffmpeg installed on the host?\r\n");
+        res.write("--mjpegframe\r\nContent-Type: text/plain\r\n\r\nffmpeg error â€” is ffmpeg installed on the host?\r\n");
       } catch {}
       cleanup();
     });
@@ -8128,7 +8149,7 @@ async function startServer() {
     res.json({ success: true, stopped });
   });
 
-  // ── Live HLS of the host screen (co-op "stream" mode) ────────────────────
+  // â”€â”€ Live HLS of the host screen (co-op "stream" mode) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // MultiplayerHub's stream viewer POSTs /api/stream/hls/start and then plays
   // /api/stream/hls/master.m3u8 with hls.js. Neither route existed, so a
   // friend joining a stream-mode session got five retries and then an error.
@@ -8304,7 +8325,7 @@ async function startServer() {
    * Deliver emulator keystrokes to whatever is running on the host.
    *
    * Extracted from POST /api/stream/input so the Remote Play socket can reuse
-   * the exact same delivery path — two implementations of key mapping would
+   * the exact same delivery path â€” two implementations of key mapping would
    * drift, and the streamed-input path is timing sensitive enough that a
    * second copy running slightly different xdotool batching would be a real
    * behavioural difference, not a cosmetic one.
@@ -8314,10 +8335,10 @@ async function startServer() {
     if (process.platform === "linux") {
       if (xdotoolAvailable === null) {
         xdotoolAvailable = await execAsync("which xdotool").then(() => true).catch(() => false);
-        if (!xdotoolAvailable) log("WARN", "xdotool not found on host — remote input will not work until it's installed", "stream");
+        if (!xdotoolAvailable) log("WARN", "xdotool not found on host â€” remote input will not work until it's installed", "stream");
       }
       if (!xdotoolAvailable) {
-        return { ok: false, error: "xdotool is not installed on the host — remote input can't be delivered. Install it (e.g. `sudo apt install xdotool`) and try again." };
+        return { ok: false, error: "xdotool is not installed on the host â€” remote input can't be delivered. Install it (e.g. `sudo apt install xdotool`) and try again." };
       }
       const m: Record<string, string> = { up: "Up", down: "Down", left: "Left", right: "Right", a: "z", b: "x", start: "Return", select: "space" };
       const xdoKeys = keys.map((k) => m[String(k).toLowerCase()] ?? String(k)).filter(Boolean);
@@ -8377,13 +8398,13 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // ── Remote Play ───────────────────────────────────────────────────────────
+  // â”€â”€ Remote Play â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The client (RemotePlay bundle) expects:
   //   POST /api/remote-play/start -> { ok, wsUrl, session: { streamFeedUrl } }
   //   then opens a WebSocket at wsUrl and pushes controller input down it
   //   POST /api/remote-play/stop  -> fire and forget
   //
-  // These three were missing entirely — every attempt to start Remote Play hit
+  // These three were missing entirely â€” every attempt to start Remote Play hit
   // the JSON 404 and surfaced as "No such API route". Video already works via
   // the existing MJPEG feed at /api/stream/feed; what was absent is the session
   // handshake and the input channel, so that is what this adds. Input is
@@ -8465,7 +8486,7 @@ async function startServer() {
   });
 
 
-  // ── PC GAME LIBRARY (Steam / Epic / GOG / Xbox / Lutris / Heroic) ───────────
+  // â”€â”€ PC GAME LIBRARY (Steam / Epic / GOG / Xbox / Lutris / Heroic) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   interface PCGame {
     id: string; title: string;
@@ -8488,10 +8509,10 @@ async function startServer() {
     // Runtime state
     running?: boolean;
     // Populated asynchronously after the initial scan by enrichSteamGameMetadata
-    // — categorization the library never had (every PC game landed in one flat
+    // â€” categorization the library never had (every PC game landed in one flat
     // list with no genre or VR/flatscreen distinction), even though the data
     // was one free public API call away for every Steam title. undefined means
-    // "not enriched yet", not "no genres" — the frontend should treat it as
+    // "not enriched yet", not "no genres" â€” the frontend should treat it as
     // loading rather than empty.
     genres?: string[];
     vrSupport?: 'vr-only' | 'vr-supported' | 'none';
@@ -8503,7 +8524,7 @@ async function startServer() {
 
   // Genre/VR metadata rarely changes for an already-released game, so this is
   // cached far longer than the PC library scan itself (which re-checks
-  // installed/playtime state every 5 min) — no reason to re-hit Steam's API
+  // installed/playtime state every 5 min) â€” no reason to re-hit Steam's API
   // for the same appid every scan cycle.
   const steamMetaCache = new Map<number, { genres: string[]; vrSupport: 'vr-only' | 'vr-supported' | 'none'; ts: number }>();
   const STEAM_META_TTL = 7 * 24 * 3600_000;
@@ -8534,7 +8555,7 @@ async function startServer() {
   // response holds) so a client that re-fetches /api/pc-games/library a few
   // seconds later sees progressively-enriched results without needing to
   // trigger a whole new scan. One at a time with a short delay between
-  // requests — Steam's store API isn't published as ok-to-hammer, and
+  // requests â€” Steam's store API isn't published as ok-to-hammer, and
   // there's no user-facing urgency to enrich 60+ games in the first second.
   async function enrichSteamGameMetadata(games: PCGame[]) {
     if (steamMetaEnrichRunning) return;
@@ -8561,7 +8582,7 @@ async function startServer() {
     }
   }
 
-  // Cached /proc/mounts — refreshed every 5 min to avoid sync blocking on every PC game scan
+  // Cached /proc/mounts â€” refreshed every 5 min to avoid sync blocking on every PC game scan
   let _procMountsCache: string[] | null = null;
   let _procMountsCacheAt = 0;
   function getCachedMounts(): string[] {
@@ -8653,7 +8674,7 @@ async function startServer() {
     }
 
     // libraryfolders.vdf only reveals additional drives if the *primary*
-    // root has its own steamapps folder to read it from — a setup where
+    // root has its own steamapps folder to read it from â€” a setup where
     // Steam's main install has no local library at all (everything moved to
     // an external drive) has nothing to read that from, so a secondary
     // library on another mounted drive would otherwise never be found.
@@ -8792,7 +8813,7 @@ async function startServer() {
     return games;
   }
 
-  // ── Lutris (Linux) — reads PGA database ───────────────────────────────────
+  // â”€â”€ Lutris (Linux) â€” reads PGA database â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function scanLutrisGames(): Promise<PCGame[]> {
     if (process.platform !== 'linux') return [];
     const games: PCGame[] = [];
@@ -8800,7 +8821,7 @@ async function startServer() {
     const dbPath = path.join(home, '.local', 'share', 'lutris', 'pga.db');
     try {
       await fsAccess(dbPath);
-      // Use sqlite3 CLI to query — avoids needing a native Node binding
+      // Use sqlite3 CLI to query â€” avoids needing a native Node binding
       const { stdout } = await execAsync(
         `sqlite3 "${dbPath}" "SELECT id,name,slug,directory,installed,runner FROM games WHERE installed=1 LIMIT 500"`,
         { timeout: 5000 }
@@ -8825,7 +8846,7 @@ async function startServer() {
     return games;
   }
 
-  // ── Heroic Games Launcher (Linux — Epic + GOG via Wine/Proton) ────────────
+  // â”€â”€ Heroic Games Launcher (Linux â€” Epic + GOG via Wine/Proton) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   async function scanHeroicGames(): Promise<PCGame[]> {
     if (process.platform !== 'linux') return [];
     const games: PCGame[] = [];
@@ -8895,7 +8916,7 @@ async function startServer() {
     all.sort((a, b) => ((order[a.source] ?? 7) - (order[b.source] ?? 7)) || a.title.localeCompare(b.title));
     pcGamesCache = all; pcGamesCacheTime = Date.now();
     log('INFO', `PC library: ${all.length} games (steam:${r0.status === 'fulfilled' ? r0.value.length : 0} lutris:${r4.status === 'fulfilled' ? r4.value.length : 0} heroic:${r5.status === 'fulfilled' ? r5.value.length : 0})`, 'pcgames');
-    void enrichSteamGameMetadata(all); // fire-and-forget — see its own comment
+    void enrichSteamGameMetadata(all); // fire-and-forget â€” see its own comment
     return all;
   }
 
@@ -8918,7 +8939,7 @@ async function startServer() {
     }
 
     if (uri.startsWith('steam://')) {
-      // Try native steam → flatpak steam → xdg-open, in order
+      // Try native steam â†’ flatpak steam â†’ xdg-open, in order
       const tryLaunch = (cmd: string, args: string[]): Promise<boolean> =>
         new Promise(resolve => {
           const p = spawn(cmd, args, { detached: true, stdio: 'ignore' });
@@ -8981,7 +9002,7 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // Running games detection — checks process list for known game processes
+  // Running games detection â€” checks process list for known game processes
   app.get('/api/pc-games/running', async (_req, res) => {
     try {
       const cmd = process.platform === 'win32'
@@ -9002,7 +9023,7 @@ async function startServer() {
             running.push({ pid, name: 'Steam', source: 'steam' });
             continue;
           }
-          // Games launched via steam://rungameid — Steam sets STEAM_APPID env
+          // Games launched via steam://rungameid â€” Steam sets STEAM_APPID env
           const appIdMatch = args.match(/SteamAppId=(\d+)/) ?? args.match(/steam_appid=(\d+)/i);
           if (appIdMatch) running.push({ pid, name: comm, appId: appIdMatch[1], source: 'steam' });
         }
@@ -9071,13 +9092,13 @@ async function startServer() {
     });
   });
 
-  // ── Steam: auto-detect local user IDs ─────────────────────────
+  // â”€â”€ Steam: auto-detect local user IDs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get('/api/steam/ids', async (_req, res) => {
     try { res.json({ ids: await getSteamUserIds() }); }
     catch { res.json({ ids: [] }); }
   });
 
-  // ── Steam: trigger install/download for a given appid ─────────
+  // â”€â”€ Steam: trigger install/download for a given appid â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post('/api/steam/install', express.json(), async (req, res) => {
     const appId = String((req.body as any)?.appId ?? '').trim();
     if (!appId || !/^\d+$/.test(appId)) return res.status(400).json({ error: 'appId required' });
@@ -9086,7 +9107,7 @@ async function startServer() {
     return res.json({ ok: true, appId });
   });
 
-  // ── Steam: active download progress (polls .acf on host) ──────
+  // â”€â”€ Steam: active download progress (polls .acf on host) â”€â”€â”€â”€â”€â”€
   app.get('/api/steam/download-status', async (_req, res) => {
     try {
       const games = await scanSteamGames();
@@ -9099,7 +9120,7 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
-  // ── Steam: fetch full owned library via Steam Web API ─────────
+  // â”€â”€ Steam: fetch full owned library via Steam Web API â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get('/api/steam/owned', async (req, res) => {
     const steamId = String(req.query.steamId ?? '').trim();
     const apiKey  = String(req.query.apiKey  ?? '').trim();
@@ -9126,7 +9147,7 @@ async function startServer() {
     } catch (e) { res.status(500).json({ error: String(e) }); }
   });
 
-  // ── qBittorrent Integration ───────────────────────────────────
+  // â”€â”€ qBittorrent Integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Lets users connect their own qBittorrent instance (running locally on the host PC).
   // All operations proxy to qBittorrent's Web API. The user manages their own downloads.
 
@@ -9160,13 +9181,13 @@ async function startServer() {
   // Known download locations in priority order (most preferred first).
   // bestDownloadPath() picks the one with the most free space above MIN_FREE_BYTES.
   const DOWNLOAD_CANDIDATES = [
-    path.join(os.homedir(), 'nexus-downloads'),             // NVMe — fastest, 275 GB
-    '/media/moh/500GB Hardrive/nexus-downloads',            // WD 500 GB — overflow
+    path.join(os.homedir(), 'nexus-downloads'),             // NVMe â€” fastest, 275 GB
+    '/media/moh/500GB Hardrive/nexus-downloads',            // WD 500 GB â€” overflow
     path.join(os.homedir(), 'Downloads', 'nexus-downloads'),// fallback home subdir
     path.join(NEXUS_LOCAL_VAULT, 'downloads'),              // last resort local vault
   ];
 
-  // All media root paths across every drive — used by scanner and saveTarget selection.
+  // All media root paths across every drive â€” used by scanner and saveTarget selection.
   const ALL_MEDIA_ROOTS = [
     path.join(os.homedir(), 'nexus-media'),
     '/media/moh/500GB Hardrive',
@@ -9191,7 +9212,7 @@ async function startServer() {
       const free = await getDriveFreeBytes(dir);
       if (free > bestFree) { bestFree = free; best = dir; }
     }
-    // Fall back to first candidate even if below threshold — let qBit decide
+    // Fall back to first candidate even if below threshold â€” let qBit decide
     if (bestFree < MIN_FREE_BYTES) {
       log('WARN', `All download drives low on space; best has ${(bestFree / 1e9).toFixed(1)} GB free`);
     }
@@ -9210,7 +9231,7 @@ async function startServer() {
     } catch { return null; }
   }
 
-  // Session cache — avoid re-logging in on every 5-second poll
+  // Session cache â€” avoid re-logging in on every 5-second poll
   let _qbtSession: { cookie: string; host: string; exp: number } | null = null;
 
   async function qbtLogin(cfg: QbtConfig): Promise<string | null> {
@@ -9354,13 +9375,13 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // True for the physical host owner (PIN/"Brain" session — requireAnyAuth's
+  // True for the physical host owner (PIN/"Brain" session â€” requireAnyAuth's
   // pseudo-user for those) or a real account with an admin-tier role. Actual
   // file deletion (deleteFiles=true below) is gated on this rather than just
   // "any logged-in user", since it permanently removes data from disk.
   async function isAdminOrHost(auth: { userId: string; username: string } | null): Promise<boolean> {
     if (!auth) return false;
-    if (auth.username === 'host') return true; // PIN/Brain session — the physical owner
+    if (auth.username === 'host') return true; // PIN/Brain session â€” the physical owner
     if (!pool || !dbConnected) return false;
     try {
       const r = await pool.query("SELECT role FROM users WHERE id=$1", [auth.userId]);
@@ -9380,7 +9401,7 @@ async function startServer() {
     if (!/^[a-f0-9]{40}$/i.test(hash)) return res.status(400).json({ error: 'Invalid hash format' });
 
     // deleteFiles used to be hardcoded to 'false' no matter what the caller
-    // asked for — "delete" only ever stopped tracking the torrent, the files
+    // asked for â€” "delete" only ever stopped tracking the torrent, the files
     // stayed on disk and nothing was ever actually freed. Real file deletion
     // is a genuinely destructive, permanent action, so it's restricted to
     // the admin/host account rather than any authenticated user.
@@ -9427,7 +9448,7 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // Drive space info — unique physical drives across all candidates + media roots
+  // Drive space info â€” unique physical drives across all candidates + media roots
   app.get('/api/torrent/drives', async (_req, res) => {
     // Collect unique mount-point roots (avoid duplicating NVMe entries)
     const probePoints = [
@@ -9482,7 +9503,7 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // Active download status — polled by Sidebar badge and DiscoverFeed live list
+  // Active download status â€” polled by Sidebar badge and DiscoverFeed live list
   app.get('/api/torrent/download-status', async (_req, res) => {
     const cfg = await loadQbtConfig().catch(() => null);
     if (!cfg) return res.json({ ok: true, total: 0, downloads: [] });
@@ -9569,11 +9590,11 @@ async function startServer() {
     }
   });
 
-  // ── Radarr / Sonarr integration ─────────────────────────────────────────
+  // â”€â”€ Radarr / Sonarr integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const ARR_CFG_FILE = path.join(PERSIST_DIR, 'arr-config.json');
   const ARR_CFG_LEGACY_FILE = path.join(LEGACY_PERSIST_DIR, 'arr-config.json');
   type ArrConfig = { radarrUrl: string; radarrApiKey: string; sonarrUrl: string; sonarrApiKey: string };
-  /** Single writer for the Arr config — always encrypts the keys. */
+  /** Single writer for the Arr config â€” always encrypts the keys. */
   async function saveArrConfig(cfg: ArrConfig): Promise<void> {
     await mkdir(PERSIST_DIR, { recursive: true });
     await writeFile(ARR_CFG_FILE, JSON.stringify({
@@ -9638,9 +9659,9 @@ async function startServer() {
   }
 
   // Radarr/Sonarr reject any rootFolderPath they don't already have configured
-  // (RootFolderExistsValidator → HTTP 400), so deriving a path from mediaRoot and
+  // (RootFolderExistsValidator â†’ HTTP 400), so deriving a path from mediaRoot and
   // sending it blind only works when it happens to match one of theirs. When it
-  // doesn't — a mis-set mediaRoot, or a root folder the Arr app can't reach — fall
+  // doesn't â€” a mis-set mediaRoot, or a root folder the Arr app can't reach â€” fall
   // back to a real configured folder instead of a path guaranteed to fail.
   function pickArrRootFolder(folders: any[], preferred: string): string {
     const usable = (folders ?? []).filter((f: any) => f?.path && f.accessible !== false);
@@ -9654,12 +9675,12 @@ async function startServer() {
     return preferred;
   }
 
-  // ── Sonarr / Radarr completion webhook ────────────────────────────────────
+  // â”€â”€ Sonarr / Radarr completion webhook â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Closes the acquisition loop: the Arr app imports a finished download, tells
   // us, and the file is ingested into the library without anyone pressing scan.
   //
   // Auth note: this is called by Sonarr/Radarr, which cannot carry a user JWT,
-  // so it authenticates with a shared secret instead — supplied as ?token= or
+  // so it authenticates with a shared secret instead â€” supplied as ?token= or
   // an X-Nexus-Token header. The route is added to PUBLIC_API_PREFIXES for the
   // same reason. The secret defaults to the host share secret already in .env.
   const ARR_WEBHOOK_SECRET =
@@ -9711,7 +9732,7 @@ async function startServer() {
       body.episodeFile?.path ?? body.movieFile?.path ??
       (Array.isArray(body.episodeFiles) ? body.episodeFiles[0]?.path : null) ?? null;
 
-    // "Test" fires when someone hits Test in the Arr UI — answer 200 so the
+    // "Test" fires when someone hits Test in the Arr UI â€” answer 200 so the
     // connection validates, but do not kick off a library scan for it.
     if (eventType === "Test") {
       log("INFO", `Arr webhook test received from ${isSeries ? "Sonarr" : "Radarr"}`, "arr");
@@ -9739,7 +9760,7 @@ async function startServer() {
     const cfg = await loadArrConfig();
     if (!cfg) return res.status(404).json({ error: "Sonarr/Radarr not configured" });
     if (!ARR_WEBHOOK_SECRET) {
-      return res.status(400).json({ error: "No webhook secret — set NEXUS_ARR_WEBHOOK_SECRET or NEXUS_HOST_SHARE_SECRET" });
+      return res.status(400).json({ error: "No webhook secret â€” set NEXUS_ARR_WEBHOOK_SECRET or NEXUS_HOST_SHARE_SECRET" });
     }
 
     // The Arr apps run on this same host, so they must reach Nexus on loopback;
@@ -9842,26 +9863,26 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // ── Quality profiles — lets the UI offer size options before adding ──────
+  // â”€â”€ Quality profiles â€” lets the UI offer size options before adding â”€â”€â”€â”€â”€â”€
   app.get('/api/arr/quality-profiles', async (req, res) => {
     const cfg = await loadArrConfig();
     if (!cfg) return res.status(404).json({ error: 'Not configured' });
     const type = String(req.query.type ?? 'movie');
     // Rough size hints per quality tier (movies: per-file, series: per-episode)
     const SIZE_HINTS: Record<string, { movie: string; episode: string }> = {
-      'sd':          { movie: '~1–2 GB',   episode: '~200–400 MB' },
-      'hdtv-720p':   { movie: '~2–4 GB',   episode: '~500 MB–1 GB' },
-      'hdtv-1080p':  { movie: '~5–8 GB',   episode: '~1–2 GB' },
-      'hd-720p':     { movie: '~3–5 GB',   episode: '~500 MB–1.5 GB' },
-      'hd-1080p':    { movie: '~6–15 GB',  episode: '~2–4 GB' },
-      'ultra-hd':    { movie: '~40–80 GB', episode: '~15–30 GB' },
-      '720p':        { movie: '~3–5 GB',   episode: '~500 MB–1.5 GB' },
-      '1080p':       { movie: '~6–15 GB',  episode: '~2–4 GB' },
-      '2160p':       { movie: '~40–80 GB', episode: '~15–30 GB' },
-      '4k':          { movie: '~40–80 GB', episode: '~15–30 GB' },
-      'any':         { movie: '⚠ includes 4K', episode: '⚠ includes 4K' },
-      'br-disk':     { movie: '~60–100 GB', episode: '~60–100 GB' },
-      'everything':  { movie: '⚠ includes 4K', episode: '⚠ includes 4K' },
+      'sd':          { movie: '~1â€“2 GB',   episode: '~200â€“400 MB' },
+      'hdtv-720p':   { movie: '~2â€“4 GB',   episode: '~500 MBâ€“1 GB' },
+      'hdtv-1080p':  { movie: '~5â€“8 GB',   episode: '~1â€“2 GB' },
+      'hd-720p':     { movie: '~3â€“5 GB',   episode: '~500 MBâ€“1.5 GB' },
+      'hd-1080p':    { movie: '~6â€“15 GB',  episode: '~2â€“4 GB' },
+      'ultra-hd':    { movie: '~40â€“80 GB', episode: '~15â€“30 GB' },
+      '720p':        { movie: '~3â€“5 GB',   episode: '~500 MBâ€“1.5 GB' },
+      '1080p':       { movie: '~6â€“15 GB',  episode: '~2â€“4 GB' },
+      '2160p':       { movie: '~40â€“80 GB', episode: '~15â€“30 GB' },
+      '4k':          { movie: '~40â€“80 GB', episode: '~15â€“30 GB' },
+      'any':         { movie: 'âš  includes 4K', episode: 'âš  includes 4K' },
+      'br-disk':     { movie: '~60â€“100 GB', episode: '~60â€“100 GB' },
+      'everything':  { movie: 'âš  includes 4K', episode: 'âš  includes 4K' },
     };
     function sizeHint(name: string, t: string): string {
       const nl = name.toLowerCase();
@@ -9916,7 +9937,7 @@ async function startServer() {
       .trim();
   }
 
-  // Pure matcher — split out so callers that already have a torrent list (e.g. a sync
+  // Pure matcher â€” split out so callers that already have a torrent list (e.g. a sync
   // over many tracked requests) can reuse one fetch instead of re-fetching per title.
   function matchQbtTorrentProgress(torrents: any[], title: string): { found: boolean; progressPct: number; state?: string } {
     const want = normalizeTitleForMatch(title);
@@ -9987,7 +10008,7 @@ async function startServer() {
 
   function scheduleArrRequestTracking(requestId: string) {
     let ticks = 0;
-    const maxTicks = 4320; // 24 hours at 20s cadence — covers slow grabs and indexer delays
+    const maxTicks = 4320; // 24 hours at 20s cadence â€” covers slow grabs and indexer delays
     const timer = setInterval(async () => {
       ticks += 1;
       const row = arrRequests.find((r) => r.requestId === requestId);
@@ -9998,23 +10019,23 @@ async function startServer() {
       try {
         const q = await getQbtTorrentProgressByTitle(row.title);
         if (!q.found) {
-          // qBit doesn't have it yet — check Arr directly
+          // qBit doesn't have it yet â€” check Arr directly
           const arrStatus = await checkArrDirectStatus(row);
           if (arrStatus.hasFile) {
-            // File exists in Arr library — already downloaded (e.g. was there before)
+            // File exists in Arr library â€” already downloaded (e.g. was there before)
             upsertArrRequest({ ...row, status: 'ready', progressPct: 100, message: `${row.title} is available in your library!`, updatedAt: new Date().toISOString() });
             await refreshMediaLibrary().catch(() => {});
             clearInterval(timer);
             return;
           } else if (arrStatus.grabbed) {
-            upsertArrRequest({ ...row, status: 'queued', message: `${row.title} grabbed by ${row.type === 'movie' ? 'Radarr' : 'Sonarr'} — sending to qBittorrent…`, updatedAt: new Date().toISOString() });
+            upsertArrRequest({ ...row, status: 'queued', message: `${row.title} grabbed by ${row.type === 'movie' ? 'Radarr' : 'Sonarr'} â€” sending to qBittorrentâ€¦`, updatedAt: new Date().toISOString() });
           } else if (arrStatus.status === 'inCinemas') {
-            upsertArrRequest({ ...row, status: 'queued', message: `${row.title} is still in cinemas — Radarr will auto-download when a release drops`, updatedAt: new Date().toISOString() });
+            upsertArrRequest({ ...row, status: 'queued', message: `${row.title} is still in cinemas â€” Radarr will auto-download when a release drops`, updatedAt: new Date().toISOString() });
           } else {
-            upsertArrRequest({ ...row, status: 'queued', message: `${row.title} queued in ${row.type === 'movie' ? 'Radarr' : 'Sonarr'} — waiting for indexer to find a release`, updatedAt: new Date().toISOString() });
+            upsertArrRequest({ ...row, status: 'queued', message: `${row.title} queued in ${row.type === 'movie' ? 'Radarr' : 'Sonarr'} â€” waiting for indexer to find a release`, updatedAt: new Date().toISOString() });
           }
         } else if (q.progressPct >= 100) {
-          upsertArrRequest({ ...row, status: 'ready', progressPct: 100, message: `${row.title} is ready to watch! Library refreshing…`, updatedAt: new Date().toISOString() });
+          upsertArrRequest({ ...row, status: 'ready', progressPct: 100, message: `${row.title} is ready to watch! Library refreshingâ€¦`, updatedAt: new Date().toISOString() });
           await refreshMediaLibrary().catch(() => {});
           // Notify host admin users via AwehChat / Resend
           try {
@@ -10025,13 +10046,13 @@ async function startServer() {
               sendNotification({
                 to_user_id: u.username,
                 to_email: undefined,
-                subject: `🎬 ${row.title} is ready to watch!`,
+                subject: `ðŸŽ¬ ${row.title} is ready to watch!`,
                 body: `Your ${row.type === 'movie' ? 'movie' : 'series'} download of "${row.title}" is complete and available in NexusEmu.\n\nOpen your media library to watch now: https://savestate.co.za/?tab=media`,
                 html: `<div style="font-family:sans-serif;background:#0a0a14;color:#fff;padding:28px;border-radius:16px;max-width:480px">
-  <p style="color:#4d7cff;font-size:11px;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 8px">NexusEmu · Download Complete</p>
-  <h2 style="margin:0 0 12px;font-size:20px">🎬 ${row.title}</h2>
+  <p style="color:#4d7cff;font-size:11px;font-weight:900;letter-spacing:0.15em;text-transform:uppercase;margin:0 0 8px">NexusEmu Â· Download Complete</p>
+  <h2 style="margin:0 0 12px;font-size:20px">ðŸŽ¬ ${row.title}</h2>
   <p style="color:rgba(255,255,255,0.6);margin:0 0 20px">Your ${row.type === 'movie' ? 'movie' : 'series'} is downloaded and ready to watch.</p>
-  <a href="https://savestate.co.za/?tab=media" style="display:inline-block;padding:12px 28px;background:#4d7cff;color:#000;border-radius:10px;font-weight:900;text-decoration:none;font-size:14px">Watch Now →</a>
+  <a href="https://savestate.co.za/?tab=media" style="display:inline-block;padding:12px 28px;background:#4d7cff;color:#000;border-radius:10px;font-weight:900;text-decoration:none;font-size:14px">Watch Now â†’</a>
 </div>`,
                 event_type: 'download_ready',
                 data: { title: row.title, type: row.type },
@@ -10129,7 +10150,7 @@ async function startServer() {
     return res.json({ items: arrRequests.slice(0, limit) });
   });
 
-  // Force re-check a single request — called by client "refresh" button
+  // Force re-check a single request â€” called by client "refresh" button
   app.post('/api/arr/requests/:requestId/refresh', async (req, res) => {
     const row = arrRequests.find(r => r.requestId === req.params.requestId);
     if (!row) return res.status(404).json({ error: 'Request not found' });
@@ -10141,13 +10162,13 @@ async function startServer() {
       if (q.found && q.progressPct >= 100) {
         upsertArrRequest({ ...row, status: 'ready', progressPct: 100, message: `${row.title} is ready to watch!`, updatedAt: new Date().toISOString() });
       } else if (q.found) {
-        upsertArrRequest({ ...row, status: 'downloading', progressPct: q.progressPct, message: `${row.title} downloading — ${q.progressPct}%`, updatedAt: new Date().toISOString() });
+        upsertArrRequest({ ...row, status: 'downloading', progressPct: q.progressPct, message: `${row.title} downloading â€” ${q.progressPct}%`, updatedAt: new Date().toISOString() });
       } else if (arr.hasFile) {
         upsertArrRequest({ ...row, status: 'ready', progressPct: 100, message: `${row.title} is available!`, updatedAt: new Date().toISOString() });
       } else if (arr.status === 'inCinemas') {
-        upsertArrRequest({ ...row, status: 'queued', message: `${row.title} is still in cinemas — will auto-download when released`, updatedAt: new Date().toISOString() });
+        upsertArrRequest({ ...row, status: 'queued', message: `${row.title} is still in cinemas â€” will auto-download when released`, updatedAt: new Date().toISOString() });
       } else {
-        upsertArrRequest({ ...row, status: 'queued', message: `${row.title} queued — searching indexers for a release`, updatedAt: new Date().toISOString() });
+        upsertArrRequest({ ...row, status: 'queued', message: `${row.title} queued â€” searching indexers for a release`, updatedAt: new Date().toISOString() });
         // Re-trigger search in Radarr/Sonarr
         const cfg = await loadArrConfig();
         if (cfg && row.type === 'movie' && cfg.radarrUrl && cfg.radarrApiKey) {
@@ -10203,17 +10224,17 @@ async function startServer() {
     const { type, id, title, year, qualityProfileId: reqProfileId } = req.body as { type: 'movie' | 'series'; id: number; title: string; year: number; qualityProfileId?: number };
     if (!id || !title || !type) return res.status(400).json({ error: 'type, id, title required' });
 
-    // Smart default: scored — 1080p best, 720p good, 'Any'/'All' low, 4K worst
+    // Smart default: scored â€” 1080p best, 720p good, 'Any'/'All' low, 4K worst
     function pickBestProfile(profiles: any[]): number {
       if (profiles.length === 0) return 1;
       function scoreProfile(n: string): number {
         const l = n.toLowerCase();
-        if (/\b(2160p|4k|ultra[\s-]?hd|uhd|br[-\s]?disk)\b/.test(l)) return 0;   // 4K/UHD — never auto-pick
+        if (/\b(2160p|4k|ultra[\s-]?hd|uhd|br[-\s]?disk)\b/.test(l)) return 0;   // 4K/UHD â€” never auto-pick
         if (/\bhd[-\s]720p.*1080p?\b|\b720p.*1080p?\b/.test(l)) return 4;         // HD 720p/1080p combo
-        if (/\b(1080p?|hd[-\s]?1080)\b/.test(l)) return 6;                        // 1080p — best
+        if (/\b(1080p?|hd[-\s]?1080)\b/.test(l)) return 6;                        // 1080p â€” best
         if (/\b720p?\b/.test(l)) return 4;                                         // 720p
         if (/\b(480p|sd)\b/.test(l)) return 2;                                     // SD
-        if (/\b(any|all|everything)\b/.test(l)) return 1;                          // wildcard — allows 4K!
+        if (/\b(any|all|everything)\b/.test(l)) return 1;                          // wildcard â€” allows 4K!
         return 3;                                                                   // unknown
       }
       const scored = profiles.map(p => ({ ...p, _s: scoreProfile(p.name) }));
@@ -10363,7 +10384,7 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // ── Resolve TMDB series ID → TVDB ID + Sonarr season data ───────────────
+  // â”€â”€ Resolve TMDB series ID â†’ TVDB ID + Sonarr season data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Accepts a TMDB ID (from DiscoverFeed), fetches TVDB ID via TMDB external_ids,
   // then looks up the series in Sonarr. Falls back to title search if needed.
   async function resolveSeriesForSonarr(
@@ -10377,7 +10398,7 @@ async function startServer() {
     const base = sonarrBase ?? '';
     const hdr: Record<string, string> = { 'X-Api-Key': sonarrKey ?? '' };
 
-    // Step 1 — get TVDB ID from TMDB external_ids
+    // Step 1 â€” get TVDB ID from TMDB external_ids
     let tvdbId = 0;
     try {
       const extR = await fetch(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${TMDB_KEY}`, { signal: AbortSignal.timeout(8000) });
@@ -10389,7 +10410,7 @@ async function startServer() {
 
     if (!base || !sonarrKey) return tvdbId ? { tvdbId, sonarrTemplate: null, inLibrary: false, seasons: [] } : null;
 
-    // Step 2 — check if already in Sonarr library
+    // Step 2 â€” check if already in Sonarr library
     try {
       const libR = await fetch(`${base}/api/v3/series`, { headers: hdr, signal: AbortSignal.timeout(8000) });
       const lib = await libR.json().catch(() => []) as any[];
@@ -10407,7 +10428,7 @@ async function startServer() {
       }
     } catch { /* continue to lookup */ }
 
-    // Step 3 — Sonarr lookup: try TVDB first, fall back to title
+    // Step 3 â€” Sonarr lookup: try TVDB first, fall back to title
     const terms = tvdbId ? [`tvdb:${tvdbId}`, title] : [title];
     for (const term of terms) {
       try {
@@ -10435,7 +10456,7 @@ async function startServer() {
     return tvdbId ? { tvdbId, sonarrTemplate: null, inLibrary: false, seasons: [] } : null;
   }
 
-  // ── Season lookup endpoint ────────────────────────────────────────────────
+  // â”€â”€ Season lookup endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get('/api/arr/series/lookup/:id', async (req, res) => {
     const cfg = await loadArrConfig();
     const tmdbId = Number(req.params.id);
@@ -10452,7 +10473,7 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // ── Add series with per-season selection (TMDB ID → auto-resolve TVDB) ────
+  // â”€â”€ Add series with per-season selection (TMDB ID â†’ auto-resolve TVDB) â”€â”€â”€â”€
   app.post('/api/arr/add-seasons', express.json(), async (req, res) => {
     const cfg = await loadArrConfig();
     if (!cfg?.sonarrUrl || !cfg?.sonarrApiKey) return res.status(404).json({ error: 'Sonarr not configured' });
@@ -10466,7 +10487,7 @@ async function startServer() {
     const hdr = { 'X-Api-Key': cfg.sonarrApiKey, 'Content-Type': 'application/json' };
     const requestId = crypto.randomUUID();
     try {
-      // Resolve the TMDB ID → actual TVDB ID + Sonarr template
+      // Resolve the TMDB ID â†’ actual TVDB ID + Sonarr template
       const resolved = await resolveSeriesForSonarr(rawId, title, year, cfg.sonarrUrl, cfg.sonarrApiKey);
       if (!resolved) throw new Error(`Could not find "${title}" in Sonarr/TVDB. Check Sonarr indexers are configured.`);
 
@@ -10498,7 +10519,7 @@ async function startServer() {
       let addedToArr = true;
 
       if (resolved.inLibrary && template?.id) {
-        // Already in Sonarr — update season monitoring and trigger search
+        // Already in Sonarr â€” update season monitoring and trigger search
         seriesId = Number(template.id);
         addedToArr = false;
         if (seasons !== 'all') {
@@ -10562,7 +10583,7 @@ async function startServer() {
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // ── Download Approval Queue ─────────────────────────────────────────────
+  // â”€â”€ Download Approval Queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   type PendingItem = {
     id: string;
     type: 'movie' | 'series';
@@ -10578,7 +10599,7 @@ async function startServer() {
   };
   const pendingApprovals: PendingItem[] = [];
 
-  // Radarr/Sonarr webhook receiver (configure in Radarr/Sonarr → Settings → Connect → Webhook)
+  // Radarr/Sonarr webhook receiver (configure in Radarr/Sonarr â†’ Settings â†’ Connect â†’ Webhook)
   app.post('/api/arr/webhook', express.json(), (req, res) => {
     const body = req.body as Record<string, any>;
     const eventType: string = body?.eventType ?? body?.EventType ?? '';
@@ -10637,7 +10658,7 @@ async function startServer() {
         const hdr = { 'X-Api-Key': cfg.sonarrApiKey, 'Content-Type': 'application/json' };
         await fetch(`${cfg.sonarrUrl}/api/v3/command`, { method: 'POST', headers: hdr, body: JSON.stringify({ name: 'SeriesSearch', seriesId: item.sonarrId }), signal: AbortSignal.timeout(10000) });
       }
-      return res.json({ ok: true, message: `${item.title} approved — search triggered` });
+      return res.json({ ok: true, message: `${item.title} approved â€” search triggered` });
     } catch (e) {
       return res.status(500).json({ error: String(e) });
     }
@@ -10665,8 +10686,8 @@ async function startServer() {
     }
   });
 
-  // ── Remove from Radarr/Sonarr (cancel/revert) ─────────────────────────────
-  // In-memory map: torrent name → { type, title, radarrId?, sonarrId? }
+  // â”€â”€ Remove from Radarr/Sonarr (cancel/revert) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // In-memory map: torrent name â†’ { type, title, radarrId?, sonarrId? }
   const trackedDownloads = new Map<string, { type: 'movie' | 'series'; title: string; radarrId?: number; sonarrId?: number }>();
 
   // Called by /api/arr/add to register newly added items for later revert
@@ -10689,7 +10710,7 @@ async function startServer() {
     if (torrentName) trackedDownloads.delete(torrentName.toLowerCase());
 
     const cfg = await loadArrConfig();
-    if (!cfg) return res.json({ ok: true, message: 'No Arr config — nothing to remove' });
+    if (!cfg) return res.json({ ok: true, message: 'No Arr config â€” nothing to remove' });
 
     try {
       if ((type === 'movie' || !type) && cfg.radarrUrl && cfg.radarrApiKey) {
@@ -10735,7 +10756,7 @@ async function startServer() {
     }
   });
 
-  // ── Arr Content Check — library completeness overview ─────────────────────
+  // â”€â”€ Arr Content Check â€” library completeness overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get('/api/arr/content-check', async (_req, res) => {
     const cfg = await loadArrConfig().catch(() => null);
     if (!cfg) return res.json({ ok: true, results: [] });
@@ -10844,7 +10865,7 @@ async function startServer() {
     return { ok: true, message: `Ready to assist with "${q}".`, actions: [{ type: 'navigate', tab: 'media' }], suggestions: ["Quick commands"] };
   }
 
-  // ── Gemini App Navigator ─────────────────────────────────────────────────────
+  // â”€â”€ Gemini App Navigator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/ai/navigate", express.json(), async (req, res) => {
     const { query, context } = req.body as { query: string; context?: Record<string, any> };
     if (!query?.trim()) return res.status(400).json({ error: "query required" });
@@ -10857,7 +10878,7 @@ async function startServer() {
     const musicList = (ctx.tracks ?? []).slice(0, 20).map((t: any) => `"${t.title}" by ${t.artist} [id:${t.id}]`).join('\n') || 'none';
     const pcGameList = (ctx.games ?? []).slice(0, 20).map((g: any) => `"${g.title}" source:${g.source}${g.appId ? ` [appId:${g.appId}]` : ''}`).join('\n') || 'none';
     const romGameList = (ctx.romGames ?? []).slice(0, 50).map((g: any) => `"${g.title}" platform:${g.platform} [id:${g.id}]`).join('\n') || 'none';
-    const prompt = `You are NEXUS, the AI assistant and setup buddy for a personal media and gaming hub. You have FULL CONTROL over the app — you can navigate, play content, check setup status, and automatically fix problems. Respond with ONLY valid JSON (no markdown, no code blocks).
+    const prompt = `You are NEXUS, the AI assistant and setup buddy for a personal media and gaming hub. You have FULL CONTROL over the app â€” you can navigate, play content, check setup status, and automatically fix problems. Respond with ONLY valid JSON (no markdown, no code blocks).
 
 APP SECTIONS (tab IDs): media=Movies&TV, music=Music, discover=Discovery, torrent=Downloads, photos=Photos, library=Retro Games, pcgames=PC Games, emulation=Emulation Setup, multiplayer=Multiplayer, codex=eBooks, ai=AI Assistant, activity=Stats, profile=Profile.
 
@@ -10875,14 +10896,14 @@ ${musicList}
 PC GAMES:
 ${pcGameList}
 
-RETRO/ROM GAMES (50 shown — 8500+ total in vault):
+RETRO/ROM GAMES (50 shown â€” 8500+ total in vault):
 ${romGameList}
 
 ACTION TYPES (use the most specific one; combine multiple actions when needed):
 NAVIGATION & MEDIA:
 - {"type":"navigate","tab":"<tab_id>"}
-- {"type":"play_media","relPath":"<path>","title":"<title>"}   ← use exact relPath from library
-- {"type":"open_series","seriesId":"<id>","title":"<title>"}   ← open a TV series panel
+- {"type":"play_media","relPath":"<path>","title":"<title>"}   â† use exact relPath from library
+- {"type":"open_series","seriesId":"<id>","title":"<title>"}   â† open a TV series panel
 - {"type":"play_music","trackId":"<id>","trackTitle":"<title>","artist":"<artist>"}
 - {"type":"launch_game","gameId":"<id>","title":"<title>","source":"<steam|epic|retroarch|etc>","appId":"<appId>"}
 - {"type":"control_media","action":"pause|resume|stop|seek","value":<seconds if seek>}
@@ -10895,24 +10916,24 @@ NAVIGATION & MEDIA:
 - {"type":"open_photos"}
 - {"type":"surprise_me"}
 - {"type":"show_continue_watching"}
-- {"type":"delete_media","relPath":"<path>","title":"<title>"}   ← delete ONE movie/episode — use exact relPath from MEDIA LIBRARY. This opens the normal delete-confirmation dialog, it does NOT delete instantly — the user still has to confirm on screen. Only admin/host accounts can actually confirm it.
-- {"type":"delete_series","seriesTitle":"<exact series name>"}   ← delete an ENTIRE series (all its episodes) — use exact name from SERIES. Same confirm-dialog behavior as delete_media, admin/host only.
-- {"type":"system_status"}   ← show live host stats: disk space, uptime, CPU/memory. Read-only, safe for anyone to ask.
+- {"type":"delete_media","relPath":"<path>","title":"<title>"}   â† delete ONE movie/episode â€” use exact relPath from MEDIA LIBRARY. This opens the normal delete-confirmation dialog, it does NOT delete instantly â€” the user still has to confirm on screen. Only admin/host accounts can actually confirm it.
+- {"type":"delete_series","seriesTitle":"<exact series name>"}   â† delete an ENTIRE series (all its episodes) â€” use exact name from SERIES. Same confirm-dialog behavior as delete_media, admin/host only.
+- {"type":"system_status"}   â† show live host stats: disk space, uptime, CPU/memory. Read-only, safe for anyone to ask.
 
 EMULATION SETUP (use these when user asks about playing games, setting up emulators, or fixing issues):
-- {"type":"check_emulator_health"} ← run a full diagnostic: RetroArch, cores, BIOS, vault — always do this first when user asks about emulation
-- {"type":"check_game_ready","game_id":"<id>","title":"<title>"} ← preflight check for a specific game (use exact game ID from RETRO/ROM GAMES)
-- {"type":"install_retroarch"} ← auto-install RetroArch on the host
-- {"type":"install_core","coreId":"<id>"} ← download a RetroArch core (e.g. "pcsx2" for PS2, "snes9x" for SNES, "mupen64plus_next" for N64, "mgba" for GBA, "pcsx_rearmed" for PS1)
-- {"type":"fix_bios_dir","platform":"<ps2|ps1>"} ← create the BIOS directory for a platform
-- {"type":"scan_vault"} ← re-scan ROM vault for new files after adding ROMs
-- {"type":"open_emulation_setup"} ← open the Emulation Setup page (shows health status + ROM import)
+- {"type":"check_emulator_health"} â† run a full diagnostic: RetroArch, cores, BIOS, vault â€” always do this first when user asks about emulation
+- {"type":"check_game_ready","game_id":"<id>","title":"<title>"} â† preflight check for a specific game (use exact game ID from RETRO/ROM GAMES)
+- {"type":"install_retroarch"} â† auto-install RetroArch on the host
+- {"type":"install_core","coreId":"<id>"} â† download a RetroArch core (e.g. "pcsx2" for PS2, "snes9x" for SNES, "mupen64plus_next" for N64, "mgba" for GBA, "pcsx_rearmed" for PS1)
+- {"type":"fix_bios_dir","platform":"<ps2|ps1>"} â† create the BIOS directory for a platform
+- {"type":"scan_vault"} â† re-scan ROM vault for new files after adding ROMs
+- {"type":"open_emulation_setup"} â† open the Emulation Setup page (shows health status + ROM import)
 
 EMULATION RULES:
-- When user says "can I play X" or "I want to play X" — find the game in RETRO/ROM GAMES and use check_game_ready with its id
-- When user says "set up emulator", "fix emulator", "set up PS2" — use check_emulator_health first, then chain fix actions
-- When user says "where do I put my ROM" or "how do I add a game" — use open_emulation_setup (it has drag-and-drop ROM import)
-- When user asks about a game not in the vault — use search_radarr or tell them to use open_emulation_setup to import the ROM
+- When user says "can I play X" or "I want to play X" â€” find the game in RETRO/ROM GAMES and use check_game_ready with its id
+- When user says "set up emulator", "fix emulator", "set up PS2" â€” use check_emulator_health first, then chain fix actions
+- When user says "where do I put my ROM" or "how do I add a game" â€” use open_emulation_setup (it has drag-and-drop ROM import)
+- When user asks about a game not in the vault â€” use search_radarr or tell them to use open_emulation_setup to import the ROM
 - ALWAYS combine check_emulator_health + check_game_ready when user asks to play a specific game for the first time
 - For PS2 games: core is "pcsx2", BIOS needed is SCPH*.bin in system/pcsx2/bios/
 - For PS1 games: core is "pcsx_rearmed", BIOS needed is scph*.bin in system/
@@ -10931,7 +10952,7 @@ User query: ${query.trim()}`;
     } catch { return res.json(fallbackAiNavigate(query)); }
   });
 
-  // ── AI Guide ──────────────────────────────────────────────────
+  // â”€â”€ AI Guide â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/ai/guide", async (req, res) => {
     if (!ai) return res.status(503).json({ error: "GEMINI_API_KEY not configured" });
     const { game_title, platform, query } = req.body as Record<string, string>;
@@ -10944,7 +10965,7 @@ User query: ${query.trim()}`;
 Game: "${game_title}" (${platform ?? "Unknown Platform"})
 User query: "${query}"
 Provide a focused, knowledgeable response. Include tips, strategies, speedrun notes, or dev trivia where relevant.
-Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, not a casual assistant.`,
+Keep it concise (2-4 short paragraphs). High-tech tone â€” you are a gaming AI, not a casual assistant.`,
       });
       log("INFO", `AI Guide queried for: ${game_title}`, "ai");
       res.json({ response: getAiResponseText(result) || "No response generated." });
@@ -10972,7 +10993,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Jarvis Command Stream (per-user SSE) ─────────────────────
+  // â”€â”€ Jarvis Command Stream (per-user SSE) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/ai/stream", (req, res) => {
     // Support token via query param (EventSource can't set headers)
     const qToken = (req.query.token as string | undefined)?.trim();
@@ -11006,10 +11027,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Rclone RC proxy (cloud upload / transfer engine) ─────────
-  // Browser → (authenticated) nexus-host → rclone rcd on 127.0.0.1:5572.
+  // â”€â”€ Rclone RC proxy (cloud upload / transfer engine) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Browser â†’ (authenticated) nexus-host â†’ rclone rcd on 127.0.0.1:5572.
   // The RC daemon holds live OAuth tokens for the connected cloud accounts, so
-  // its credentials must never reach the browser — this host is internet-facing
+  // its credentials must never reach the browser â€” this host is internet-facing
   // through the savestate.co.za tunnel.
   const RC_ADDR = "http://127.0.0.1:5572";
 
@@ -11022,7 +11043,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try {
       const envPath = path.join(os.homedir(), ".config", "rclone", "rcd.env");
       // Split on the FIRST '=' only. JS's split(sep, limit) is not Python's
-      // maxsplit — it splits on every separator and then truncates the array,
+      // maxsplit â€” it splits on every separator and then truncates the array,
       // so `PASS=abc=` would silently yield "abc" and drop the trailing '='.
       // The password is base64 from `openssl rand -base64 32`, which routinely
       // ends in '=' padding, so that bug produced a wrong password and every
@@ -11045,7 +11066,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }
 
   // Allowlist. Without it this endpoint is a fully general remote-control API
-  // over every connected cloud account — including operations/purge, which
+  // over every connected cloud account â€” including operations/purge, which
   // deletes recursively and irreversibly.
   const ALLOWED_RC_COMMANDS = new Set([
     "sync/copy", "core/stats", "job/status", "job/stop",
@@ -11083,14 +11104,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const body = await upstream.json().catch(() => ({}));
       return res.status(upstream.status).json(body);
     } catch {
-      return res.status(502).json({ error: "rclone daemon unreachable — is nexus-rclone-rcd running?" });
+      return res.status(502).json({ error: "rclone daemon unreachable â€” is nexus-rclone-rcd running?" });
     }
   });
 
-  // ── Browser-play concurrency queue ────────────────────────────────────────
+  // â”€â”€ Browser-play concurrency queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Each in-browser emulation session costs real CPU on the host, and on AWS it
   // costs a metered instance. Without a cap, the third concurrent player
-  // degrades the experience for the first two rather than being told to wait —
+  // degrades the experience for the first two rather than being told to wait â€”
   // and on a shared box that is how one game takes down the whole server.
   //
   // Sessions are leased, not just counted: a browser tab that closes without
@@ -11111,7 +11132,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const dead = now - sl.lastBeat > EMULATION_HEARTBEAT_GRACE_MS;
       if (expired || dead) {
         emuActive.delete(id);
-        log("INFO", `Emulation slot released (${expired ? "30-minute limit" : "client stopped responding"}) — ${sl.username}`, "emulation");
+        log("INFO", `Emulation slot released (${expired ? "30-minute limit" : "client stopped responding"}) â€” ${sl.username}`, "emulation");
       }
     }
   }
@@ -11176,7 +11197,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // Heartbeat — keeps the lease alive and reports time remaining.
+  // Heartbeat â€” keeps the lease alive and reports time remaining.
   app.post("/api/emulation/heartbeat", express.json(), async (req, res) => {
     const auth = requireAnyAuth(req, res);
     if (!auth) return;
@@ -11209,7 +11230,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   setInterval(emuSweep, 30_000).unref?.();
 
-  // ── Disguised-executable scanner ──────────────────────────────────────────
+  // â”€â”€ Disguised-executable scanner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Extension matching alone is weak in both directions: a legitimate game ships
   // .bat build scripts (Shadows of the Damned has one), while the dangerous
   // files are often named ".mkv" and only reveal themselves in the first two
@@ -11288,7 +11309,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     ];
     const { checked, findings } = await scanForDisguisedExecutables(roots);
     if (req.body?.quarantine !== true) {
-      return res.json({ checked, findings, quarantined: 0, note: 'Dry run — pass {"quarantine":true} to act' });
+      return res.json({ checked, findings, quarantined: 0, note: 'Dry run â€” pass {"quarantine":true} to act' });
     }
     // Moved, not deleted: a false positive must be recoverable, and the file is
     // out of every scanned root either way.
@@ -11304,10 +11325,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ checked, findings, quarantined: moved.length, quarantineDir: qdir, moved, failed });
   });
 
-  // ── Log retention ─────────────────────────────────────────────────────────
+  // â”€â”€ Log retention â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // daemon_logs had grown to 12.2M rows / 1.58 GB in Neon, 97% of it INFO older
   // than a month. Nothing was ever deleting it, so it grew for the life of the
-  // install — paid storage, and slow to query until an index was added.
+  // install â€” paid storage, and slow to query until an index was added.
   //
   // INFO is operational noise that stops being useful within days. ERROR and
   // WARN are kept far longer because they are what /api/ai/diagnostics reads to
@@ -11320,7 +11341,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
    *
    * Batched deliberately: one DELETE covering 12M rows would hold a long
    * transaction against a remote database and bloat the WAL. Small chunks let
-   * other queries interleave and make a timeout harmless — the next run simply
+   * other queries interleave and make a timeout harmless â€” the next run simply
    * continues.
    */
   async function pruneDaemonLogs(maxBatches = 40, batchSize = 20_000) {
@@ -11361,9 +11382,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   setInterval(() => { void pruneDaemonLogs().catch(() => {}); }, 24 * 60 * 60 * 1000).unref?.();
   setTimeout(() => { void pruneDaemonLogs(8).catch(() => {}); }, 5 * 60_000).unref?.();
 
-  // ── Storage autopilot ─────────────────────────────────────────────────────
+  // â”€â”€ Storage autopilot â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Cloud-first only works if local disk actually drains. Downloads land on the
-  // NVMe, and with the media drive gone there is no second disk to spill onto —
+  // NVMe, and with the media drive gone there is no second disk to spill onto â€”
   // when / fills, Postgres, qBittorrent and the server all fail together. This
   // archives finished downloads to Drive and frees the local copy.
   //
@@ -11385,7 +11406,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
    *
    * Same safety rule as /api/cloud/reclaim: a file is only unlinked when the
    * cloud listing has an entry at the same relative path AND the same size.
-   * Anything that does not match exactly is left alone — a partial upload is
+   * Anything that does not match exactly is left alone â€” a partial upload is
    * never treated as done.
    */
   async function reclaimVerified(localDir: string, remoteSpec: string) {
@@ -11430,8 +11451,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
     if (!existsSync(AUTOPILOT_SOURCE)) { result.error = `source missing: ${AUTOPILOT_SOURCE}`; return result; }
 
-    // ── Pass 1: reclaim what is ALREADY in Drive ──────────────────────────
-    // This costs no bandwidth at all — the bytes are already uploaded, the
+    // â”€â”€ Pass 1: reclaim what is ALREADY in Drive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // This costs no bandwidth at all â€” the bytes are already uploaded, the
     // local copy is simply redundant. On this host that was 130 GB of the
     // 235 GB in downloads, so doing it before any upload is the difference
     // between freeing space in seconds and freeing it over a day of uploading.
@@ -11446,7 +11467,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         // Target met without moving a single byte over the network.
         result.done = "target reached by reclaim alone";
         log("INFO",
-          `Storage autopilot: reclaimed ${(rec as any).freedGb ?? 0} GB already in Drive — ${Math.round(afterGb)} GB free, no upload needed`,
+          `Storage autopilot: reclaimed ${(rec as any).freedGb ?? 0} GB already in Drive â€” ${Math.round(afterGb)} GB free, no upload needed`,
           "cloud");
         return result;
       }
@@ -11503,10 +11524,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       autopilotJob = { id: body.jobid, startedAt: Date.now(), source: AUTOPILOT_SOURCE, remote: AUTOPILOT_REMOTE };
       result.started = true;
       result.jobId = body.jobid;
-      log("INFO", `Storage autopilot started (job ${body.jobid}) — ${Math.round(freeGb)} GB free`, "cloud");
+      log("INFO", `Storage autopilot started (job ${body.jobid}) â€” ${Math.round(freeGb)} GB free`, "cloud");
       return result;
     } catch {
-      result.error = "rclone daemon unreachable — is nexus-rclone-rcd running?";
+      result.error = "rclone daemon unreachable â€” is nexus-rclone-rcd running?";
       return result;
     }
   }
@@ -11529,7 +11550,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           freeGbAfter: Math.round(freeGb), finishedAt: new Date().toISOString(),
         };
         log(st.success ? "INFO" : "ERROR",
-          `Storage autopilot ${st.success ? "finished" : "failed"} — ${Math.round(freeGb)} GB free${st.error ? ` (${st.error})` : ""}`,
+          `Storage autopilot ${st.success ? "finished" : "failed"} â€” ${Math.round(freeGb)} GB free${st.error ? ` (${st.error})` : ""}`,
           "cloud");
         autopilotJob = null;
       }
@@ -11589,7 +11610,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }, 30 * 60 * 1000).unref?.();
   }
 
-  // ── Cloud overview (single poll for the whole Cloud hub) ─────
+  // â”€â”€ Cloud overview (single poll for the whole Cloud hub) â”€â”€â”€â”€â”€
   // One endpoint for disk usage + cloud quota + upload job, so the UI makes a
   // single request per tick instead of three. The Drive quota call is cached:
   // it costs a Drive API request, and at a 10s poll an uncached version would
@@ -11597,7 +11618,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   let driveAboutCache: { at: number; data: unknown } | null = null;
   const DRIVE_ABOUT_TTL = 60_000;
 
-  // ── Drive Recovery: database path healing ─────────────────────────────────
+  // â”€â”€ Drive Recovery: database path healing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Rows written while "/media/moh/EMULATION dRIVE" existed still point at it.
   // This walks every path-bearing column, tries to relocate each file to the
   // Drive mount or the local vault, and rewrites only what it can actually find.
@@ -11659,7 +11680,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const report: any = { mode: apply ? "apply" : "dry-run", force, tables: {}, vault: null };
 
     try {
-      // ── 1. vault_config: the single most important row ────────────────────
+      // â”€â”€ 1. vault_config: the single most important row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       const vc = await pool.query(
         "SELECT root_path, bios_path, emulator_path FROM vault_config WHERE id=1",
       );
@@ -11685,7 +11706,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         report.vault = Object.keys(vaultChanges).length ? vaultChanges : "clean";
       }
 
-      // ── 2. Path-bearing content tables ────────────────────────────────────
+      // â”€â”€ 2. Path-bearing content tables â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       for (const t of TARGETS) {
         const out = { scanned: 0, relocated: 0, unresolved: 0, rewritten: 0, skipped: 0, samples: [] as any[] };
         let rows: any[] = [];
@@ -11719,7 +11740,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           } catch {
             // A unique column (music_tracks.abs_path) can collide when two dead
             // rows relocate onto the same surviving file. The duplicate is the
-            // stale one — drop it rather than leaving a broken pointer.
+            // stale one â€” drop it rather than leaving a broken pointer.
             if (t.unique && apply) {
               await pool
                 .query(`DELETE FROM "${t.table}" WHERE ctid=$1`, [r.ctid])
@@ -11741,10 +11762,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Cloud Survivor Audit ──────────────────────────────────────────────────
+  // â”€â”€ Cloud Survivor Audit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Which of the files lost with the media drive actually survived in Google
-  // Drive? Rather than asking the Drive API once per row — 10k+ calls, certain
-  // to hit rate limits — this indexes the Drive mount once and matches in
+  // Drive? Rather than asking the Drive API once per row â€” 10k+ calls, certain
+  // to hit rate limits â€” this indexes the Drive mount once and matches in
   // memory. Files are matched on basename, then confirmed on size when the
   // database knows one, so two different rips of the same episode don't get
   // confused for each other.
@@ -11948,7 +11969,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Standalone pages (no build step) ──────────────────────────────────────
+  // â”€â”€ Standalone pages (no build step) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The Vite sources were lost with the media drive, so these are plain HTML
   // served straight from public/. They must be registered before the SPA
   // catch-all further down, which would otherwise answer with index.html.
@@ -11996,7 +12017,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // Read-only damage report — safe to hit any time, changes nothing.
+  // Read-only damage report â€” safe to hit any time, changes nothing.
   app.get("/api/recovery/status", async (req, res) => {
     const auth = requireAuthenticatedUser(req, res);
     if (!auth) return;
@@ -12060,13 +12081,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         driveAboutCache = { at: Date.now(), data: drive };
       }
     } catch {
-      drive = null;   // daemon down or quota error — UI degrades gracefully
+      drive = null;   // daemon down or quota error â€” UI degrades gracefully
     }
 
     return res.json({ disks, drive });
   });
 
-  // ── Cloud verification + local space reclaim ─────────────────
+  // â”€â”€ Cloud verification + local space reclaim â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Compares a local directory against its cloud copy and can delete local
   // files that are PROVEN to exist in the cloud at the same size.
   //
@@ -12074,7 +12095,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // the safety model is deliberately strict:
   //   1. admin-only
   //   2. deletable paths are restricted to a hardcoded allowlist of media roots
-  //      — never an arbitrary path from the request
+  //      â€” never an arbitrary path from the request
   //   3. every file is RE-VERIFIED against the cloud immediately before its
   //      unlink, not trusted from the earlier listing the UI was showing
   //   4. size must match exactly; a partial upload is never treated as done
@@ -12118,7 +12139,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const map = new Map<string, number>();
     for (const e of list ?? []) {
       // operations/list returns paths relative to `remote` when one is given,
-      // but prefixes them when listing a bucket root — normalise both.
+      // but prefixes them when listing a bucket root â€” normalise both.
       const rel = remote && e.Path.startsWith(remote + "/")
         ? e.Path.slice(remote.length + 1)
         : e.Path;
@@ -12226,10 +12247,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         }
       }
 
-      // ── Detach the matching torrents ────────────────────────────────────
+      // â”€â”€ Detach the matching torrents â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Every torrent in this client saves into ~/nexus-downloads, so deleting
       // a file leaves its torrent in a permanent "missing files" error state.
-      // We remove those torrents WITHOUT deleting data (deleteFiles=false) —
+      // We remove those torrents WITHOUT deleting data (deleteFiles=false) â€”
       // the files are already gone, and passing true would make qBittorrent
       // try to delete siblings we never verified.
       //
@@ -12272,7 +12293,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             }
           }
         } catch (e) {
-          // Never fail the reclaim because qBittorrent was unreachable — the
+          // Never fail the reclaim because qBittorrent was unreachable â€” the
           // disk space is already freed; a stale torrent is cosmetic.
           log("warn", `Reclaim: torrent cleanup skipped (${(e as Error).message})`, "cloud");
         }
@@ -12285,7 +12306,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── AI Buddy: host-side maintenance actions ──────────────────
+  // â”€â”€ AI Buddy: host-side maintenance actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The existing AI action registry dispatches UI commands to a CLIENT
   // (navigate, play, launch). These run ON THE HOST and change real state, so
   // they are admin-gated, allowlisted by name, and each returns a structured
@@ -12319,7 +12340,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     // "Invalid" = the client itself reports an error, or the data it points at
     // is gone (typically archived to cloud and deleted locally). Files are
-    // never deleted here — there is nothing left to delete, and a torrent whose
+    // never deleted here â€” there is nothing left to delete, and a torrent whose
     // content still exists is left strictly alone.
     const invalid = torrents.filter((t) =>
       t.state === "error" || t.state === "missingFiles" ||
@@ -12338,7 +12359,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ok: true,
       summary: invalid.length
         ? `Removed ${invalid.length} invalid torrent entr${invalid.length === 1 ? "y" : "ies"} (no files deleted).`
-        : "No invalid torrents found — nothing to purge.",
+        : "No invalid torrents found â€” nothing to purge.",
       detail: invalid.slice(0, 20).map((t) => ({ name: t.name, state: t.state })),
     };
   }
@@ -12396,10 +12417,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     };
   }
 
-  // ── Jarvis admin tooling ──────────────────────────────────────────────────
+  // â”€â”€ Jarvis admin tooling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The brief asked for tools that read/write arbitrary environment variables
   // and execute arbitrary backend scripts. Built literally, that is a remote
-  // code execution path into this host reachable from a chat box — and Jarvis
+  // code execution path into this host reachable from a chat box â€” and Jarvis
   // reads untrusted text (scraped metadata, filenames, release names), so a
   // prompt-injection in a torrent title could drive it. Nothing about "admin
   // only" prevents that: the admin is the one being impersonated.
@@ -12482,7 +12503,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const value = String(req.body?.value ?? "").trim();
 
     if (AI_CONFIG_FORBIDDEN.has(key)) {
-      log("WARN", `Jarvis attempted to modify protected setting '${key}' — refused`, "security");
+      log("WARN", `Jarvis attempted to modify protected setting '${key}' â€” refused`, "security");
       return res.status(403).json({ error: `'${key}' can never be changed this way.` });
     }
     const meta = AI_CONFIG_WRITABLE[key];
@@ -12528,7 +12549,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // Telemetry so Jarvis can diagnose rather than guess. Read-only, and the
-  // response is capped — a model given 300k log lines is worse, not better.
+  // response is capped â€” a model given 300k log lines is worse, not better.
   app.get("/api/ai/diagnostics", async (req, res) => {
     const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
     if (!auth) return;
@@ -12602,7 +12623,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── AI telemetry: crash logs + client reports for the admin dashboard ──
+  // â”€â”€ AI telemetry: crash logs + client reports for the admin dashboard â”€â”€
   app.get("/api/ai/telemetry", async (req, res) => {
     const auth = getBrainOrUserAuth(req) ?? requireAuthenticatedUser(req, res);
     if (!auth) return;
@@ -12631,7 +12652,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const cluster = (rows: { message?: string }[]) => {
       const m = new Map<string, number>();
       for (const r of rows) {
-        const key = String(r.message ?? "").replace(/[0-9a-f]{8,}/gi, "…").replace(/\d+/g, "#").slice(0, 120);
+        const key = String(r.message ?? "").replace(/[0-9a-f]{8,}/gi, "â€¦").replace(/\d+/g, "#").slice(0, 120);
         m.set(key, (m.get(key) ?? 0) + 1);
       }
       return [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)
@@ -12645,14 +12666,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Stuck download watchdog ──────────────────────────────────
-  // A torrent sitting in stalledDL at 0% is not slow — no seeder is answering.
+  // â”€â”€ Stuck download watchdog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // A torrent sitting in stalledDL at 0% is not slow â€” no seeder is answering.
   // Waiting does not fix it, so this escalates through progressively stronger
   // remedies instead of retrying the same thing forever:
   //
-  //   strike 1  reannounce      — re-ask the trackers for peers (cheap, common fix)
-  //   strike 2  recheck         — rules out local corruption/partial data
-  //   strike 3  blocklist+search— tell Sonarr/Radarr the release is dead so it
+  //   strike 1  reannounce      â€” re-ask the trackers for peers (cheap, common fix)
+  //   strike 2  recheck         â€” rules out local corruption/partial data
+  //   strike 3  blocklist+searchâ€” tell Sonarr/Radarr the release is dead so it
   //                               picks a DIFFERENT one; the only real fix for
   //                               a release with no seeders left
   //
@@ -12660,7 +12681,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // slowly, is left completely alone.
   // Public trackers injected into magnets that cannot resolve metadata.
   // A magnet with no working tracker depends entirely on DHT, which is exactly
-  // the "Getting metadata… 0 B" stall — the client has no peer to ASK for the
+  // the "Getting metadataâ€¦ 0 B" stall â€” the client has no peer to ASK for the
   // torrent's file list, so it never starts.
   const FALLBACK_TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
@@ -12709,7 +12730,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const rec = stuckDownloads.get(t.hash)
         ?? { strikes: 0, lastProgress: t.progress, lastActionAt: 0, name: t.name, note: "" };
 
-      // Progress since last look means it is alive — reset and skip.
+      // Progress since last look means it is alive â€” reset and skip.
       if (t.progress > rec.lastProgress + 0.001) {
         stuckDownloads.set(t.hash, { ...rec, strikes: 0, lastProgress: t.progress, note: "recovering" });
         continue;
@@ -12737,7 +12758,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             body: new URLSearchParams({ hashes: t.hash }).toString(),
             signal: AbortSignal.timeout(10_000),
           });
-          rec.note = "no metadata — injected fallback trackers + reannounced";
+          rec.note = "no metadata â€” injected fallback trackers + reannounced";
         } else if (rec.strikes === 1) {
           await fetch(`${qbt.host}/api/v2/torrents/reannounce`, {
             method: "POST",
@@ -12756,7 +12777,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           rec.note = "forced recheck";
         } else if (rec.strikes >= 3) {
           // Dead release: drop it and let the *arr pick another. Data is
-          // deleted here deliberately — it is a 0% partial with nothing in it.
+          // deleted here deliberately â€” it is a 0% partial with nothing in it.
           const cfg = await loadArrConfig();
           await fetch(`${qbt.host}/api/v2/torrents/delete`, {
             method: "POST",
@@ -12768,7 +12789,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           let researched = false;
           if (cfg?.sonarrUrl && cfg.sonarrApiKey) {
             // Blocklisting the failed queue item makes Sonarr avoid this exact
-            // release when it searches again — otherwise it just grabs the same
+            // release when it searches again â€” otherwise it just grabs the same
             // dead torrent straight back.
             const hdr = { "X-Api-Key": cfg.sonarrApiKey, "Content-Type": "application/json" };
             const queue = await fetch(`${cfg.sonarrUrl}/api/v3/queue?pageSize=200`, { headers: hdr, signal: AbortSignal.timeout(10_000) })
@@ -12805,7 +12826,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // the reannounces and fast enough to clear a dead release within ~30 min.
   setInterval(() => { void runStuckDownloadWatchdog().catch(() => {}); }, STUCK_CHECK_MS);
 
-  // Episodes should arrive in order, not scattered across a season pack — a
+  // Episodes should arrive in order, not scattered across a season pack â€” a
   // half-complete pack with E01 missing is unwatchable, whereas strict
   // sequential order means each episode becomes playable as it lands.
   // qBittorrent implements this natively per torrent (sequential piece
@@ -12821,7 +12842,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const needSeq = torrents.filter((t) => !t.seq_dl).map((t) => t.hash);
     const needFL  = torrents.filter((t) => !t.f_l_piece_prio).map((t) => t.hash);
 
-    // These endpoints TOGGLE, so only send hashes that are currently off —
+    // These endpoints TOGGLE, so only send hashes that are currently off â€”
     // sending them blindly would turn the setting back off next cycle.
     if (needSeq.length) {
       await fetch(`${qbt.host}/api/v2/torrents/toggleSequentialDownload`, {
@@ -12873,7 +12894,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true, ...result });
   });
 
-  // ── Phone media backup ───────────────────────────────────────
+  // â”€â”€ Phone media backup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Chunked, resumable upload of a phone's camera roll. Files land in a
   // per-device folder, organised by capture month, and are then pushed to the
   // cloud by the normal Backup/Archive flow (category: photos).
@@ -12884,7 +12905,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     || path.join(os.homedir(), "nexus-phone-backup");
   const PHONE_TMP = path.join(PHONE_BACKUP_ROOT, ".incoming");
 
-  // Staging folders for direct PC → cloud uploads, one per category. Files are
+  // Staging folders for direct PC â†’ cloud uploads, one per category. Files are
   // written here, then pushed to the matching cloud category. Keeping them
   // separate from the media library means a half-finished upload never gets
   // picked up by a library scan mid-transfer.
@@ -12907,7 +12928,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  /** Device ids come from clients — never let one escape its own folder. */
+  /** Device ids come from clients â€” never let one escape its own folder. */
   function safeDeviceDir(deviceId: string): string | null {
     const clean = String(deviceId || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48);
     if (!clean) return null;
@@ -13026,7 +13047,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         if (!existsSync(part)) {
           out.destroy();
           await rm(dest, { force: true });
-          return res.status(400).json({ error: `Missing chunk ${i} — re-upload this file` });
+          return res.status(400).json({ error: `Missing chunk ${i} â€” re-upload this file` });
         }
         await new Promise<void>((ok, fail) => {
           const rs = createReadStream(part);
@@ -13047,11 +13068,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Cloud categories & quotas ────────────────────────────────
-  // Divides the Drive into named buckets (Photos, Music, Movies …) each with a
+  // â”€â”€ Cloud categories & quotas â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Divides the Drive into named buckets (Photos, Music, Movies â€¦) each with a
   // size limit and a retention rule, so one category can't silently consume the
   // whole account. Usage is measured from the cloud itself rather than tracked
-  // incrementally — a counter would drift the moment anything is added or
+  // incrementally â€” a counter would drift the moment anything is added or
   // removed outside the app.
   const CATEGORIES_FILE = path.join(PERSIST_DIR, "cloud-categories.json");
 
@@ -13078,7 +13099,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const raw = await readFile(CATEGORIES_FILE, "utf8");
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length) return parsed as CloudCategory[];
-    } catch { /* first run — fall through to defaults */ }
+    } catch { /* first run â€” fall through to defaults */ }
     return DEFAULT_CATEGORIES;
   }
 
@@ -13106,7 +13127,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           const r = await rcCall<{ count: number; bytes: number }>("operations/size", { fs: c.remotePath });
           usage![c.id] = { bytes: r.bytes ?? 0, count: r.count ?? 0 };
         } catch {
-          // Folder may simply not exist yet — that is zero usage, not an error.
+          // Folder may simply not exist yet â€” that is zero usage, not an error.
           usage![c.id] = { bytes: 0, count: 0 };
         }
       }));
@@ -13136,7 +13157,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!Array.isArray(incoming) || !incoming.length) {
       return res.status(400).json({ error: "categories[] required" });
     }
-    // Only the tunable fields are writable — remotePath is structural and a
+    // Only the tunable fields are writable â€” remotePath is structural and a
     // client must not be able to repoint a category at an arbitrary remote.
     const existing = await loadCategories();
     const merged = existing.map((cur) => {
@@ -13152,12 +13173,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     await mkdir(PERSIST_DIR, { recursive: true }).catch(() => {});
     await writeFile(CATEGORIES_FILE, JSON.stringify(merged, null, 2));
-    usageCache = null;   // limits changed — recompute on next read
+    usageCache = null;   // limits changed â€” recompute on next read
     log("info", `Cloud categories updated by ${auth.username ?? auth.userId}`, "cloud");
     return res.json({ ok: true, categories: merged });
   });
 
-  // ── Detach torrents whose files are gone ─────────────────────
+  // â”€â”€ Detach torrents whose files are gone â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Called by the UI after an archive-and-remove job finishes. rclone deletes
   // the files itself, so qBittorrent is left holding entries pointing at
   // nothing; this clears exactly those and never touches a torrent whose
@@ -13193,9 +13214,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Host upload job status ───────────────────────────────────
+  // â”€â”€ Host upload job status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The bulk archive upload runs as its own systemd unit (a plain `rclone
-  // copy`), NOT through the RC daemon — so core/stats cannot see it. We parse
+  // copy`), NOT through the RC daemon â€” so core/stats cannot see it. We parse
   // rclone's --stats-one-line output instead, which looks like:
   //   2026/08/13 20:55:06 INFO  : 9.436 GiB / 281.398 GiB, 3%, 4.165 MiB/s, ETA 18h34m28s (xfr#3/532)
   // Every rclone job writes ~/.local/share/rclone-<name>-upload.log. Scanning
@@ -13222,7 +13243,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const full = path.join(UPLOAD_LOG_DIR, file);
       try {
         const st = await stat(full);
-        // Read only the tail — these logs grow for hours and this is polled.
+        // Read only the tail â€” these logs grow for hours and this is polled.
         const TAIL = 16 * 1024;
         const from = Math.max(0, st.size - TAIL);
         const fh = await fsOpen(full, "r");
@@ -13279,11 +13300,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── AI Buddy: general chat ───────────────────────────────────
+  // â”€â”€ AI Buddy: general chat â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The client has always POSTed here as its fallback when a message is not a
-  // recognised command — but the route did not exist. Authenticated requests
+  // recognised command â€” but the route did not exist. Authenticated requests
   // therefore fell through to Express's default 404, which replies with an
-  // HTML page; the client then called .json() on "<!DOCTYPE html>…" and
+  // HTML page; the client then called .json() on "<!DOCTYPE html>â€¦" and
   // surfaced "unexpected token". Every AI question failed this way.
   app.post("/api/ai/chat", express.json(), async (req, res) => {
     const auth = getOptionalAuthUser(req);
@@ -13316,13 +13337,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (!text) return res.status(502).json({ error: "The AI returned an empty response." });
       return res.json({ response: text });
     } catch (e) {
-      // Always JSON — never let an upstream failure reach the client as HTML.
+      // Always JSON â€” never let an upstream failure reach the client as HTML.
       log("warn", `AI chat failed: ${String((e as Error).message ?? e)}`, "ai");
       return res.status(502).json({ error: `AI request failed: ${String((e as Error).message ?? e).slice(0, 200)}` });
     }
   });
 
-  // ── Jarvis Command Push (admin → client) ─────────────────────
+  // â”€â”€ Jarvis Command Push (admin â†’ client) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/ai/command", express.json(), async (req, res) => {
     const auth = getBrainOrUserAuth(req);
     if (!auth) return res.status(401).json({ error: "Unauthorized" });
@@ -13338,7 +13359,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true });
   });
 
-  // ── Jarvis Online Clients ─────────────────────────────────────
+  // â”€â”€ Jarvis Online Clients â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/ai/clients", async (req, res) => {
     const auth = getBrainOrUserAuth(req);
     if (!auth) return res.status(401).json({ error: "Unauthorized" });
@@ -13354,7 +13375,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch { return res.json({ clients: []  }); }
   });
 
-  // ── Playlists ─────────────────────────────────────────────────
+  // â”€â”€ Playlists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/playlists", async (_req, res) => {
     if (dbConnected && pool) {
       try {
@@ -13398,7 +13419,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.status(503).json({ error: "Database not connected" });
   });
 
-  // ── Watcher Status ────────────────────────────────────────────
+  // â”€â”€ Watcher Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/watcher/status", (_req, res) => {
     res.json({
       active: fileWatcher !== null,
@@ -13407,7 +13428,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Platform Cores ────────────────────────────────────────────
+  // â”€â”€ Platform Cores â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/cores", (_req, res) => {
     res.json(PLATFORM_CORES);
   });
@@ -13456,7 +13477,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const coresDir = await getCoresDir().catch(() => null);
     if (!coresDir) return null;
     const systemDir = path.join(path.dirname(coresDir), 'system');
-    // snap RetroArch uses lowercase; standalone may use uppercase — try both
+    // snap RetroArch uses lowercase; standalone may use uppercase â€” try both
     for (const variant of ['pcsx2', 'PCSX2', 'Pcsx2', 'PS2']) {
       const biosDir = path.join(systemDir, variant, 'bios');
       try {
@@ -13466,11 +13487,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return { dir: biosDir, file };
       } catch { /* try next variant */ }
     }
-    // Dir doesn't exist at all — return the canonical path so callers can create it
+    // Dir doesn't exist at all â€” return the canonical path so callers can create it
     return null;
   }
 
-  // GET /api/cores/status — list installed cores + what's available
+  // GET /api/cores/status â€” list installed cores + what's available
   app.get("/api/cores/status", async (_req, res) => {
     const coresDir = await getCoresDir();
     // Build list of all known cores
@@ -13498,7 +13519,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ cores: result, coresDir });
   });
 
-  // POST /api/cores/download — download from libretro buildbot
+  // POST /api/cores/download â€” download from libretro buildbot
   app.post("/api/cores/download", async (req, res) => {
     const { coreId } = req.body as { coreId: string };
     if (!coreId || !/^[a-z0-9_]+$/.test(coreId)) return res.status(400).json({ error: "Invalid coreId" });
@@ -13555,7 +13576,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // POST /api/cores/install-manual — copy a .dll/.so from user-specified path
+  // POST /api/cores/install-manual â€” copy a .dll/.so from user-specified path
   app.post("/api/cores/install-manual", async (req, res) => {
     const { sourcePath, coreId } = req.body as { sourcePath: string; coreId: string };
     if (!sourcePath || !coreId || !/^[a-z0-9_]+$/.test(coreId)) return res.status(400).json({ error: "sourcePath and coreId required" });
@@ -13570,7 +13591,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, installedPath: dest });
   });
 
-  // POST /api/cores/set-dir — point to existing RetroArch cores directory
+  // POST /api/cores/set-dir â€” point to existing RetroArch cores directory
   app.post("/api/cores/set-dir", async (req, res) => {
     const { coresDir } = req.body as { coresDir: string };
     if (!coresDir) return res.status(400).json({ error: "coresDir required" });
@@ -13591,7 +13612,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           const isTailscale = parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
           const isVpnName = /vpn|tun|tap|wg|wireguard/i.test(name);
           // Every one of these routes ONLY to itself or a sandboxed virtual
-          // network, never to a friend's device on the real LAN — but they
+          // network, never to a friend's device on the real LAN â€” but they
           // were previously indistinguishable from a real Wi-Fi/Ethernet
           // adapter (both just landed in 'lan'), so on any host with
           // VirtualBox/VMware/Hyper-V/Docker/WSL installed, whichever
@@ -13600,12 +13621,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           // then just never connects with no indication why. Deprioritized
           // rather than excluded outright, in case someone's only usable
           // adapter genuinely is one of these (e.g. a Hyper-V external
-          // switch bridged to the real LAN) — sorted last, not dropped.
+          // switch bridged to the real LAN) â€” sorted last, not dropped.
           //
           // Name matching alone isn't reliable: Windows frequently shows
           // these as generic "Ethernet N" / "Local Area Connection N" with
           // no vendor string at all once renamed (confirmed on this exact
-          // host — a real VirtualBox Host-Only adapter appeared simply as
+          // host â€” a real VirtualBox Host-Only adapter appeared simply as
           // "Ethernet 2", so /virtualbox/i.test(name) silently never
           // matched it and 192.168.56.1 kept winning over the real LAN
           // address anyway). VirtualBox's Host-Only default (192.168.56.0/24)
@@ -13630,7 +13651,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       tailscaleUrl: urls.find((u) => u.label === 'tailscale')?.url ?? null,
       lanUrl: urls.find((u) => u.label === 'lan')?.url ?? urls[0]?.url ?? null,
       bestUrl: urls[0]?.url ?? null,
-      // Same preference order as bestUrl, but a bare address — for callers
+      // Same preference order as bestUrl, but a bare address â€” for callers
       // (like netplay's --connect) that need an IP, not a http:// URL.
       bestAddress: addresses[0] ?? null,
     };
@@ -13778,7 +13799,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       } else {
         try {
           // This unconditionally called the Windows-only portable installer
-          // regardless of OS — on Linux/macOS it would download a .exe zip
+          // regardless of OS â€” on Linux/macOS it would download a .exe zip
           // and never produce a runnable binary, silently defeating the
           // "One-Click Host Setup" button's entire purpose on those hosts.
           const installed = process.platform === "linux"
@@ -13795,7 +13816,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       addStep("RetroArch", true, `Configured: ${emulatorPath}`);
     }
 
-    // 3) Install essential emulator cores (N64, SNES, NES, GBA, PS1 — best effort)
+    // 3) Install essential emulator cores (N64, SNES, NES, GBA, PS1 â€” best effort)
     if (emulatorPath) {
       const essentialCores = [
         "mupen64plus_next",  // N64 (Mario Kart 64, Zelda OOT, etc.)
@@ -13809,16 +13830,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       for (const coreId of essentialCores) {
         const r = await downloadCoreById(coreId);
         if (r.ok) coreResults.push(coreId);
-        else log("WARN", `Core install skipped: ${coreId} — ${r.error}`, context);
+        else log("WARN", `Core install skipped: ${coreId} â€” ${r.error}`, context);
       }
       addStep("Essential Cores", coreResults.length > 0, `Installed/verified: ${coreResults.join(", ") || "none"}`);
     } else {
-      addStep("Essential Cores", false, "Skipped — RetroArch not detected. Install RetroArch first.");
+      addStep("Essential Cores", false, "Skipped â€” RetroArch not detected. Install RetroArch first.");
     }
 
     // 4) Ensure vault and BIOS roots are sane
     const home = process.env.USERPROFILE ?? os.homedir();
-    // Cross-platform mount scan — covers Linux (/media/<user>/<volume>, /mnt/<volume>) and
+    // Cross-platform mount scan â€” covers Linux (/media/<user>/<volume>, /mnt/<volume>) and
     // macOS (/Volumes/<volume>) in addition to the Windows drive-letter guesses below.
     // VAULT_ROOT/BIOS_PATH env vars (already set correctly on this host) are still checked first.
     const romMountCandidates = await scanMountedVolumesFor(["ROMS", "roms", "Roms"]);
@@ -13864,7 +13885,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       addStep("BIOS Root", true, `Using: ${biosPath}`);
     }
 
-    // Host-local only — see persistEmulatorPath. These paths come from
+    // Host-local only â€” see persistEmulatorPath. These paths come from
     // auto-detection on THIS machine; writing them to the shared row is what
     // made one host's drive layout clobber every other host's.
     mem.vaultConfig.root_path = rootPath;
@@ -13970,7 +13991,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     };
   }
 
-  // ── Network Info (for remote pairing QR) ─────────────────────
+  // â”€â”€ Network Info (for remote pairing QR) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/network/info", async (_req, res) => {
     const net = getHostNetworkSummary();
     let qrDataUrl: string | null = null;
@@ -14216,7 +14237,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // Public endpoint — called without auth by RemoteClientOnboarding to show host info on the join step
+  // Public endpoint â€” called without auth by RemoteClientOnboarding to show host info on the join step
   app.get("/api/host/public-profile", async (_req, res) => {
     if (!pool || !dbConnected) return res.json(null);
     const row = await pool.query(
@@ -14242,11 +14263,25 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ readiness, rescuePlan });
   });
 
-  // ── Auth ──────────────────────────────────────────────────────
+  // â”€â”€ Auth â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Account creation had no limit at all, so one script could fill the users
   // table. Only successful sign-ups count, so typos and "name taken" retries
   // never lock a real person out.
+  // Every request reaches this server through the Cloudflare tunnel, i.e. from
+  // cloudflared on loopback, so req.ip is 127.0.0.1 for the whole internet. Keyed
+  // on that, one person's failed logins locked EVERYONE out ("Too many failed
+  // attempts" on outside networks) and ten sign-ups an hour served the world.
+  // Cloudflare puts the real client address in CF-Connecting-IP; it is trusted
+  // only when the request actually came from loopback, so nobody reaching the
+  // port directly can choose their own bucket.
+  const clientKey = (req: express.Request): string => {
+    const peer = req.socket.remoteAddress ?? "";
+    const viaTunnel = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+    const cf = String(req.headers["cf-connecting-ip"] ?? "").trim();
+    return ipKeyGenerator(viaTunnel && cf ? cf : (peer || "unknown"));
+  };
   const registerLimiter = rateLimit({
+    keyGenerator: clientKey,
     windowMs: 60 * 60 * 1000,
     limit: 10,
     standardHeaders: "draft-7",
@@ -14294,7 +14329,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // Supports username+password (accounts) OR legacy PIN (mobile remote)
-  // ── Password reset ───────────────────────────────────────────
+  // â”€â”€ Password reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Token design:
   //   - 32 random bytes, shown to the user exactly once
   //   - only its SHA-256 is stored, so a database leak yields nothing usable
@@ -14321,7 +14356,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   app.post("/api/auth/forgot", express.json(), async (req, res) => {
     const username = String(req.body?.username ?? "").trim();
-    // Deliberately uniform response — see note above.
+    // Deliberately uniform response â€” see note above.
     const generic = {
       ok: true,
       message: "If that account exists and has an email on file, a reset link has been sent.",
@@ -14349,7 +14384,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             html: `<p>Hi ${u.username},</p>
                    <p>Use the link below to set a new password. It expires in 1 hour and works once.</p>
                    <p><a href="${link}">Reset my password</a></p>
-                   <p>If you didn't ask for this, ignore this email — nothing has changed.</p>`,
+                   <p>If you didn't ask for this, ignore this email â€” nothing has changed.</p>`,
           }),
           signal: AbortSignal.timeout(10_000),
         }).catch(() => null);
@@ -14412,16 +14447,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   //
   // ACCESS_PIN is an 8-digit numeric secret and NEXUS_PUBLIC_URL is internet
   // reachable, so before this the whole keyspace was open to an unlimited
-  // guess rate — and a hit mints a 7-day JWT with full API access. Verified
+  // guess rate â€” and a hit mints a 7-day JWT with full API access. Verified
   // by test: ten rapid wrong PINs returned ten plain 401s, no backoff.
   //
   // Keyed per IP. Successful logins are not counted, so a legitimate user is
   // never locked out by their own activity; only failures burn the budget.
   const loginLimiter = rateLimit({
+    keyGenerator: clientKey,
     windowMs: 15 * 60 * 1000,
     // 20 failures / 15 min = ~1,900 guesses a day. Against an 8-digit PIN
     // (10^8 keyspace) that is ~52,000 days to exhaust, so brute force is dead
-    // either way — and a higher limit means a family member fumbling the PIN
+    // either way â€” and a higher limit means a family member fumbling the PIN
     // is far less likely to lock the house out. Note the block applies to the
     // IP once tripped: skipSuccessfulRequests stops successes being COUNTED,
     // it does not let a correct PIN through an active block.
@@ -14475,7 +14511,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const payload = (req as any).authPayload as any;
     if (!payload) return res.status(401).json({ error: "No token" });
     try {
-      // PIN session OR Brain API key session — return synthetic admin user
+      // PIN session OR Brain API key session â€” return synthetic admin user
       if (payload?.nexus || payload?.brain) {
         return res.json({ user: {
           id: "host", uid: "host",
@@ -14620,7 +14656,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try {
       const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
       if (payload?.userId) return { userId: String(payload.userId), username: payload.username ?? "user" };
-      // PIN session — stable identifier for host player so saves persist across browser re-logins
+      // PIN session â€” stable identifier for host player so saves persist across browser re-logins
       if (payload?.nexus) {
         return { userId: "host", username: "host" };
       }
@@ -14628,7 +14664,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch { res.status(401).json({ error: "Invalid token" }); return null; }
   }
 
-  // awehchat webhook helper — fire-and-forget
+  // awehchat webhook helper â€” fire-and-forget
   async function forwardToAwehchat(groupId: string, author: string, content: string): Promise<void> {
     if (!pool || !dbConnected) return;
     try {
@@ -14641,7 +14677,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         body: JSON.stringify({ bot: c.bot_name, group: groupId, author, message: content, type: "chat" }),
         signal: AbortSignal.timeout(6000),
       });
-    } catch { /* silent — never block message send */ }
+    } catch { /* silent â€” never block message send */ }
   }
 
   // In-memory message bus for SSE live streaming
@@ -14669,7 +14705,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch { res.status(401).json({ error: "Invalid token" }); return null; }
   }
 
-  // ── User Profile & Dashboard ──────────────────────────────────────────────
+  // â”€â”€ User Profile & Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Get full user profile with stats
   app.get("/api/profiles/:userId", async (req, res) => {
     const { userId } = req.params;
@@ -15233,7 +15269,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Friends system ────────────────────────────────────────────
+  // â”€â”€ Friends system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const DB_FRIENDS_SCHEMA = `
     CREATE TABLE IF NOT EXISTS friendships (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -15285,11 +15321,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       try {
         const r = await fetch(`${AWEHCHAT_API_URL}${ep}`, { headers, signal: AbortSignal.timeout(8000) });
         const text = await r.text();
-        if (!r.ok) { lastError = `${ep} → HTTP ${r.status}: ${text.slice(0, 120)}`; continue; }
+        if (!r.ok) { lastError = `${ep} â†’ HTTP ${r.status}: ${text.slice(0, 120)}`; continue; }
         const d = JSON.parse(text) as any;
         const arr: any[] = Array.isArray(d) ? d : (d.contacts ?? d.users ?? d.data ?? []);
         if (arr.length > 0) { contacts = arr; break; }
-      } catch (e: any) { lastError = `${ep} → ${e?.message}`; }
+      } catch (e: any) { lastError = `${ep} â†’ ${e?.message}`; }
     }
 
     // Fallback: extract unique participants from conversations
@@ -15493,7 +15529,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Notification system: AwehChat → Resend email fallback ────
+  // â”€â”€ Notification system: AwehChat â†’ Resend email fallback â”€â”€â”€â”€
   const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
   const RESEND_FROM    = process.env.RESEND_FROM ?? "NexusEmu <noreply@savestate.co.za>";
 
@@ -15553,7 +15589,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         resendSent = r.ok;
         if (!r.ok) {
           const errBody = await r.text().catch(() => '');
-          log("WARN", `Resend email failed: HTTP ${r.status} — ${errBody.slice(0,200)}`, "notify");
+          log("WARN", `Resend email failed: HTTP ${r.status} â€” ${errBody.slice(0,200)}`, "notify");
         } else log("INFO", `Resend email sent to ${notif.to_email}`, "notify");
       } catch (e: any) {
         log("WARN", `Resend error: ${e?.message}`, "notify");
@@ -15580,7 +15616,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Friend invite codes ──────────────────────────────────────
+  // â”€â”€ Friend invite codes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // In-memory store for invite codes (survives restart via DB)
   if (pool && dbConnected) {
     pool.query(`
@@ -15621,10 +15657,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         subject: `${displayName} wants to be your NexusEmu friend!`,
         body: `${displayName} invited you to connect on NexusEmu.\n\nAccept here: ${inviteUrl}\n\nOr enter code: ${code}\n\nExpires in 7 days.`,
         html: `<div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0d0d12;color:#fff;padding:32px;border-radius:16px">
-          <h2 style="color:#4d7cff;margin-bottom:8px">🎮 Friend Invite</h2>
+          <h2 style="color:#4d7cff;margin-bottom:8px">ðŸŽ® Friend Invite</h2>
           <p style="color:rgba(255,255,255,.7);font-size:16px"><strong style="color:#fff">${displayName}</strong> wants to be your NexusEmu friend!</p>
-          <a href="${inviteUrl}" style="display:inline-block;margin:24px 0;padding:12px 32px;background:#4d7cff;color:#fff;border-radius:12px;text-decoration:none;font-weight:700">Accept Invite →</a>
-          <p style="color:rgba(255,255,255,.4);font-size:12px">Or enter code <strong style="color:#4d7cff">${code}</strong> in NexusEmu → Profile → Friends → Enter Invite Code</p>
+          <a href="${inviteUrl}" style="display:inline-block;margin:24px 0;padding:12px 32px;background:#4d7cff;color:#fff;border-radius:12px;text-decoration:none;font-weight:700">Accept Invite â†’</a>
+          <p style="color:rgba(255,255,255,.4);font-size:12px">Or enter code <strong style="color:#4d7cff">${code}</strong> in NexusEmu â†’ Profile â†’ Friends â†’ Enter Invite Code</p>
         </div>`,
         event_type: 'friend_invite',
         data: { code, inviteUrl, from: displayName },
@@ -15655,7 +15691,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       [inv.from_user_id, auth.username, auth.username]
     ).catch(() => {});
     await pool.query("UPDATE friend_invites SET used_by=$1 WHERE code=$2", [auth.username, code.toUpperCase()]).catch(() => {});
-    // Invites grant media access — the host chose to invite this person
+    // Invites grant media access â€” the host chose to invite this person
     await pool.query("UPDATE users SET media_access=TRUE WHERE id=$1", [auth.userId]).catch(() => {});
     res.json({ ok: true, message: `You are now friends with ${inv.from_display_name || inv.from_username}!`, friend: { username: inv.from_username, display_name: inv.from_display_name }, media_access: true });
 
@@ -15663,11 +15699,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     sendNotification({
       to_user_id: inv.from_user_id,
       subject: `${auth.username} accepted your NexusEmu friend request!`,
-      body: `${auth.username} accepted your invite on NexusEmu. You can now play together!\n\nOpen NexusEmu → Multiplayer to start a session.`,
+      body: `${auth.username} accepted your invite on NexusEmu. You can now play together!\n\nOpen NexusEmu â†’ Multiplayer to start a session.`,
       html: `<div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0d0d12;color:#fff;padding:32px;border-radius:16px">
-        <h2 style="color:#22c55e">✅ Friend Request Accepted!</h2>
+        <h2 style="color:#22c55e">âœ… Friend Request Accepted!</h2>
         <p style="color:rgba(255,255,255,.7)"><strong style="color:#fff">${auth.username}</strong> accepted your NexusEmu friend invite.</p>
-        <a href="${process.env.NEXUS_PUBLIC_URL ?? 'https://savestate.co.za'}/?tab=multiplayer" style="display:inline-block;margin:24px 0;padding:12px 32px;background:#22c55e;color:#000;border-radius:12px;text-decoration:none;font-weight:700">Play Together →</a>
+        <a href="${process.env.NEXUS_PUBLIC_URL ?? 'https://savestate.co.za'}/?tab=multiplayer" style="display:inline-block;margin:24px 0;padding:12px 32px;background:#22c55e;color:#000;border-radius:12px;text-decoration:none;font-weight:700">Play Together â†’</a>
       </div>`,
       event_type: 'friend_accepted',
       data: { accepted_by: auth.username },
@@ -15684,9 +15720,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ valid: true, from_username: inv.from_username, from_display_name: inv.from_display_name });
   });
 
-  // ─────────────────────────────────────────────────────────────
-  // HOST GROUPS — owner-defined circles that control media/download access
-  // ─────────────────────────────���───────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // HOST GROUPS â€” owner-defined circles that control media/download access
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ï¿½ï¿½ï¿½â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   // List all groups the current user owns or is a member of
   app.get("/api/host-groups", async (req, res) => {
@@ -15744,7 +15780,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const g = await pool.query(
       `INSERT INTO host_groups (name,description,icon,color,owner_id,allow_media_access,allow_downloads)
        VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [name.trim(), description ?? '', icon ?? '🏠', color ?? '#4d7cff', auth.userId,
+      [name.trim(), description ?? '', icon ?? 'ðŸ ', color ?? '#4d7cff', auth.userId,
        allow_media_access !== false, allow_downloads !== false]
     ).then(r => r.rows[0]);
     res.json(g);
@@ -15833,7 +15869,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!g) {
       g = await pool.query(
         `INSERT INTO host_groups (name,description,icon,color,owner_id,allow_media_access,allow_downloads)
-         VALUES('Moh''s Circle','Default group — access to all host media','🎬','#4d7cff',$1,TRUE,TRUE) RETURNING *`,
+         VALUES('Moh''s Circle','Default group â€” access to all host media','ðŸŽ¬','#4d7cff',$1,TRUE,TRUE) RETURNING *`,
         [auth.userId]
       ).then(r => r.rows[0]);
     }
@@ -15850,9 +15886,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, groupId: g.id, groupName: g.name, added });
   });
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // HOST PROFILES & DIRECTORY — Plex-style host registration + discovery
-  // ─────────────────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // HOST PROFILES & DIRECTORY â€” Plex-style host registration + discovery
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   // Get my host profile (or null if not set up yet)
   app.get("/api/hosts/profile", async (req, res) => {
@@ -15884,7 +15920,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
          public_listing=$12, public_tagline=$13, public_price_rands=$14, updated_at=NOW()
        RETURNING *`,
       [auth.userId, name.trim(), description ?? '', safePlan, is_public ?? false,
-       allow_requests !== false, internet_url ?? '', icon ?? '🖥️', banner_color ?? '#4d7cff',
+       allow_requests !== false, internet_url ?? '', icon ?? 'ðŸ–¥ï¸', banner_color ?? '#4d7cff',
        maxUsers, tags ?? [], public_listing ?? false, (public_tagline ?? '').trim(),
        Math.max(0, Math.floor(Number(public_price_rands ?? 0)))]
     ).then(r => r.rows[0]);
@@ -15909,7 +15945,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json(rows);
   });
 
-  // Public host marketplace — all plans eligible (free hosts can list too)
+  // Public host marketplace â€” all plans eligible (free hosts can list too)
   app.get("/api/hosts/public-listings", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const q = String(req.query.q ?? '').trim();
@@ -15955,7 +15991,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, status: 'pending' });
   });
 
-  // My access request statuses (as a client — what hosts have I requested?)
+  // My access request statuses (as a client â€” what hosts have I requested?)
   app.get("/api/hosts/my-requests", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
@@ -16007,9 +16043,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, status });
   });
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // MEGA HOSTS — pooled hosting groups with contributor payout sharing
-  // ─────────────────────────────────────────────────────────────────────────
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // MEGA HOSTS â€” pooled hosting groups with contributor payout sharing
+  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   app.get("/api/mega-hosts", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
@@ -16049,7 +16085,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!name?.trim()) return res.status(400).json({ error: "name required" });
     const mh = await pool.query(
       `INSERT INTO mega_hosts (name,description,icon,owner_id,price_rands) VALUES($1,$2,$3,$4,$5) RETURNING *`,
-      [name.trim(), description ?? '', icon ?? '🌐', auth.userId, Math.max(0, Number(price_rands ?? 0))]
+      [name.trim(), description ?? '', icon ?? 'ðŸŒ', auth.userId, Math.max(0, Number(price_rands ?? 0))]
     ).then(r => r.rows[0]);
     await pool.query(
       "INSERT INTO mega_host_members (mega_host_id,user_id,role,storage_gb,payout_share) VALUES($1,$2,'owner',0,100)",
@@ -16118,7 +16154,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // ── Admin: list all users ──────────────────────────────────────────────────
+  // â”€â”€ Admin: list all users â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/admin/users", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAuthenticatedUser(req, res); if (!auth) return;
@@ -16152,7 +16188,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, user: r.rows[0] });
   });
 
-  // ── Host Management Dashboard ─────────────────────────────────────────────
+  // â”€â”€ Host Management Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/hosts/dashboard", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
@@ -16229,7 +16265,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // ── Tier management: update a user's tier ────────────────────────────────────
+  // â”€â”€ Tier management: update a user's tier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.patch("/api/hosts/members/:userId", express.json(), async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
@@ -16251,7 +16287,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // ── Invite links: CRUD + redemption ──────────────────────────────────────────
+  // â”€â”€ Invite links: CRUD + redemption â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/hosts/invites", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
@@ -16302,7 +16338,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json(row);
   });
 
-  // Redeem an invite — grants media_access + sets tier
+  // Redeem an invite â€” grants media_access + sets tier
   app.post("/api/invite/:code/redeem", express.json(), async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
@@ -16313,7 +16349,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!row) return res.status(404).json({ error: "Invite not found" });
     if (row.expires_at && new Date(row.expires_at) < new Date()) return res.status(410).json({ error: "Invite expired" });
     if (row.owner_id === auth.userId) return res.status(400).json({ error: "You cannot redeem your own invite" });
-    // Atomic conditional increment — only succeeds if under the usage cap, preventing TOCTOU races
+    // Atomic conditional increment â€” only succeeds if under the usage cap, preventing TOCTOU races
     const inc = await pool.query(
       "UPDATE host_invite_links SET use_count=use_count+1 WHERE id=$1 AND (max_uses IS NULL OR use_count < max_uses) RETURNING id",
       [row.id]
@@ -16338,10 +16374,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, tier: row.tier, user: me });
   });
 
-  // ── Storage rental: WITHDRAWN ────────────────────────────────────────────
+  // â”€â”€ Storage rental: WITHDRAWN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Peer-to-peer storage rental is not offered: there is no spare capacity to
   // sell. Storage is now a paid-account benefit instead, sized by user_tier in
-  // getUserStorageQuota() — the subscription funds the capacity.
+  // getUserStorageQuota() â€” the subscription funds the capacity.
   //
   // The routes are kept as explicit 410s rather than deleted so that any
   // client still calling them gets a clear answer instead of a 404 that looks
@@ -16356,17 +16392,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   };
   app.patch("/api/hosts/storage-rental", storageRentalWithdrawn);
 
-  // Storage marketplace — withdrawn alongside the rental listing route above.
+  // Storage marketplace â€” withdrawn alongside the rental listing route above.
   // Returns an empty list rather than 410: this one is a browse endpoint, and
   // any caller rendering a list handles "nothing available" gracefully, where
   // an error would surface to users as a broken page.
   app.get("/api/storage/marketplace", (_req, res) => res.json([]));
 
-  // ── Gateway status (connected app health monitor) ─────────────
+  // â”€â”€ Gateway status (connected app health monitor) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/gateways/status", async (_req, res) => {
     const SECOND_BRAIN_KEY = process.env.SECOND_BRAIN_API_KEY ?? "";
 
-    // Smart health check — tries multiple endpoints per gateway
+    // Smart health check â€” tries multiple endpoints per gateway
     async function checkGateway(name: string, baseUrl: string, authKey?: string): Promise<{
       status: 'online' | 'pending' | 'offline' | 'error';
       latencyMs: number;
@@ -16381,11 +16417,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           const r = await fetch(`${baseUrl}${ep}`, { headers, signal: AbortSignal.timeout(4000) });
           if (r.status < 500) {
             return { status: r.ok ? 'online' : 'pending', latencyMs: Date.now() - t0, http: r.status,
-              note: r.ok ? undefined : `HTTP ${r.status} on ${ep} — API routes may be pending deployment` };
+              note: r.ok ? undefined : `HTTP ${r.status} on ${ep} â€” API routes may be pending deployment` };
           }
         } catch { /* try next */ }
       }
-      return { status: 'offline', latencyMs: Date.now() - t0, note: 'Could not reach server — check DNS or if server is running' };
+      return { status: 'offline', latencyMs: Date.now() - t0, note: 'Could not reach server â€” check DNS or if server is running' };
     }
 
     const CONSOLIDATED_KEY = process.env.CONSOLIDATED_HUB_API_KEY ?? "";
@@ -16406,23 +16442,23 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({
       gateways: [
         { id: 'nexus',        name: 'NexusEmu (Second Brain)', url: process.env.SECOND_BRAIN_API_URL ?? 'https://savestate.co.za',
-          key_preview: SECOND_BRAIN_KEY ? `${SECOND_BRAIN_KEY.slice(0,8)}…` : null,
+          key_preview: SECOND_BRAIN_KEY ? `${SECOND_BRAIN_KEY.slice(0,8)}â€¦` : null,
           webhook_url: `${process.env.NEXUS_PUBLIC_URL ?? 'https://savestate.co.za'}/api/awehchat/webhook`,
           ...nexus },
         { id: 'awehchat',     name: 'AwehChat', url: AWEHCHAT_API_URL,
-          key_preview: AWEHCHAT_API_KEY ? `${AWEHCHAT_API_KEY.slice(0,8)}…` : null,
+          key_preview: AWEHCHAT_API_KEY ? `${AWEHCHAT_API_KEY.slice(0,8)}â€¦` : null,
           key_configured: !!AWEHCHAT_API_KEY,
           ...aweh },
         { id: 'consolidated', name: 'Consolidated Hub', url: CONSOLIDATED_URL,
-          key_preview: CONSOLIDATED_KEY ? `${CONSOLIDATED_KEY.slice(0,8)}…` : null,
+          key_preview: CONSOLIDATED_KEY ? `${CONSOLIDATED_KEY.slice(0,8)}â€¦` : null,
           key_configured: !!CONSOLIDATED_KEY,
           ...consolidated },
         { id: 'axion',        name: 'Axion', url: AXION_URL,
-          key_preview: AXION_KEY ? `${AXION_KEY.slice(0,8)}…` : null,
+          key_preview: AXION_KEY ? `${AXION_KEY.slice(0,8)}â€¦` : null,
           key_configured: !!AXION_KEY,
           ...axion },
         { id: 'financeplay',  name: 'FinancePlay', url: FINANCE_URL,
-          key_preview: FINANCE_KEY ? `${FINANCE_KEY.slice(0,8)}…` : null,
+          key_preview: FINANCE_KEY ? `${FINANCE_KEY.slice(0,8)}â€¦` : null,
           key_configured: !!FINANCE_KEY,
           ...finance },
       ],
@@ -16436,31 +16472,31 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const financeKey      = process.env.FINANCEPLAY_API_KEY ?? '';
     res.json({
       brain: {
-        key_preview: (process.env.SECOND_BRAIN_API_KEY ?? '').slice(0,8) + '…',
+        key_preview: (process.env.SECOND_BRAIN_API_KEY ?? '').slice(0,8) + 'â€¦',
         url: process.env.SECOND_BRAIN_API_URL ?? 'https://savestate.co.za',
         usage: 'Authorization: Bearer <key>  or  X-Brain-Key: <key>',
         endpoints: '/api/brain/capabilities',
         configured: !!(process.env.SECOND_BRAIN_API_KEY),
       },
       awehchat: {
-        key_preview: (AWEHCHAT_API_KEY ?? '').slice(0,8) + '…',
+        key_preview: (AWEHCHAT_API_KEY ?? '').slice(0,8) + 'â€¦',
         url: AWEHCHAT_API_URL,
         configured: !!AWEHCHAT_API_KEY,
       },
       consolidated: {
-        key_preview: consolidatedKey ? consolidatedKey.slice(0,8) + '…' : '—',
+        key_preview: consolidatedKey ? consolidatedKey.slice(0,8) + 'â€¦' : 'â€”',
         url: process.env.CONSOLIDATED_HUB_URL ?? 'http://localhost:5010',
         usage: 'Authorization: Bearer <key>',
         configured: !!consolidatedKey,
       },
       axion: {
-        key_preview: axionKey ? axionKey.slice(0,8) + '…' : '—',
+        key_preview: axionKey ? axionKey.slice(0,8) + 'â€¦' : 'â€”',
         url: process.env.AXION_URL ?? 'http://localhost:5011',
         usage: 'Authorization: Bearer <key>',
         configured: !!axionKey,
       },
       financeplay: {
-        key_preview: financeKey ? financeKey.slice(0,8) + '…' : '—',
+        key_preview: financeKey ? financeKey.slice(0,8) + 'â€¦' : 'â€”',
         url: process.env.FINANCEPLAY_URL ?? 'http://localhost:5012',
         usage: 'Authorization: Bearer <key>',
         configured: !!financeKey,
@@ -16468,9 +16504,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Emulator Health Check — full system readiness report ──────
+  // â”€â”€ Emulator Health Check â€” full system readiness report â”€â”€â”€â”€â”€â”€
   // Returns status of RetroArch, each platform's core, BIOS files,
-  // and ROM vault. Safe to call frequently — all checks are local filesystem reads.
+  // and ROM vault. Safe to call frequently â€” all checks are local filesystem reads.
   app.get("/api/emulator/health", async (_req, res) => {
     const config = await getVaultConfig();
 
@@ -16501,9 +16537,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ? path.join(path.dirname(coresDir), 'system', 'pcsx2', 'bios')
       : null;
 
-    // Browser BIOS path (for EmulatorJS — PS1, GBA, etc.)
+    // Browser BIOS path (for EmulatorJS â€” PS1, GBA, etc.)
     // A configured bios_path with the wrong/no files inside still fails at
-    // runtime with no useful message — check for the actual required
+    // runtime with no useful message â€” check for the actual required
     // filenames per platform instead of just "is a path set".
     const browserBiosOk = !!(config.bios_path);
     let browserBiosFiles: string[] = [];
@@ -16527,7 +16563,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     // PCSX2 standalone (for PS2)
     const pcsx2Info = await detectPcsx2Path();
-    // Dolphin (GameCube/Wii) and RPCS3 (PS3) standalone — these used to be
+    // Dolphin (GameCube/Wii) and RPCS3 (PS3) standalone â€” these used to be
     // checked only by their own isolated /api/emulator/detect-* endpoints,
     // never surfaced here, so the main health dashboard had no visibility
     // into GameCube/Wii/PS3 readiness at all (unlike PS2's pcsx2_standalone
@@ -16538,7 +16574,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const xeniaPath = await detectXeniaPath();
     const switchEmu = await detectSwitchEmuPath();
 
-    // Issues — convenient summary for clients to display/act on.
+    // Issues â€” convenient summary for clients to display/act on.
     // `fix`/`fixes` values map 1:1 to fix types accepted by POST /api/emulator/auto-fix,
     // so every issue that CAN be safely automated carries its own one-click repair.
     const issues: { code: string; severity: 'error' | 'warning'; message: string; fix?: string; fixes?: string[] }[] = [];
@@ -16551,7 +16587,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       issues.push({
         code: `no_${platform}_bios`,
         severity: status.required ? 'error' : 'warning',
-        message: `${platform.toUpperCase()} BIOS file missing from ${config.bios_path || 'browser BIOS path'} — need one of: ${status.checkedFor.join(', ')}`,
+        message: `${platform.toUpperCase()} BIOS file missing from ${config.bios_path || 'browser BIOS path'} â€” need one of: ${status.checkedFor.join(', ')}`,
         fix: 'configure_browser_bios',
       });
     }
@@ -16565,23 +16601,23 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       });
     }
     // Only nag about a standalone emulator if the library actually has games
-    // for it — same reasoning as the per-platform BIOS check above.
+    // for it â€” same reasoning as the per-platform BIOS check above.
     const libraryPlatforms = new Set(mem.games.map((g) => (g.platform ?? '').toLowerCase()));
     if (!dolphinPath && (libraryPlatforms.has('gamecube') || libraryPlatforms.has('wii'))) {
-      issues.push({ code: 'no_dolphin', severity: 'warning', message: 'Dolphin not installed — needed for GameCube/Wii games', fix: 'install_dolphin' });
+      issues.push({ code: 'no_dolphin', severity: 'warning', message: 'Dolphin not installed â€” needed for GameCube/Wii games', fix: 'install_dolphin' });
     }
     if (!rpcs3Path && libraryPlatforms.has('ps3')) {
-      issues.push({ code: 'no_rpcs3', severity: 'warning', message: 'RPCS3 not installed — needed for PS3 games', fix: 'install_rpcs3' });
+      issues.push({ code: 'no_rpcs3', severity: 'warning', message: 'RPCS3 not installed â€” needed for PS3 games', fix: 'install_rpcs3' });
     }
     if (!xemuPath && libraryPlatforms.has('xbox')) {
-      issues.push({ code: 'no_xemu', severity: 'warning', message: 'xemu not installed — needed for original Xbox games', fix: 'install_xemu' });
+      issues.push({ code: 'no_xemu', severity: 'warning', message: 'xemu not installed â€” needed for original Xbox games', fix: 'install_xemu' });
     }
     if (!xeniaPath && libraryPlatforms.has('xbox360')) {
       // No auto-fix: Xenia has no official Linux build to package-manager-install.
-      issues.push({ code: 'no_xenia', severity: 'warning', message: 'Xenia not installed — needed for Xbox 360 games. No Linux build exists; run via Windows/Proton and set XENIA_PATH.' });
+      issues.push({ code: 'no_xenia', severity: 'warning', message: 'Xenia not installed â€” needed for Xbox 360 games. No Linux build exists; run via Windows/Proton and set XENIA_PATH.' });
     }
     if (!switchEmu && libraryPlatforms.has('switch')) {
-      issues.push({ code: 'no_switch_emu', severity: 'warning', message: 'No Switch emulator installed — needed for Switch games', fix: 'install_ryujinx' });
+      issues.push({ code: 'no_switch_emu', severity: 'warning', message: 'No Switch emulator installed â€” needed for Switch games', fix: 'install_ryujinx' });
     }
 
     res.json({
@@ -16615,7 +16651,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Emulator Auto-Fix — install/create missing components ─────
+  // â”€â”€ Emulator Auto-Fix â€” install/create missing components â”€â”€â”€â”€â”€
   app.post("/api/emulator/auto-fix", async (req, res) => {
     const { fixes } = (req.body ?? {}) as { fixes: string[] };
     if (!Array.isArray(fixes) || fixes.length === 0) {
@@ -16650,7 +16686,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
                 results.push({ fix: 'install_retroarch:cores', ok: true, detail: `${count} libretro cores installed in ${coresDir}` });
               }
             } catch (coreErr: any) {
-              results.push({ fix: 'install_retroarch:cores', ok: false, detail: `Core bundle install failed: ${String(coreErr?.message ?? coreErr)} — cores can still be downloaded individually` });
+              results.push({ fix: 'install_retroarch:cores', ok: false, detail: `Core bundle install failed: ${String(coreErr?.message ?? coreErr)} â€” cores can still be downloaded individually` });
             }
           }
         } else if (fix === 'install_dolphin') {
@@ -16711,10 +16747,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           }
         } else if (fix === 'create_ps2_bios_dir') {
           const coresDir = await getCoresDir().catch(() => null);
-          if (!coresDir) { results.push({ fix, ok: false, detail: 'RetroArch not found — install it first' }); continue; }
+          if (!coresDir) { results.push({ fix, ok: false, detail: 'RetroArch not found â€” install it first' }); continue; }
           const biosDir = path.join(path.dirname(coresDir), 'system', 'pcsx2', 'bios');
           await mkdir(biosDir, { recursive: true });
-          results.push({ fix, ok: true, detail: `Created: ${biosDir} — place PS2 BIOS .bin file inside` });
+          results.push({ fix, ok: true, detail: `Created: ${biosDir} â€” place PS2 BIOS .bin file inside` });
         } else if (fix.startsWith('download_core:')) {
           const coreId = fix.split(':')[1];
           if (!coreId) { results.push({ fix, ok: false, detail: 'Invalid core ID' }); continue; }
@@ -16725,7 +16761,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             results.push({ fix, ok: false, detail: (result as any)?.error ?? 'Core download failed' });
           }
         } else if (fix === 'configure_browser_bios') {
-          // Fixes health issue `no_browser_bios` — reuses the same candidate detection
+          // Fixes health issue `no_browser_bios` â€” reuses the same candidate detection
           // as easy-setup: prefer an existing BIOS folder, otherwise create the default.
           const home = process.env.USERPROFILE ?? os.homedir();
           const biosMountCandidates = await scanMountedVolumesFor(["BIOS", "bios", "Bios"]);
@@ -16750,11 +16786,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           results.push({
             fix, ok: true,
             detail: created
-              ? `Created BIOS folder: ${biosPath} — place BIOS files (e.g. PS1 scph*.bin) inside`
+              ? `Created BIOS folder: ${biosPath} â€” place BIOS files (e.g. PS1 scph*.bin) inside`
               : `BIOS path configured: ${biosPath}`,
           });
         } else if (fix === 'configure_vault_root') {
-          // Fixes health issue `no_vault` — detection only. Deliberately does NOT invent an
+          // Fixes health issue `no_vault` â€” detection only. Deliberately does NOT invent an
           // empty ROM folder: pointing a live library at a fresh dir would silently "fix" the
           // issue while hiding the user's games. If nothing is found, tell the user what to do.
           const home = process.env.USERPROFILE ?? os.homedir();
@@ -16776,7 +16812,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           mem.vaultConfig.root_path = rootPath;
           persistHostStateNow().catch(() => {});
           await startVaultWatcher(rootPath).catch(() => {});
-          results.push({ fix, ok: true, detail: `ROM vault configured: ${rootPath} — run a library scan to index games` });
+          results.push({ fix, ok: true, detail: `ROM vault configured: ${rootPath} â€” run a library scan to index games` });
         } else {
           results.push({ fix, ok: false, detail: `Unknown fix: ${fix}` });
         }
@@ -16789,7 +16825,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: allOk, results });
   });
 
-  // ── Emulator Auto-Detect + Core Download ─────────────────────
+  // â”€â”€ Emulator Auto-Detect + Core Download â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/emulator/detect", async (_req, res) => {
     const found = await detectRetroArchPath();
     if (found) {
@@ -16826,7 +16862,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── PCSX2 detect + install ─────────────────────────────────────
+  // â”€â”€ PCSX2 detect + install â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/emulator/detect-pcsx2", async (_req, res) => {
     const info = await detectPcsx2Path();
     if (info) return res.json({ found: true, path: info.path, isWine: info.isWine, isRetroArchCore: info.isRetroArchCore });
@@ -16855,7 +16891,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Dolphin detect + install ────────────────────────────────────
+  // â”€â”€ Dolphin detect + install â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const DOLPHIN_CANDIDATES = [
     process.env.DOLPHIN_PATH,
     // Portable/bundled and standard Windows installs. Dolphin ships as
@@ -16895,7 +16931,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // Shared by the standalone endpoint below and /api/emulator/auto-fix's
   // install_dolphin fix. dolphin-emu.org itself has no unauthenticated
   // direct-download API to script against (unlike libretro's buildbot),
-  // so — like RPCS3 below — this goes through real package managers rather
+  // so â€” like RPCS3 below â€” this goes through real package managers rather
   // than attempting a fragile scraped download.
   async function installDolphinLinux(): Promise<string> {
     const existing = await detectDolphinPath();
@@ -16908,12 +16944,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         if (rechk) return rechk;
       } catch (e) { tried.push(String(e)); }
     }
-    throw new Error(`Dolphin auto-install failed (tried snap/apt/flatpak) — install manually from dolphin-emu.org.\n${tried.join('\n')}`);
+    throw new Error(`Dolphin auto-install failed (tried snap/apt/flatpak) â€” install manually from dolphin-emu.org.\n${tried.join('\n')}`);
   }
 
   // rpcs3.net sits behind a Cloudflare JS challenge that blocks scripted
   // downloads outright (confirmed: a plain request gets a 403 challenge
-  // page, not the file) — so, unlike RetroArch's libretro-buildbot-based
+  // page, not the file) â€” so, unlike RetroArch's libretro-buildbot-based
   // portable install, there's no reliable direct-download path here either.
   // Package managers (which pull from Flathub/Snap Store, not rpcs3.net
   // directly) are the only automatable route.
@@ -16928,7 +16964,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         if (rechk) return rechk;
       } catch (e) { tried.push(String(e)); }
     }
-    throw new Error(`RPCS3 auto-install failed (tried flatpak/snap) — install manually from rpcs3.net.\n${tried.join('\n')}`);
+    throw new Error(`RPCS3 auto-install failed (tried flatpak/snap) â€” install manually from rpcs3.net.\n${tried.join('\n')}`);
   }
 
   async function installXemuLinux(): Promise<string> {
@@ -16942,11 +16978,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         if (rechk) return rechk;
       } catch (e) { tried.push(String(e)); }
     }
-    throw new Error(`xemu auto-install failed (tried flatpak/snap) — install manually from xemu.app.\n${tried.join('\n')}`);
+    throw new Error(`xemu auto-install failed (tried flatpak/snap) â€” install manually from xemu.app.\n${tried.join('\n')}`);
   }
 
   // Original Yuzu/Ryujinx are both gone (taken down after Nintendo's 2024
-  // legal action) — io.github.ryubing.Ryujinx is the actively-maintained
+  // legal action) â€” io.github.ryubing.Ryujinx is the actively-maintained
   // continuation and the only one with a real Flathub listing to install
   // from automatically.
   async function installRyujinxLinux(): Promise<string> {
@@ -16960,7 +16996,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         if (rechk) return rechk.path;
       } catch (e) { tried.push(String(e)); }
     }
-    throw new Error(`Ryujinx auto-install failed (tried flatpak/snap) — install manually (search "Ryujinx" on Flathub).\n${tried.join('\n')}`);
+    throw new Error(`Ryujinx auto-install failed (tried flatpak/snap) â€” install manually (search "Ryujinx" on Flathub).\n${tried.join('\n')}`);
   }
 
   app.post("/api/emulator/install-dolphin", async (_req, res) => {
@@ -16991,15 +17027,15 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Host setup export — clone a working host's cores/BIOS to a client ──
+  // â”€â”€ Host setup export â€” clone a working host's cores/BIOS to a client â”€â”€
   // Cores can already be auto-downloaded (installRetroArchCoresBundle) and
   // BIOS can already be manually placed, but BIOS files specifically can
-  // NEVER be auto-downloaded (copyrighted console firmware) — if a host
+  // NEVER be auto-downloaded (copyrighted console firmware) â€” if a host
   // already has them working, letting a client pull that exact working set
   // instead of sourcing their own is the one part of "auto install" that
   // has no other automatable path. Deliberately does NOT touch saves/states
-  // — those stay per-client, per-profile, never overwritten by this.
-  // SHA-256 of a file, streamed rather than buffered — an emulator install can
+  // â€” those stay per-client, per-profile, never overwritten by this.
+  // SHA-256 of a file, streamed rather than buffered â€” an emulator install can
   // contain individual files in the hundreds of MB, and the standalone manifest
   // below hashes every file in the folder.
   async function sha256File(absPath: string): Promise<string | null> {
@@ -17028,10 +17064,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   // BIOS actually lives in up to two unrelated places on a host: the generic
   // `config.bios_path` (a manually-set folder used for browser/EmulatorJS BIOS
-  // — Saturn, NDS, Sega CD, etc.) and RetroArch's own auto-detected
+  // â€” Saturn, NDS, Sega CD, etc.) and RetroArch's own auto-detected
   // system/pcsx2/bios directory (`findPs2BiosDir()`, the same function the
-  // health check uses — never requires manual configuration). The manifest/
-  // export endpoints below only ever looked at the first one — on a host
+  // health check uses â€” never requires manual configuration). The manifest/
+  // export endpoints below only ever looked at the first one â€” on a host
   // where bios_path was never set (or points somewhere empty) but a real,
   // working PS2 BIOS is sitting in RetroArch's own folder, cloning reported
   // zero BIOS files available even though the host genuinely has one.
@@ -17120,7 +17156,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (all.length === 0) return res.status(404).json({ error: "No cores installed on this host" });
       const skip = parseSkipParam(req.query.skip);
       const entries = all.filter((f) => !skip.has(f));
-      // Everything the client asked for is already correct on its side — 204 so
+      // Everything the client asked for is already correct on its side â€” 204 so
       // it doesn't spend time unpacking an empty archive.
       if (entries.length === 0) return res.status(204).end();
       const { default: AdmZip } = await import("adm-zip");
@@ -17163,12 +17199,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Standalone emulator export (PCSX2 / Dolphin / RPCS3 / Switch) ──────
+  // â”€â”€ Standalone emulator export (PCSX2 / Dolphin / RPCS3 / Switch) â”€â”€â”€â”€â”€â”€
   //
   // client-launcher.cjs's cloneHostSetup() has always called these two routes,
-  // but they were never implemented server-side — so every standalone-emulator
+  // but they were never implemented server-side â€” so every standalone-emulator
   // clone 404'd, and because the client wraps that call in a bare try/catch
-  // ("older host version — not fatal") the whole feature failed completely
+  // ("older host version â€” not fatal") the whole feature failed completely
   // silently. That mattered most for Dolphin/GameCube and the Switch
   // emulators, which have no portable auto-installer of their own
   // (installStandaloneEmulatorPortable only covers some), making cloning the
@@ -17177,11 +17213,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   // Local state and caches: large, machine-specific, and useless (sometimes
   // actively harmful) on another machine. Note "bios" is deliberately NOT here
-  // — PCSX2 keeps its BIOS inside its own folder and genuinely needs it to boot.
+  // â€” PCSX2 keeps its BIOS inside its own folder and genuinely needs it to boot.
   const STANDALONE_EMULATOR_EXCLUDE_DIRS = new Set([
     'cache', 'caches', 'logs', 'savestates', 'sstates', 'memcards', 'screenshots',
     'dumps', 'shadercache', 'shader_cache', 'gamesettings', 'covers',
-    // RPCS3 virtual filesystem — this is where installed PS3 games live and can
+    // RPCS3 virtual filesystem â€” this is where installed PS3 games live and can
     // run to tens of GB. The emulator recreates it empty on first run.
     'dev_hdd0', 'dev_hdd1', 'dev_usb000', 'dev_flash', 'dev_flash2', 'dev_flash3',
     '.git', 'node_modules',
@@ -17210,7 +17246,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // pcsx2-qt.exe / Dolphin.exe / rpcs3.exe / eden.exe), and a portable folder
     // is the only layout where copying the exe's directory yields a working
     // emulator. A package install (/usr/bin, /snap/bin, flatpak exports) fails
-    // both tests at once — its binaries can't run on the client anyway, and its
+    // both tests at once â€” its binaries can't run on the client anyway, and its
     // "directory" is a shared system bin dir that must never be archived.
     // A Linux host still serves these fine when the Windows builds live on the
     // shared drive (see PCSX2_CANDIDATES' LaunchBox\Emulators entries).
@@ -17247,7 +17283,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // SHA-256'ing an entire emulator install is genuinely expensive: a Dolphin
   // folder is ~800 files and was measured at ~15.7s on the host's drive, and
   // that cost was paid on EVERY auto-setup run, before the client could show any
-  // progress at all — indistinguishable from a hang. The answer only changes
+  // progress at all â€” indistinguishable from a hang. The answer only changes
   // when the emulator folder does, so cache it against a signature built from
   // stat() alone (file count + total bytes + newest mtime): no file contents are
   // read, so validating the cache is milliseconds rather than seconds.
@@ -17295,7 +17331,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         }
         const tooBig = bytes > STANDALONE_EMULATOR_MAX_BYTES;
         if (tooBig) {
-          log("WARN", `[export/standalone] ${key} at ${dir} is ${(bytes / 1e9).toFixed(1)}GB — refusing to offer it for cloning`, "emulator");
+          log("WARN", `[export/standalone] ${key} at ${dir} is ${(bytes / 1e9).toFixed(1)}GB â€” refusing to offer it for cloning`, "emulator");
         }
         const entry: StandaloneManifestEntry = tooBig
           ? { available: false, count: 0, bytes, hashes: {} }
@@ -17334,7 +17370,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       for (const rel of files) {
         const parts = rel.split('/');
         // addLocalFile's 2nd arg is the in-zip folder, so nested files keep
-        // their layout — the client extracts straight over its emulator dir.
+        // their layout â€” the client extracts straight over its emulator dir.
         zip.addLocalFile(path.join(dir, ...parts), parts.slice(0, -1).join('/'));
       }
       const buf = zip.toBuffer();
@@ -17346,7 +17382,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Installer: status + provision SSE ─────────────────────────
+  // â”€â”€ Installer: status + provision SSE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/installer/status", async (_req, res) => {
     const emuPath = await detectRetroArchPath();
     const coresDir = await getCoresDir().catch(() => null);
@@ -17368,7 +17404,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // GET /api/installer/provision — SSE stream of install steps
+  // GET /api/installer/provision â€” SSE stream of install steps
   app.get("/api/installer/provision", async (req, res) => {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -17384,7 +17420,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (emuPath) {
         step("RetroArch", "skip", `Already installed: ${emuPath}`);
       } else {
-        step("RetroArch", "info", "Installing RetroArch…");
+        step("RetroArch", "info", "Installing RetroArchâ€¦");
         try {
           emuPath = process.platform === "linux" ? await installRetroArchLinux() : await installRetroArchWindowsPortable();
           await persistEmulatorPath(emuPath);
@@ -17401,7 +17437,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (ffmpegPath) {
         step("FFmpeg", "skip", `Already installed: ${ffmpegPath}`);
       } else {
-        step("FFmpeg", "info", "Installing FFmpeg…");
+        step("FFmpeg", "info", "Installing FFmpegâ€¦");
         try {
           if (process.platform === "linux") await execAsync("pkexec apt-get install -y ffmpeg", { timeout: 120_000 });
           else await installFfmpegWindows();
@@ -17415,14 +17451,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } finally { res.end(); }
   });
 
-  // ── Brain API key management ──────────────────────────────────
+  // â”€â”€ Brain API key management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/brain/key", async (_req, res) => {
     const cfg = await getVaultConfig();
     const key = String(cfg.brain_api_key ?? "");
-    res.json({ configured: !!key, key_preview: key ? `${key.slice(0, 8)}…${key.slice(-4)}` : null });
+    res.json({ configured: !!key, key_preview: key ? `${key.slice(0, 8)}â€¦${key.slice(-4)}` : null });
   });
 
-  // Reveal the full key (for the dashboard UI — requires auth already checked by middleware)
+  // Reveal the full key (for the dashboard UI â€” requires auth already checked by middleware)
   app.get("/api/brain/key/reveal", async (_req, res) => {
     const cfg = await getVaultConfig();
     const key = String(cfg.brain_api_key ?? "");
@@ -17463,10 +17499,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // POST /api/brain/invite — brain-key-authenticated invite generator
+  // POST /api/brain/invite â€” brain-key-authenticated invite generator
   // Allows Second Brain / Jarvis to generate friend or host invites on the owner's behalf.
-  // type = 'friend' → friend invite (joins social + media access)
-  // type = 'host'   → host invite link for the media/games library
+  // type = 'friend' â†’ friend invite (joins social + media access)
+  // type = 'host'   â†’ host invite link for the media/games library
   app.post("/api/brain/invite", express.json(), async (req, res) => {
     const payload = (req as any).authPayload;
     if (!payload?.brain) return res.status(403).json({ error: "Brain API key required" });
@@ -17528,9 +17564,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         subject: `${displayName} invited you to NexusEmu!`,
         body: `${displayName} invited you to connect on NexusEmu.\n\nAccept here: ${inviteUrl}\n\nOr enter code: ${code}\n\nExpires in 7 days.`,
         html: `<div style="font-family:sans-serif;max-width:480px;margin:auto;background:#0d0d12;color:#fff;padding:32px;border-radius:16px">
-          <h2 style="color:#4d7cff;margin-bottom:8px">🎮 NexusEmu Invite</h2>
+          <h2 style="color:#4d7cff;margin-bottom:8px">ðŸŽ® NexusEmu Invite</h2>
           <p style="color:rgba(255,255,255,.7);font-size:16px"><strong style="color:#fff">${displayName}</strong> invited you to join their media &amp; games library!</p>
-          <a href="${inviteUrl}" style="display:inline-block;margin:24px 0;padding:12px 32px;background:#4d7cff;color:#fff;border-radius:12px;text-decoration:none;font-weight:700">Accept Invite →</a>
+          <a href="${inviteUrl}" style="display:inline-block;margin:24px 0;padding:12px 32px;background:#4d7cff;color:#fff;border-radius:12px;text-decoration:none;font-weight:700">Accept Invite â†’</a>
           <p style="color:rgba(255,255,255,.4);font-size:12px">Or enter code <strong style="color:#4d7cff">${code}</strong> in NexusEmu</p>
         </div>`,
         event_type: 'friend_invite',
@@ -17542,7 +17578,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ type: 'friend', code, inviteUrl, expiresIn: '7 days', emailSent: !!to_email.trim() });
   });
 
-  // GET /api/brain/capabilities — structured manifest for AI agents
+  // GET /api/brain/capabilities â€” structured manifest for AI agents
   app.get("/api/brain/capabilities", (_req, res) => {
     res.json({
       version: "2.0",
@@ -17552,19 +17588,19 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         description: "Push any command to a connected client via POST /api/ai/command. The client executes it instantly on their screen.",
         push_endpoint: "POST /api/ai/command",
         push_body: {
-          target_user_id: "<UUID — from GET /api/ai/clients>",
+          target_user_id: "<UUID â€” from GET /api/ai/clients>",
           broadcast: "<true to push to ALL connected clients instead>",
           command: "<one of the command objects below>",
         },
-        clients_endpoint: "GET /api/ai/clients  — list currently connected (online) users",
+        clients_endpoint: "GET /api/ai/clients  â€” list currently connected (online) users",
         command_types: [
           { type: "navigate",       params: { tab: "media|music|library|pcgames|torrent|photos|discover|multiplayer|codex|ai|activity|profile" }, desc: "Switch tab on client" },
-          { type: "play_media",     params: { relPath: "<string>", title: "<string>" }, desc: "Play a movie or episode — fuzzy-matched by title if relPath unknown" },
+          { type: "play_media",     params: { relPath: "<string>", title: "<string>" }, desc: "Play a movie or episode â€” fuzzy-matched by title if relPath unknown" },
           { type: "open_series",    params: { seriesId: "<string>", title: "<string>" }, desc: "Open a TV series panel" },
           { type: "play_music",     params: { trackId: "<string>", trackTitle: "<string>", artist: "<string>" }, desc: "Play a music track" },
-          { type: "launch_game",    params: { gameId: "<string>", title: "<string>", source: "<steam|epic|retroarch|…>", appId: "<string>" }, desc: "Launch a ROM or PC game" },
+          { type: "launch_game",    params: { gameId: "<string>", title: "<string>", source: "<steam|epic|retroarch|â€¦>", appId: "<string>" }, desc: "Launch a ROM or PC game" },
           { type: "control_media",  params: { action: "pause|resume|stop|seek", value: "<seconds if seek>" }, desc: "Control the active video player" },
-          { type: "set_volume",     params: { value: "<0–100>" }, desc: "Set player volume" },
+          { type: "set_volume",     params: { value: "<0â€“100>" }, desc: "Set player volume" },
           { type: "search_media",   params: { query: "<string>" }, desc: "Open media search" },
           { type: "search_sonarr",  params: { query: "<string>" }, desc: "Search Sonarr for a series" },
           { type: "search_radarr",  params: { query: "<string>" }, desc: "Search Radarr for a movie" },
@@ -17572,29 +17608,29 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           { type: "scan_music",     params: {}, desc: "Trigger music deep scan" },
           { type: "open_photos",    params: {}, desc: "Open photo albums" },
           { type: "surprise_me",    params: {}, desc: "Open media with surprise pick" },
-          { type: "delete_media",   params: { relPath: "<string>", title: "<string>" }, desc: "Open delete-confirmation for one movie/episode — requires the user to confirm on screen, admin/host only" },
-          { type: "delete_series",  params: { seriesTitle: "<string>" }, desc: "Open delete-confirmation for a whole series — requires the user to confirm on screen, admin/host only" },
-          { type: "system_status",  params: {}, desc: "Show live host disk/CPU/memory stats — read-only" },
+          { type: "delete_media",   params: { relPath: "<string>", title: "<string>" }, desc: "Open delete-confirmation for one movie/episode â€” requires the user to confirm on screen, admin/host only" },
+          { type: "delete_series",  params: { seriesTitle: "<string>" }, desc: "Open delete-confirmation for a whole series â€” requires the user to confirm on screen, admin/host only" },
+          { type: "system_status",  params: {}, desc: "Show live host disk/CPU/memory stats â€” read-only" },
         ],
       },
       natural_language: {
         description: "Send a natural language query and get back Jarvis actions + a friendly reply",
         endpoint: "POST /api/ai/navigate",
         body: { query: "<string>", context: { activeTab: "<string>", username: "<string>" } },
-        response: { ok: true, message: "<reply>", actions: ["<array of command objects>"], suggestions: ["<…>"] },
+        response: { ok: true, message: "<reply>", actions: ["<array of command objects>"], suggestions: ["<â€¦>"] },
       },
       library: {
-        media:   "GET /api/media/library — { items: [{ name, relPath, category, kind }] }",
-        series:  "GET /api/media/series  — { series: [{ id, name, … }] }",
-        music:   "GET /api/music/collection — { tracks: [{ id, title, artist }] }",
-        games:   "GET /api/games — { games: [{ id, title, platform }] }",
-        pcgames: "GET /api/pc-games/library — { games: [{ title, source, appId }] }",
+        media:   "GET /api/media/library â€” { items: [{ name, relPath, category, kind }] }",
+        series:  "GET /api/media/series  â€” { series: [{ id, name, â€¦ }] }",
+        music:   "GET /api/music/collection â€” { tracks: [{ id, title, artist }] }",
+        games:   "GET /api/games â€” { games: [{ id, title, platform }] }",
+        pcgames: "GET /api/pc-games/library â€” { games: [{ title, source, appId }] }",
       },
       endpoints: [
         { method: "GET",    path: "/api/health",              desc: "Server health + version" },
         { method: "GET",    path: "/api/ai/clients",          desc: "List currently connected (online) users" },
         { method: "POST",   path: "/api/ai/command",          desc: "Push a Jarvis command to a client or broadcast" },
-        { method: "POST",   path: "/api/ai/navigate",         desc: "Natural language → Jarvis actions" },
+        { method: "POST",   path: "/api/ai/navigate",         desc: "Natural language â†’ Jarvis actions" },
         { method: "GET",    path: "/api/media/library",       desc: "Full media library" },
         { method: "GET",    path: "/api/media/series",        desc: "TV series list" },
         { method: "GET",    path: "/api/music/collection",    desc: "Music collection" },
@@ -17621,12 +17657,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // meant the whole matrix was rebuilt on every launch request and nothing
   // outside that callback could reach it. Hoisted to startServer scope so the
   // alternates endpoint can share it.
-  // ── Emulator fallback matrix ──────────────────────────────────────────────
+  // â”€â”€ Emulator fallback matrix â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // A platform usually has more than one emulator that can run it, but the
   // launch path committed to exactly one and returned a 500 if it failed. PS2
   // is the clearest case: a pcsx2_libretro core that SIGABRTs on this machine's
-  // OpenGL stack made the game unplayable even though standalone PCSX2 — or
-  // Play! — would have run it.
+  // OpenGL stack made the game unplayable even though standalone PCSX2 â€” or
+  // Play! â€” would have run it.
   //
   // Each entry is tried in order and the first that both EXISTS and actually
   // stays alive wins. A candidate that is simply not installed is skipped
@@ -17739,7 +17775,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // installed, so the UI can grey out what it cannot do.
   //
   // Registered here rather than beside EMULATOR_FALLBACKS, because that lives
-  // inside the /api/games/launch handler — defining a route there nests it in
+  // inside the /api/games/launch handler â€” defining a route there nests it in
   // a request callback, so it only exists after someone launches a game.
   app.get("/api/emulator/alternates", async (req, res) => {
     const auth = requireAnyAuth(req, res);
@@ -17763,7 +17799,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const { platform } = req.params;
     const config = await getVaultConfig();
 
-    // PS3 uses RPCS3 standalone — check that instead of a RetroArch core
+    // PS3 uses RPCS3 standalone â€” check that instead of a RetroArch core
     if (platform.toLowerCase() === 'ps3') {
       const rpcs3Path = await detectRpcs3Path();
       return res.json({
@@ -17794,16 +17830,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // WASM build on EmulatorJS's CDN, before it spends a download + full boot attempt
   // on one that doesn't (PS2/pcsx2, GameCube-Wii/dolphin, PS3/rpcs3 and other heavy
   // consoles were never actually published upstream). Checked against the real CDN
-  // rather than guessed from platform metadata — PLATFORM_CORES' `standalone` field
+  // rather than guessed from platform metadata â€” PLATFORM_CORES' `standalone` field
   // marks platforms with a native fallback option, not ones lacking a browser core;
   // PS1/pcsx_rearmed for example has both and works fine in-browser. Cached since
   // the answer for a given core never changes day to day.
   const wasmCoreAvailabilityCache = new Map<string, { available: boolean; checkedAt: number }>();
 
-  // EmulatorJS's friendly EJS_core aliases → the libretro core name the CDN
+  // EmulatorJS's friendly EJS_core aliases â†’ the libretro core name the CDN
   // actually publishes as "<name>-wasm.data". Only aliases that differ from the
   // published name need an entry; anything already passed by its libretro name
-  // (snes9x, gambatte, genesis_plus_gx, pcsx_rearmed, stella, …) falls through
+  // (snes9x, gambatte, genesis_plus_gx, pcsx_rearmed, stella, â€¦) falls through
   // to the raw-name candidate in the availability check below.
   const EJS_CORE_ALIASES: Record<string, string> = {
     nes: 'fceumm',
@@ -17844,7 +17880,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       // EmulatorJS accepts friendly ALIASES for EJS_core ("nes", "n64", "gba"),
       // but the CDN publishes every core under its LIBRETRO name (fceumm,
       // mupen64plus_next, mgba). HEAD-ing the alias therefore 404s for cores
-      // that play perfectly well — measured: nes, n64 and gba all reported
+      // that play perfectly well â€” measured: nes, n64 and gba all reported
       // available:false, which made the player refuse to start three of the
       // most common systems in the library with "isn't playable in the
       // browser". Resolve the alias first, then fall back to the raw name so a
@@ -17863,13 +17899,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       wasmCoreAvailabilityCache.set(core, { available, checkedAt: Date.now() });
       res.json({ available, core });
     } catch {
-      // Upstream unreachable — don't block play on a network hiccup; let the
+      // Upstream unreachable â€” don't block play on a network hiccup; let the
       // normal EmulatorJS load path surface its own error if it's genuinely missing.
       res.json({ available: true, core });
     }
   });
 
-  // ── BIOS Upload & Serve ────────────────────────────────────────────────────
+  // â”€â”€ BIOS Upload & Serve â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/emulator/bios/upload", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
@@ -17887,7 +17923,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   app.get("/api/emulator/bios/serve/:filename", async (req, res) => {
     // BIOS files are fetched directly by EmulatorJS's internal downloader, which cannot
-    // send a custom Authorization header — so accept the JWT via ?token= query param too,
+    // send a custom Authorization header â€” so accept the JWT via ?token= query param too,
     // mirroring the pattern already used by /api/ai/stream and /api/daemon/stream below.
     // This closes the previously-unauthenticated read of arbitrary BIOS filenames while
     // keeping in-browser play (EmulatorJS) working with zero local install required.
@@ -17925,20 +17961,20 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.status(404).json({ error: `BIOS file not found: ${filename}` });
   });
 
-  // ── EmulatorJS asset self-hosting (origin-pull cache) ───────────
+  // â”€â”€ EmulatorJS asset self-hosting (origin-pull cache) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // EmulatorJS's own loader/runtime/cores used to be fetched straight from
-  // cdn.emulatorjs.org on every play — a third-party outage or no internet
+  // cdn.emulatorjs.org on every play â€” a third-party outage or no internet
   // meant in-browser emulation broke entirely, with nothing self-hosted to
   // fall back to. Rather than pre-bundling every possible core up front
   // (most of which a given library will never touch), this caches each
   // asset locally the first time it's requested and serves the cached copy
-  // on every request after that — same end result (your server is the one
+  // on every request after that â€” same end result (your server is the one
   // actually serving play sessions, works fully offline once warm), without
   // shipping gigabytes of cores nobody has ROMs for.
   const EJS_CACHE_DIR = path.join(PERSIST_DIR, "emulatorjs-cache");
   const EJS_UPSTREAM = "https://cdn.emulatorjs.org/stable/data/";
   // Two concurrent first-requests for the same uncached asset would otherwise
-  // both fetch upstream and both writeFile() the same path — for a
+  // both fetch upstream and both writeFile() the same path â€” for a
   // multi-write wasm core, interleaved writes can corrupt the cache entry,
   // which then gets served to everyone until manually cleared. Coalesce
   // concurrent fetches of the same subPath into one in-flight promise.
@@ -17970,7 +18006,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // The classes from the first load are still perfectly good, so skip the
   // re-execution and reuse them. Applied here rather than by hand-editing the
   // cached copy, because EJS_CACHE_DIR re-downloads a pristine loader.js from
-  // upstream whenever the cache is cleared — which would silently undo the fix.
+  // upstream whenever the cache is cleared â€” which would silently undo the fix.
   const patchEjsLoader = (src: string): string => {
     let out = src;
     out = out.replace(
@@ -17989,7 +18025,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return out;
   };
 
-  // ── Native libretro core mirror ────────────────────────────────────────────
+  // â”€â”€ Native libretro core mirror â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Every desktop client used to fetch its RetroArch cores straight from
   // buildbot.libretro.com at the moment somebody pressed Play. That is an
   // outside service in the critical path of playing a game: when it is slow,
@@ -17999,7 +18035,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   //
   // This mirrors cores onto the host: the first request for a given core pulls
   // it once from upstream and caches it under the vault, and every request
-  // after that — from any device on the network, forever — is served locally
+  // after that â€” from any device on the network, forever â€” is served locally
   // with no external dependency at all. Same cache-then-proxy shape as the
   // EmulatorJS asset route directly below.
   const NATIVE_CORE_DIR = path.join(EJS_CACHE_DIR, "native-cores");
@@ -18007,7 +18043,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   app.get("/api/emulator/native-core/:os/:arch/:file", async (req, res) => {
     const { os: coreOs, arch, file } = req.params as Record<string, string>;
-    // Whitelist every component — these compose into an upstream URL and a
+    // Whitelist every component â€” these compose into an upstream URL and a
     // filesystem path, so neither may contain traversal or anything exotic.
     if (!/^(windows|linux|osx)$/.test(coreOs)
       || !/^(x86_64|arm64)$/.test(arch)
@@ -18021,7 +18057,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("X-Nexus-Core-Source", "host-cache");
       return res.sendFile(cachedPath);
-    } catch { /* not mirrored yet — pull it once, below */ }
+    } catch { /* not mirrored yet â€” pull it once, below */ }
 
     const upstream = coreOs === "windows"
       ? `https://buildbot.libretro.com/nightly/windows/x86_64/latest/${file}`
@@ -18032,7 +18068,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const key = `${coreOs}/${arch}/${file}`;
     try {
       // Ten clients pressing Play on the same console at once must cause ONE
-      // upstream fetch, not ten — they all await the same promise.
+      // upstream fetch, not ten â€” they all await the same promise.
       let pending = nativeCoreInFlight.get(key);
       if (!pending) {
         pending = (async () => {
@@ -18091,7 +18127,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return res.send(patchEjsLoader(raw));
       }
       return res.sendFile(cachedPath);
-    } catch { /* not cached yet — pull from upstream below */ }
+    } catch { /* not cached yet â€” pull from upstream below */ }
 
     try {
       const { buf, contentType } = await fetchAndCacheEjsAsset(subPath, cachedPath);
@@ -18107,13 +18143,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── ROM Upload ─────────────────────────────────────────────────────────────
-  // ── Chunked ROM upload state ────────────────────────────────────────────────
+  // â”€â”€ ROM Upload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // â”€â”€ Chunked ROM upload state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // RomUploader splits anything over ~40MB into sequential chunks (to stay under
   // Cloudflare's request-body cap) and sends x-chunk-index / x-chunk-total /
   // x-upload-id. Those headers were never read here: every chunk opened
   // createWriteStream(dest) fresh, which TRUNCATES, so each chunk overwrote the
-  // previous from byte 0 and the finished "ROM" was only ever its LAST chunk —
+  // previous from byte 0 and the finished "ROM" was only ever its LAST chunk â€”
   // silently corrupt, still answered {ok:true}, and still got inserted into the
   // library as a playable game. Measured against a real 90MB upload before the
   // fix: 94,371,840 bytes sent, 10,485,760 bytes on disk. That is why ROMs
@@ -18201,7 +18237,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         session = { tmpPath, dest, nextIndex: 0, total: chunkTotal, bytes: 0, startedAt: Date.now() };
         romUploadSessions.set(uploadId, session);
       } else if (!session) {
-        return res.status(409).json({ error: 'Unknown upload session — restart the upload from the first chunk.' });
+        return res.status(409).json({ error: 'Unknown upload session â€” restart the upload from the first chunk.' });
       }
       // Strict ordering. The uploader sends chunks sequentially and awaits each
       // response, so an out-of-order index means a dropped/retried request; a
@@ -18209,7 +18245,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       // exactly the failure mode this endpoint is being fixed for.
       if (chunkIndex !== session.nextIndex) {
         return res.status(409).json({
-          error: `Chunk out of order (got ${chunkIndex}, expected ${session.nextIndex}) — restart the upload.`,
+          error: `Chunk out of order (got ${chunkIndex}, expected ${session.nextIndex}) â€” restart the upload.`,
           expectedIndex: session.nextIndex,
         });
       }
@@ -18227,7 +18263,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           session.bytes += ws.bytesWritten;
           session.nextIndex = chunkIndex + 1;
           // Not the final chunk: acknowledge and wait for the next one. Crucially
-          // no DB insert, no AI scrape and no art fetch happen here — those used
+          // no DB insert, no AI scrape and no art fetch happen here â€” those used
           // to run on EVERY chunk, so a 3-chunk upload hit Gemini three times and
           // rewrote the same row repeatedly with different generated titles.
           if (session.nextIndex < session.total) {
@@ -18287,7 +18323,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
         const ssePayload = JSON.stringify({ type: "new-rom-detected", game: rowToGame(game) });
         sseClients.forEach((c) => { try { c.write(`data: ${ssePayload}\n\n`); } catch { sseClients.delete(c); } });
-        log("INFO", `✨ Client uploaded game added: "${game.title}" [${platform.toUpperCase()}] → ${core.coreName}`, "watcher");
+        log("INFO", `âœ¨ Client uploaded game added: "${game.title}" [${platform.toUpperCase()}] â†’ ${core.coreName}`, "watcher");
 
         (async () => {
           const localArt = await findLocalGameArt(dest, gameId).catch(() => null);
@@ -18298,7 +18334,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
               const g = mem.games.find((g) => g.id === gameId);
               if (g) (g as any).boxArt = localArt;
             }
-            log("INFO", `🖼️ Local art found for client uploaded: "${game.title}"`, "art");
+            log("INFO", `ðŸ–¼ï¸ Local art found for client uploaded: "${game.title}"`, "art");
           } else {
             const artUrl = await fetchAndSaveArt(gameId, String(game.title), platform).catch(() => null);
             if (artUrl) {
@@ -18308,7 +18344,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
                 const g = mem.games.find((g) => g.id === gameId);
                 if (g) (g as any).boxArt = artUrl;
               }
-              log("INFO", `🎨 Art fetched from LibretroThumbnails for client uploaded: "${game.title}"`, "art");
+              log("INFO", `ðŸŽ¨ Art fetched from LibretroThumbnails for client uploaded: "${game.title}"`, "art");
             }
           }
         })().catch(() => {});
@@ -18326,7 +18362,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       });
   });
 
-  // ── Save State Cloud Sync ──────────────────────────────────────────────────
+  // â”€â”€ Save State Cloud Sync â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/emulator/savestates/:gameId", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
     const dir = path.join(PERSIST_DIR, 'savestates', String(auth.userId), req.params.gameId);
@@ -18426,7 +18462,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // ── Game Download (for mobile / device transfer) ──────────────
+  // â”€â”€ Game Download (for mobile / device transfer) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.head("/api/games/:id/download", async (req, res) => {
     const { id } = req.params;
     const config = await getVaultConfig();
@@ -18498,7 +18534,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     log("INFO", `ROM download: ${filename}`, "remote");
   });
 
-  // ── Auto-scan a single file (dropped externally) ──────────────
+  // â”€â”€ Auto-scan a single file (dropped externally) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/vault/ingest", async (req, res) => {
     const { file_path } = req.body as { file_path: string };
     if (!file_path) return res.status(400).json({ error: "file_path required" });
@@ -18508,7 +18544,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ success: true });
   });
 
-  // ── Art Serving ───────────────────────────────────────────────
+  // â”€â”€ Art Serving â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Box art is saved under a .png name whatever it contains (new art is
   // re-encoded to WebP), so the type is read from the bytes. Art saved before
   // that re-encode existed is the raw thumbnail, often several hundred KB;
@@ -18577,7 +18613,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         },
       });
     }
-    // Art file missing — trigger a background fetch so the next browser request returns real art.
+    // Art file missing â€” trigger a background fetch so the next browser request returns real art.
     // artFetchInProgress prevents duplicate concurrent fetches when many cards load at once.
     if (!artFetchInProgress.has(id)) {
       artFetchInProgress.add(id);
@@ -18620,12 +18656,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   </svg>`;
     res.status(200);
     res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
-    // Short cache — browser will retry and get real art after background fetch completes
+    // Short cache â€” browser will retry and get real art after background fetch completes
     res.setHeader("Cache-Control", "public, max-age=30, stale-while-revalidate=60");
     res.end(fallbackSvg);
   });
 
-  // ── Fetch art for a single game ───────────────────────────────
+  // â”€â”€ Fetch art for a single game â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/games/:id/fetch-art", async (req, res) => {
     const { id } = req.params;
     let title = "", platform = "unknown";
@@ -18652,7 +18688,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ success: true, artUrl });
   });
 
-  // ── Download ROM file for streaming to client (for mobile auto-download) ──
+  // â”€â”€ Download ROM file for streaming to client (for mobile auto-download) â”€â”€
   app.get("/api/games/:id/download-rom", async (req, res) => {
     const { id } = req.params;
     const config = await getVaultConfig();
@@ -18711,7 +18747,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     logActivity({ userId: dlPayload?.userId, username: dlPayload?.username, ip: (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() ?? req.ip, userAgent: req.headers['user-agent'], method: 'GET', path: req.path, eventType: 'rom_download', targetType: 'game', targetId: id, targetName: fileName });
   });
 
-  // ── Batch fetch art for games missing boxart ──────────────────
+  // â”€â”€ Batch fetch art for games missing boxart â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/art/fetch-batch", async (req, res) => {
     const limit = Math.min(parseInt(String((req.body as any)?.limit ?? 500)), 5000);
     let games: { id: string; title: string; platform: string; relative_path?: string }[] = [];
@@ -18775,7 +18811,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     })().catch((e) => log("ERROR", `Batch art error: ${e}`, "art"));
   });
 
-  // ── Sync art from a local images folder (LaunchBox / RetroArch thumbnails / custom) ──
+  // â”€â”€ Sync art from a local images folder (LaunchBox / RetroArch thumbnails / custom) â”€â”€
   app.post("/api/art/sync-folder", async (req, res) => {
     const { folder } = req.body as { folder: string };
     if (!folder) return res.status(400).json({ error: "folder required" });
@@ -18786,7 +18822,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // Background: walk the folder looking for image files, match to games by filename stem
     (async () => {
       await ensureArtDir();
-      // Build a title→gameId lookup from the database
+      // Build a titleâ†’gameId lookup from the database
       let games: { id: string; title: string }[] = [];
       if (dbConnected && pool) {
         try {
@@ -18797,7 +18833,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         games = mem.games.map(g => ({ id: g.id, title: g.title }));
       }
 
-      // Index: normalized title → game id
+      // Index: normalized title â†’ game id
       const titleIndex = new Map<string, string[]>();
       for (const g of games) {
         const key = g.title.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -18844,7 +18880,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     })().catch(e => log("ERROR", `Art sync-folder error: ${e}`, "art"));
   });
 
-  // ── Auto-detect & sync RetroArch thumbnails ───────────────────
+  // â”€â”€ Auto-detect & sync RetroArch thumbnails â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/art/sync-retroarch-thumbnails", async (_req, res) => {
     const RA_THUMBNAIL_CANDIDATES = [
       path.join(process.cwd(), "runtime", "RetroArch", "thumbnails"),
@@ -18864,7 +18900,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return res.json({ found: false, message: "RetroArch thumbnails folder not found. Point Nexus to your images folder via Art Sync." });
     }
 
-    res.json({ found: true, thumbnailsRoot, message: "Syncing RetroArch thumbnails in background…" });
+    res.json({ found: true, thumbnailsRoot, message: "Syncing RetroArch thumbnails in backgroundâ€¦" });
 
     // Background sync: walk thumbnails/<system>/Named_Boxarts/<title>.png
     (async () => {
@@ -18902,7 +18938,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     })().catch(e => log("ERROR", `RetroArch thumbnail sync error: ${e}`, "art"));
   });
 
-  // ── Filesystem Browser (for mobile/web folder picker) ─────────
+  // â”€â”€ Filesystem Browser (for mobile/web folder picker) â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/fs/mkdir", async (req, res) => {
     const { path: dirPath } = req.body as { path: string };
     if (!dirPath || typeof dirPath !== "string") return res.status(400).json({ error: "path required" });
@@ -19019,7 +19055,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Media Hub (scaffold) ─────────────────────────────────────
+  // â”€â”€ Media Hub (scaffold) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/media/library", async (req, res) => {
     // Check media access: must be logged in AND have media_access flag (or be admin)
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
@@ -19027,7 +19063,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       try {
         const payload = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] }) as any;
         if (!payload?.nexus && !payload?.brain && payload?.userId) {
-          // Regular user — check media_access
+          // Regular user â€” check media_access
           if (dbConnected && pool) {
             const r = await pool.query("SELECT role, media_access FROM users WHERE id=$1", [payload.userId]).catch(() => null);
             const u = r?.rows[0];
@@ -19101,7 +19137,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // "Scan Host for PC Videos" in the media scraper panel. The button has always
-  // POSTed here, but no handler existed — Express fell through to the SPA
+  // POSTed here, but no handler existed â€” Express fell through to the SPA
   // catch-all, so the client got index.html, failed to parse it as JSON and
   // surfaced a raw error instead of scanning anything. Sweeps every known drive
   // root (not just the current media root) and reports what it found.
@@ -19191,7 +19227,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     const totalSizeEarly = Number.parseInt(String(req.query.totalSize ?? "0"), 10) || 0;
 
-    // ── Resume an interrupted transfer instead of restarting it ──────────────
+    // â”€â”€ Resume an interrupted transfer instead of restarting it â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // A 300GB library is uploaded as a queue of multi-GB files. Completed FILES
     // were already remembered across reloads, but a file interrupted halfway
     // was not: the next attempt minted a brand new uploadId and re-sent every
@@ -19202,7 +19238,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // existing session for this exact file (same user, same relative path, same
     // byte count) and hand its id back along with the chunk indices already
     // held. The client skips those and carries on where it stopped.
-    // ── Content-addressed dedup ────────────────────────────────────────────
+    // â”€â”€ Content-addressed dedup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Resume above matches on path + size, which misses two common cases: the
     // same file offered under a different name, and a file already in the
     // library being re-sent by a batch that lost track of what it had done.
@@ -19219,11 +19255,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           "SELECT id, title, relative_path FROM games WHERE file_hash = $1 LIMIT 1", [sha256],
         ).then((r) => r.rows[0]).catch(() => null);
         if (dup) {
-          log("INFO", `Upload skipped — ${filenameRaw} already present as "${dup.title}"`, "upload");
+          log("INFO", `Upload skipped â€” ${filenameRaw} already present as "${dup.title}"`, "upload");
           return res.json({
             ok: true, duplicate: true, skipUpload: true,
             existing: { id: dup.id, title: dup.title, path: dup.relative_path },
-            message: `Already in your library as "${dup.title}" — nothing to upload.`,
+            message: `Already in your library as "${dup.title}" â€” nothing to upload.`,
           });
         }
       } catch { /* dedup is an optimisation; never block an upload on it */ }
@@ -19269,13 +19305,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           try {
             const st = await stat(path.join(UPLOAD_TEMP_DIR, dir, f));
             if (st.size > 0) received.push(Number(match[1]));
-          } catch { /* unreadable — treat as missing so it is re-sent */ }
+          } catch { /* unreadable â€” treat as missing so it is re-sent */ }
         }
         received.sort((a, b) => a - b);
         log("INFO", `Resuming upload ${relRaw || filenameRaw}: ${received.length}/${totalChunks} chunks already held`, "upload");
         return res.json({ ok: true, uploadId: dir, resumed: true, receivedChunks: received });
       }
-    } catch { /* no resumable session — fall through and start fresh */ }
+    } catch { /* no resumable session â€” fall through and start fresh */ }
 
     const uploadId = crypto.randomUUID();
     const tempUploadDir = path.join(UPLOAD_TEMP_DIR, uploadId);
@@ -19284,7 +19320,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       await mkdir(tempUploadDir, { recursive: true });
       // totalSize lets /complete prove the assembled file is byte-for-byte the
       // size the client set out to send. Without it a transfer interrupted
-      // mid-chunk still merged and was reported as a successful upload — the
+      // mid-chunk still merged and was reported as a successful upload â€” the
       // corruption only surfaced later as a movie that refused to play.
       const totalSize = Number.parseInt(String(req.query.totalSize ?? "0"), 10) || 0;
       const meta = {
@@ -19474,7 +19510,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       await unlink(target).catch(() => {});
       log("ERROR", `Upload size mismatch for ${relativeTarget}: got ${bytesWritten}, expected ${meta.totalSize}`, "media");
       return res.status(500).json({
-        error: `Upload incomplete (${bytesWritten} of ${meta.totalSize} bytes) — nothing was added to the library. Please retry.`,
+        error: `Upload incomplete (${bytesWritten} of ${meta.totalSize} bytes) â€” nothing was added to the library. Please retry.`,
       });
     }
 
@@ -19506,9 +19542,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true, name: safeName, size: bytesWritten, relPath: relativeTarget, mediaRoot: root });
   });
 
-  // Stream upload directly to disk — no RAM buffering (handles multi-GB series episodes)
+  // Stream upload directly to disk â€” no RAM buffering (handles multi-GB series episodes)
   app.post("/api/media/upload", async (req, res) => {
-    // Auth + privilege check (reads from headers, not body — safe before consuming stream)
+    // Auth + privilege check (reads from headers, not body â€” safe before consuming stream)
     const authUser = getOptionalAuthUser(req);
     if (!authUser?.userId) {
       req.resume();
@@ -19558,7 +19594,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return res.status(500).json({ error: `Could not prepare upload directory` });
     }
 
-    // Pipe request stream directly to disk — no memory buffering
+    // Pipe request stream directly to disk â€” no memory buffering
     let bytesWritten = 0;
     const ws = createWriteStream(target);
     try {
@@ -19658,7 +19694,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!rel) return res.status(400).json({ error: "rel query required" });
 
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
 
     let s: Awaited<ReturnType<typeof stat>>;
     try {
@@ -19693,11 +19729,21 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     const range = req.headers.range;
     if (range && VIDEO_EXT.has(ext)) {
-      const parts = range.replace(/bytes=/, "").split("-");
-      const start = parseInt(parts[0] || "0", 10);
-      const end = parts[1] ? parseInt(parts[1], 10) : s.size - 1;
+      // Suffix ranges ("bytes=-500", sent by Safari/iOS) mean the LAST 500
+      // bytes, and a range past the end must be a 416. Both used to produce a
+      // negative Content-Length, and the connection hung until the client gave
+      // up â€” a frozen player with no error.
+      const m = /^bytes=(\d*)-(\d*)$/.exec(String(range).trim());
+      let start = m && m[1] ? parseInt(m[1], 10) : m && m[2] ? Math.max(0, s.size - parseInt(m[2], 10)) : 0;
+      let end = m && m[1] && m[2] ? parseInt(m[2], 10) : s.size - 1;
+      end = Math.min(end, s.size - 1);
+      if (!m || start > end || start >= s.size) {
+        res.writeHead(416, { "Content-Range": `bytes */${s.size}` });
+        res.end();
+        return;
+      }
       const chunk = end - start + 1;
-      // 2MB chunks — much faster initial buffering vs Node default 64KB
+      // 2MB chunks â€” much faster initial buffering vs Node default 64KB
       res.writeHead(206, {
         "Content-Range": `bytes ${start}-${end}/${s.size}`,
         "Accept-Ranges": "bytes",
@@ -19718,13 +19764,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     createReadStream(target, { highWaterMark: 2 * 1024 * 1024 }).pipe(res);
   });
 
-  // ── Video format & capability probing ────────────────────────────────────
+  // â”€â”€ Video format & capability probing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const _videoFormatCache = new Map<string, { codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number; ts: number }>();
 
-  // ── Persistent probe cache ────────────────────────────────────────────────
+  // â”€â”€ Persistent probe cache â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // probeVideoFormat() runs ffprobe against a file on the Google Drive mount,
   // which measured ~2.3s. It was cached in memory only, so the first play of
-  // any title after a restart paid that again — and the HLS playlist cannot be
+  // any title after a restart paid that again â€” and the HLS playlist cannot be
   // written until it returns, so it sat directly in front of playback.
   //
   // Keyed by path + size + mtime: if a file is replaced the key changes and the
@@ -19771,7 +19817,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const fmt = await new Promise<{ codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number }>((resolve) => {
         // Audio is probed alongside video (no -select_streams filter) so the
         // stream handler can tell whether the existing track is already in a
-        // form browsers play directly — re-encoding AAC to AAC burns CPU on
+        // form browsers play directly â€” re-encoding AAC to AAC burns CPU on
         // every stream and loses a generation of quality for nothing.
         execFile(FFPROBE_BIN, [
           "-v", "quiet",
@@ -19815,7 +19861,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!rel) return res.status(400).json({ error: "rel query required" });
 
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
 
     try {
       const s = await stat(target);
@@ -19934,7 +19980,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── High-Performance Google Drive HTTP Range Streaming Proxy ───────────────
+  // â”€â”€ High-Performance Google Drive HTTP Range Streaming Proxy â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const gdriveMetaCache = new Map<string, { size: number; mimeType: string; ts: number }>();
   let _gdriveClient: any = null;
 
@@ -19943,12 +19989,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try {
       const { google } = await import("googleapis");
 
-      // ── Service account (preferred for an always-on server) ───────────────
+      // â”€â”€ Service account (preferred for an always-on server) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Checked before the OAuth path because it has no moving parts that can
       // expire: no consent screen, no refresh token, no publishing status. A
       // user-OAuth refresh token issued by an app still in "Testing" dies after
       // 7 days, and moving that app to production demands an app name, support
-      // email, homepage and privacy-policy URL — a lot of ceremony for a
+      // email, homepage and privacy-policy URL â€” a lot of ceremony for a
       // credential only this server ever uses.
       //
       // Point GDRIVE_SERVICE_ACCOUNT_JSON at the downloaded key file (or paste
@@ -19975,9 +20021,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           log("INFO", `Google Drive: authenticated as service account ${creds.client_email}`, "stream");
           return _gdriveClient;
         } catch (e: any) {
-          // Fall through to OAuth rather than failing outright — a broken
+          // Fall through to OAuth rather than failing outright â€” a broken
           // service-account key should not take out a working refresh token.
-          log("WARN", `Google Drive service account unusable (${e?.message ?? e}) — falling back to OAuth`, "stream");
+          log("WARN", `Google Drive service account unusable (${e?.message ?? e}) â€” falling back to OAuth`, "stream");
         }
       }
 
@@ -20146,12 +20192,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/stream/gdrive/:fileId", handleGoogleDriveRangeStream);
   app.get("/api/stream/media/:fileId", handleGoogleDriveRangeStream);
 
-  // ── HLS (segmented) playback ────────────────────────────────────────────────
+  // â”€â”€ HLS (segmented) playback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-  // ── HLS (segmented) playback ────────────────────────────────────────────────
+  // â”€â”€ HLS (segmented) playback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The /api/media/stream endpoint above is a SINGLE long-lived ffmpeg pipe that
   // starts at a byte offset. That works, but every seek has to kill ffmpeg and
-  // respawn it at the new timestamp — which is why scrubbing felt like it hung,
+  // respawn it at the new timestamp â€” which is why scrubbing felt like it hung,
   // and why the <video> element's own duration/currentTime were meaningless
   // (they described the current fragment, not the film).
   //
@@ -20160,12 +20206,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // seek is just a request for a different segment. Nothing restarts, and
   // position is exact because every segment carries its real timestamp
   // (-output_ts_offset).
-  // ── Hardware video transcoding (VAAPI) ──────────────────────────────────
+  // â”€â”€ Hardware video transcoding (VAAPI) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   //
   // Why this exists: this library is ~76% HEVC 10-bit in Matroska with AC3/E-AC3
   // audio, none of which a browser can play. Every one of those files has to be
   // transcoded live. Doing that in software (libx264 superfast) measured 3.2x
-  // realtime at 323% CPU — 3.2 of 8 cores for ONE viewer. The HLS path builds a
+  // realtime at 323% CPU â€” 3.2 of 8 cores for ONE viewer. The HLS path builds a
   // segment and prefetches two more, so a single person watching could ask for
   // three concurrent encodes and saturate the machine. That saturation, not the
   // network, is what produced the endless spinner and the slow, erratic seeks.
@@ -20176,9 +20222,21 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // Same work at a fifth of the CPU, which turns ~2 concurrent streams into ~10.
   //
   // The driver here (Intel iHD, low-power encode entrypoint) supports CQP rate
-  // control only — VBR and CBR both fail at encoder init, so quality tiers map
+  // control only â€” VBR and CBR both fail at encoder init, so quality tiers map
   // to qp values rather than bitrates.
   let _hwEncodeAvailable: boolean | null = null;
+  /** Which hardware path the probe found: VAAPI (Linux iGPU) or NVENC (NVIDIA, e.g. the Windows host). */
+  let _hwKind: "vaapi" | "nvenc" | null = null;
+
+  /** Does a real encode with these args run? Only a real encode proves a GPU path works. */
+  function probeEncode(args: string[]): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const probe = spawn(FFMPEG_BIN, ["-hide_banner", "-loglevel", "error", ...args, "-f", "null", "-"], { stdio: ["ignore", "ignore", "ignore"] });
+      const timer = setTimeout(() => { try { probe.kill("SIGKILL"); } catch {} resolve(false); }, 20_000);
+      probe.on("error", () => { clearTimeout(timer); resolve(false); });
+      probe.on("close", (code) => { clearTimeout(timer); resolve(code === 0); });
+    });
+  }
 
   /** Probe once, at first use: does a real VAAPI H.264 encode actually run? */
   async function hwEncodeAvailable(): Promise<boolean> {
@@ -20189,9 +20247,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return false;
     }
     if (!existsSync(VAAPI_DEVICE)) {
-      _hwEncodeAvailable = false;
-      log("INFO", `No VAAPI render node at ${VAAPI_DEVICE} — using software transcoding`, "media");
-      return false;
+      // No VAAPI (Windows, or a Linux box without an iGPU): try NVIDIA NVENC.
+      _hwEncodeAvailable = await probeEncode(["-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=1", "-c:v", "h264_nvenc"]);
+      _hwKind = _hwEncodeAvailable ? "nvenc" : null;
+      log("INFO", _hwEncodeAvailable ? "Hardware transcoding active (NVIDIA NVENC)" : "No VAAPI or NVENC â€” using software transcoding", "media");
+      return _hwEncodeAvailable;
     }
     // A device node can exist and still be unusable (no permission, no driver,
     // a container without the group). Only a real encode proves it.
@@ -20207,10 +20267,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       probe.on("error", () => { clearTimeout(timer); resolve(false); });
       probe.on("close", (code) => { clearTimeout(timer); resolve(code === 0); });
     });
+    _hwKind = _hwEncodeAvailable ? "vaapi" : null;
     log("INFO",
       _hwEncodeAvailable
         ? `Hardware transcoding active (VAAPI @ ${VAAPI_DEVICE})`
-        : "VAAPI present but unusable — falling back to software transcoding",
+        : "VAAPI present but unusable â€” falling back to software transcoding",
       "media");
     return _hwEncodeAvailable;
   }
@@ -20222,17 +20283,22 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       // QP values lowered across the board on 2026-09-21. They were inherited
       // from the software-encoder era when every extra bit cost CPU the host
       // did not have. VAAPI encodes at ~9x realtime using 0.6 of a core, so the
-      // constraint now is bandwidth, not compute — and at 1080p the difference
+      // constraint now is bandwidth, not compute â€” and at 1080p the difference
       // between qp 23 and qp 19 is clearly visible in dark and detailed scenes,
       // which is exactly where this library lives (x265 10-bit film sources).
       //
       // A lower QP means a bigger file. Measured at 1080p: qp 23 ~= 2.7 Mbit/s,
       // qp 19 ~= 5-6 Mbit/s. Comfortable over LAN and over the tunnel.
       case "2160": return { width: Math.min(3840, w), crf: "19", qp: "20", abr: "256k", maxrate: "20M" };
-      case "1080": return { width: Math.min(1920, w), crf: "20", qp: "19", abr: "256k", maxrate: "10M" };
-      case "720":  return { width: Math.min(1280, w), crf: "21", qp: "21", abr: "192k", maxrate: "6M"  };
-      case "480":  return { width: Math.min(854,  w), crf: "24", qp: "24", abr: "160k", maxrate: "2.5M"};
-      case "360":  return { width: Math.min(640,  w), crf: "27", qp: "27", abr: "128k", maxrate: "1M"  };
+      case "1080": return { width: Math.min(1920, w), crf: "20", qp: "19", abr: "256k", maxrate: "8M"  };
+      // The lower tiers exist for weak connections (a phone at the far end of
+      // the Wi-Fi), which is also what the player steps down to when it keeps
+      // stalling â€” so they must be genuinely light. At the old 6M/2.5M caps a
+      // "720p" stream of a typical 1.6 Mbit/s 1080p file was five times heavier
+      // than the original, making the stall it was meant to fix worse.
+      case "720":  return { width: Math.min(1280, w), crf: "23", qp: "24", abr: "160k", maxrate: "3M"   };
+      case "480":  return { width: Math.min(854,  w), crf: "25", qp: "27", abr: "128k", maxrate: "1.2M" };
+      case "360":  return { width: Math.min(640,  w), crf: "28", qp: "30", abr: "96k",  maxrate: "0.7M" };
       // "auto" keeps the source resolution and sits one step below the explicit
       // 1080p tier. Measured on a dense live-action source, qp 19 produced
       // 10.4 Mbit/s and qp 23 produced 5.8; qp 21 lands near 7-8, which is a
@@ -20268,13 +20334,36 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         ],
       };
     }
+    if (_hwKind === "nvenc") {
+      // GPU decode where the codec allows (falls back to CPU otherwise), CPU
+      // scale, NVENC encode. Keeping the scale on the CPU avoids depending on
+      // scale_cuda pixel-format support, and costs little next to decoding.
+      return {
+        pre: ["-hwaccel", "cuda"],
+        post: [
+          "-vf", `scale='min(iw,${lad.width})':-2`, "-pix_fmt", "yuv420p",
+          // Bitrate-targeted VBR: with -cq, NVENC treats -maxrate as a hint and
+          // measured ~2x over it, which defeats the light tiers on weak Wi-Fi.
+          // -forced-idr: without it NVENC ignores -force_key_frames and keeps its
+          // own ~10s GOP, so a session's segments came out 10s long and no
+          // longer matched the 6s playlist (measured: 10.0s vs 6.0s with it).
+          // No B-frames: segments are encoded independently, and B-frame
+          // reordering left DTS overlapping across segment boundaries, which
+          // Chrome rejects ("Parsed buffers not in DTS sequence") and hls.js
+          // then retried forever. libx264's zerolatency tune has the same effect.
+          "-c:v", "h264_nvenc", "-preset", "p4", "-bf", "0", "-forced-idr", "1", "-rc", "vbr",
+          "-b:v", `${((parseFloat(lad.maxrate) || 4) * 0.8).toFixed(2)}M`, "-maxrate", lad.maxrate, "-bufsize", lad.maxrate,
+          ...(opts.keyframes ? ["-force_key_frames", "expr:gte(t,0)"] : ["-g", "50"]),
+        ],
+      };
+    }
     const sw = opts.srcWidth > 0 ? opts.srcWidth : 1920;
     const sh = opts.srcHeight > 0 ? opts.srcHeight : 1080;
     const outW = Math.min(lad.width, sw);
     const outH = Math.max(2, Math.round((sh * outW) / sw / 2) * 2);
     return {
       // Full hardware pipeline: the HEVC frame is decoded on the GPU and stays
-      // in GPU memory through scaling and encoding — it never crosses back to
+      // in GPU memory through scaling and encoding â€” it never crosses back to
       // the CPU, which is where the 5x saving comes from.
       pre: [
         "-hwaccel", "vaapi",
@@ -20296,12 +20385,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // shared rather than duplicated.
   const hlsInFlight = new Map<string, Promise<Buffer>>();
 
-  // ── HLS cache pruning ─────────────────────────────────────────────────
+  // â”€â”€ HLS cache pruning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Segments were written here and never removed. On the laptop this reached
   // 37 GB / 2,951 files in five days of normal watching (~7 GB/day), and the
   // only thing standing between that and a full disk was free space. A full
   // disk makes every segment build fail, which the player shows as a spinner
-  // that never resolves — the same symptom as a slow encode, which is why it
+  // that never resolves â€” the same symptom as a slow encode, which is why it
   // is worth bounding rather than leaving to chance.
   //
   // It matters more in a container: App Runner/Fargate give a few GB of
@@ -20329,8 +20418,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         if (!st?.isFile()) continue;
 
         // A .part file is a build that was interrupted (restart, crash, client
-        // disconnect). It can never be completed or served — the rename to its
-        // final name only happens on success — so it is pure waste.
+        // disconnect). It can never be completed or served â€” the rename to its
+        // final name only happens on success â€” so it is pure waste.
         if (name.endsWith(".part")) {
           if (now - st.mtimeMs > 60 * 60 * 1000) await unlink(full).catch(() => {});
           continue;
@@ -20361,9 +20450,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   setTimeout(() => { pruneHlsCache().catch(() => {}); }, 30_000).unref?.();
   setInterval(() => { pruneHlsCache().catch(() => {}); }, 60 * 60 * 1000).unref?.();
 
-  // ── Fast-start segment map ────────────────────────────────────────────
+  // â”€â”€ Fast-start segment map â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Uniform 6s segments meant the player could not draw a frame until a whole
-  // 6s segment had been encoded — measured at 2.2s of work before anything
+  // 6s segment had been encoded â€” measured at 2.2s of work before anything
   // appeared, on top of the playlist call. HLS permits variable EXTINF, so the
   // first few segments are short: playback starts after ~0.7s of encoding and
   // the longer segments that follow keep the per-segment overhead low for the
@@ -20372,7 +20461,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // bytes (codec, channel layout, segment boundaries). v3: 5.1 audio is now
   // downmixed to stereo, because 6-channel AAC with an unknown layout made
   // Chrome fail decoder init and loop on "Reconnecting...".
-  const HLS_ENCODER_VERSION = "3";
+  const HLS_ENCODER_VERSION = "6";
 
   const HLS_FAST_START_COUNT = 3;    // how many short segments at the head
   const HLS_FAST_START_SECONDS = 2;  // their length
@@ -20397,7 +20486,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // v2: the segment map changed, so previously cached .ts files describe
   // different time ranges and must not be reused.
   const hlsKey = (target: string, quality: string, audioTrack: number, n: number) =>
-    `${crypto.createHash("sha1").update(`v3|${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
+    `${crypto.createHash("sha1").update(`v${HLS_ENCODER_VERSION}|${target}|${quality}|${audioTrack}`).digest("hex")}_${n}`;
 
   /**
    * Build (or read from cache) HLS segment n of a title at one quality.
@@ -20465,6 +20554,163 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return job;
   }
 
+  // â”€â”€ Continuous HLS sessions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Building every segment with its own ffmpeg meant each 6s segment paid for
+  // opening the file, parsing its index and seeking â€” through Google Drive â€”
+  // plus encoder start-up: measured 2.4-7.8s per segment, roughly realtime, so
+  // playback stalled even on a 20 Mbit/s link. A session is ONE ffmpeg per
+  // viewer that seeks once and then emits consecutive segments at full encoder
+  // speed (several times realtime). Finished segments are moved into the same
+  // cache the per-segment builder uses, so every other code path is unchanged.
+  //
+  // The fast-start head (segments 0-2, 2s each) keeps the per-segment builder;
+  // sessions only cover the uniform 6s segments after it.
+  const HLS_SESSION_DIR = path.join(HLS_CACHE_DIR, "..", "hls-sessions");
+  const HLS_SESSION_MAX = 3;                 // concurrent transcodes
+  const HLS_SESSION_IDLE_MS = 90_000;        // no requests for this long: stop
+  const HLS_SESSION_MAX_AHEAD = 40;          // segments (4 min) beyond the viewer
+  const HLS_SESSION_JOIN_WINDOW = 4;         // a request this close ahead waits
+
+  type HlsSession = {
+    key: string; dir: string; proc: ReturnType<typeof spawn>;
+    start: number; next: number; lastRequested: number; lastUse: number;
+    target: string; quality: string; audioTrack: number;
+    waiters: Map<number, Array<(ok: boolean) => void>>;
+    ended: boolean; poll: NodeJS.Timeout;
+  };
+  const hlsSessions = new Map<string, HlsSession>();
+  const sessionKey = (target: string, quality: string, audioTrack: number) =>
+    crypto.createHash("sha1").update(`${target}|${quality}|${audioTrack}`).digest("hex").slice(0, 16);
+
+  function stopHlsSession(s: HlsSession, why: string) {
+    if (!hlsSessions.has(s.key) || hlsSessions.get(s.key) !== s) return;
+    hlsSessions.delete(s.key);
+    clearInterval(s.poll);
+    try { s.proc.kill("SIGKILL"); } catch { /* already gone */ }
+    for (const list of s.waiters.values()) for (const w of list) w(false);
+    s.waiters.clear();
+    rm(s.dir, { recursive: true, force: true }).catch(() => {});
+    log("INFO", `HLS session stopped (${why}) for ${path.basename(s.target)} @${s.quality}`, "media");
+  }
+
+  async function startHlsSession(
+    target: string, quality: string, audioTrack: number, from: number,
+    fmt: { width: number; height: number }, totalDur: number,
+  ): Promise<HlsSession> {
+    const key = sessionKey(target, quality, audioTrack);
+    const old = hlsSessions.get(key);
+    if (old) stopHlsSession(old, "seek");
+    // Keep the box responsive: the least recently used session gives way.
+    while (hlsSessions.size >= HLS_SESSION_MAX) {
+      const lru = [...hlsSessions.values()].sort((a, b) => a.lastUse - b.lastUse)[0];
+      stopHlsSession(lru, "capacity");
+    }
+    const dir = path.join(HLS_SESSION_DIR, `${key}-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    const startSec = segmentBounds(from, totalDur || Number.MAX_SAFE_INTEGER).start;
+    const enc = videoEncodeArgs({ hw: await hwEncodeAvailable(), quality, srcWidth: fmt.width, srcHeight: fmt.height });
+    // Keyframes exactly on the 6s grid so every segment boundary matches the
+    // playlist. videoEncodeArgs' own -g / -force_key_frames are replaced.
+    const post: string[] = [];
+    for (let i = 0; i < enc.post.length; i++) {
+      if (enc.post[i] === "-g" || enc.post[i] === "-keyint_min" || enc.post[i] === "-force_key_frames") { i++; continue; }
+      post.push(enc.post[i]);
+    }
+    const args = [
+      "-hide_banner", "-loglevel", "error",
+      ...enc.pre,
+      "-ss", String(startSec),
+      "-i", target,
+      "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
+      ...post,
+      "-force_key_frames", `expr:gte(t,n_forced*${HLS_SEGMENT_SECONDS})`,
+      "-af", "aresample=async=1:first_pts=0",
+      "-c:a", "aac", "-ac", "2", "-b:a", "160k",
+      "-output_ts_offset", String(startSec),
+      "-muxdelay", "0", "-muxpreload", "0",
+      "-f", "hls", "-hls_time", String(HLS_SEGMENT_SECONDS), "-hls_list_size", "0",
+      "-hls_playlist_type", "event", "-hls_segment_type", "mpegts",
+      "-start_number", String(from),
+      "-hls_segment_filename", path.join(dir, "seg_%d.ts"),
+      path.join(dir, "index.m3u8"),
+    ];
+    const proc = spawn(FFMPEG_BIN, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let errOut = "";
+    proc.stderr?.on("data", (d: Buffer) => { if (errOut.length < 2000) errOut += d.toString(); });
+    const s: HlsSession = {
+      key, dir, proc, start: from, next: from, lastRequested: from, lastUse: Date.now(),
+      target, quality, audioTrack, waiters: new Map(), ended: false, poll: undefined as unknown as NodeJS.Timeout,
+    };
+    hlsSessions.set(key, s);
+
+    // The playlist lists a segment only once it is completely written; that is
+    // the signal to move it into the shared cache and wake whoever waits.
+    let harvesting = false;
+    const harvest = async () => {
+      if (harvesting) return;
+      harvesting = true;
+      try {
+        const list = await readFile(path.join(dir, "index.m3u8"), "utf8").catch(() => "");
+        const done = [...list.matchAll(/seg_(\d+)\.ts/g)].map((m) => Number(m[1]));
+        await mkdir(HLS_CACHE_DIR, { recursive: true });
+        for (const n of done) {
+          if (n < s.next) continue;
+          const dest = path.join(HLS_CACHE_DIR, `${hlsKey(target, quality, audioTrack, n)}.ts`);
+          await renameFile(path.join(dir, `seg_${n}.ts`), dest).catch(() => {});
+          s.next = n + 1;
+          for (const w of s.waiters.get(n) ?? []) w(true);
+          s.waiters.delete(n);
+        }
+        if (Date.now() - s.lastUse > HLS_SESSION_IDLE_MS) stopHlsSession(s, "idle");
+        else if (s.next - s.lastRequested > HLS_SESSION_MAX_AHEAD) stopHlsSession(s, "far enough ahead");
+      } finally { harvesting = false; }
+    };
+    s.poll = setInterval(() => { harvest().catch(() => {}); }, 250);
+    proc.on("close", async (code) => {
+      await harvest().catch(() => {});
+      s.ended = true;
+      if (hlsSessions.get(key) === s) {
+        if (code && code !== 0 && errOut) log("WARN", `HLS session ffmpeg exited ${code}: ${errOut.slice(0, 300)}`, "media");
+        stopHlsSession(s, code === 0 ? "finished" : "ffmpeg exited");
+      }
+    });
+    return s;
+  }
+
+  /**
+   * Segment n from cache, from a running session, or by starting one.
+   * Falls back to the per-segment builder if the session cannot deliver.
+   */
+  async function getHlsSegmentViaSession(
+    target: string, quality: string, audioTrack: number, n: number,
+    fmt: { width: number; height: number }, totalDur: number,
+  ): Promise<string> {
+    const cachePath = path.join(HLS_CACHE_DIR, `${hlsKey(target, quality, audioTrack, n)}.ts`);
+    if (existsSync(cachePath)) return cachePath;
+    const key = sessionKey(target, quality, audioTrack);
+    let s = hlsSessions.get(key);
+    if (!s || n < s.next || n > s.next + HLS_SESSION_JOIN_WINDOW) {
+      s = await startHlsSession(target, quality, audioTrack, n, fmt, totalDur);
+    }
+    s.lastUse = Date.now();
+    s.lastRequested = Math.max(s.lastRequested, n);
+    const session = s;
+    const ok = await new Promise<boolean>((resolve) => {
+      if (existsSync(cachePath)) return resolve(true);
+      const list = session.waiters.get(n) ?? [];
+      list.push(resolve);
+      session.waiters.set(n, list);
+      setTimeout(() => resolve(existsSync(cachePath)), 60_000).unref();
+    });
+    if (ok && existsSync(cachePath)) return cachePath;
+    // Session failed (or was stopped by a seek elsewhere): build just this one.
+    await buildHlsSegment(target, quality, audioTrack, n, fmt, totalDur);
+    return cachePath;
+  }
+
+  // Leftovers from a previous run are never resumed.
+  rm(HLS_SESSION_DIR, { recursive: true, force: true }).catch(() => {});
+
   /** Index of the segment that contains second t. */
   function segmentIndexAt(t: number, total: number): number {
     const headSpan = HLS_FAST_START_COUNT * HLS_FAST_START_SECONDS;
@@ -20529,9 +20775,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return true;
   }
 
-  // ── Prewarm ───────────────────────────────────────────────────────────────
+  // â”€â”€ Prewarm â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Even with the probe cached and short head segments, the very first segment
-  // of a cold title costs ~2.7s — almost all of it rclone fetching the opening
+  // of a cold title costs ~2.7s â€” almost all of it rclone fetching the opening
   // chunk from Drive, not encoding (ffmpeg sits at single-digit CPU for it).
   //
   // That cost cannot be removed, only moved. Browsing a library means dwelling
@@ -20542,7 +20788,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.body?.rel ?? req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
     const audioTrack = Math.max(0, parseInt(String(req.body?.audio_track ?? "0"), 10) || 0);
     const resumeAt = Number(req.body?.start ?? 0) || 0;
     const started = warmTitleOnce(target, { audioTrack, resumeAt });
@@ -20553,7 +20799,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
     try {
       const st = await stat(target);
       if (!st.isFile()) return res.status(400).json({ error: "Not a file" });
@@ -20564,14 +20810,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!(duration > 0)) {
       // Without a real duration there is no way to describe the segments, so say
       // so plainly rather than emitting a playlist that would stall the player.
-      return res.status(422).json({ error: "Duration unknown for this file — HLS unavailable" });
+      return res.status(422).json({ error: "Duration unknown for this file â€” HLS unavailable" });
     }
 
     const quality = String(req.query.quality ?? "auto");
     const audioTrack = Math.max(0, parseInt(String(req.query.audio_track ?? "0"), 10) || 0);
     const token = String(req.query.token ?? "");
 
-    // ── Adaptive bitrate ──────────────────────────────────────────────────
+    // â”€â”€ Adaptive bitrate â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Until now this endpoint always returned a single-rendition media
     // playlist, so hls.js had nowhere to go when bandwidth dropped: it could
     // only stall and wait. That is what "it buffers on a good connection"
@@ -20599,9 +20845,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const lad = qualityLadder(t.q, srcW);
         // BANDWIDTH must be the PEAK, not the average, or a player on a
         // marginal link picks a rendition it cannot actually sustain.
-        const videoBps = Math.round((parseFloat(lad.maxrate) || 4) * 1_000_000);
-        const audioBps = (parseInt(lad.abr, 10) || 160) * 1000;
-        const peak = videoBps + audioBps;
+        // Measured: segments run ~20% over the video cap (a keyframe opens
+        // every 6s segment) plus ~10% MPEG-TS overhead, and segment audio is
+        // always 160k. Declaring less than the truth makes hls.js pick a tier
+        // the link cannot sustain.
+        const videoBps = Math.round((parseFloat(lad.maxrate) || 4) * 1_000_000 * 1.2);
+        const audioBps = 160_000;
+        const peak = Math.round((videoBps + audioBps) * 1.1);
         const h = Math.max(2, Math.round((srcH * t.w) / srcW / 2) * 2);
         const u = new URLSearchParams({ rel, quality: t.q, audio_track: String(audioTrack), variant: "1" });
         if (token) u.set("token", token);
@@ -20657,7 +20907,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const n = Math.max(0, parseInt(String(req.query.n ?? "0"), 10) || 0);
     if (!rel) return res.status(400).json({ error: "rel query required" });
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
 
     const quality = String(req.query.quality ?? "auto");
     const audioTrack = Math.max(0, parseInt(String(req.query.audio_track ?? "0"), 10) || 0);
@@ -20694,7 +20944,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // Build the NEXT couple of segments while this one is being sent. A player
     // resuming after a seek needs several seconds buffered before it will start
     // drawing, and building those strictly on demand meant every seek paid for
-    // them one after another — measured at 5-8s to resume. Warming them here
+    // them one after another â€” measured at 5-8s to resume. Warming them here
     // turns the follow-up requests into cache hits (~40ms) so only the first
     // segment costs real time. Capped at 2 so scrubbing cannot pile up ffmpegs.
     // Widened from 2 to 5 on 2026-09-20. The old figure was chosen when a
@@ -20702,7 +20952,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // whole time waiting on Google Drive), so prefetching more would have piled
     // up encodes faster than they drained. With hardware encoding and the VFS
     // cache a segment costs ~0.7s, so five of them is ~3.5s of work to stay
-    // ~30s ahead of the player — the margin that keeps a seek from stalling.
+    // ~30s ahead of the player â€” the margin that keeps a seek from stalling.
     const PREFETCH_SEGMENTS = Number(process.env.NEXUS_HLS_PREFETCH ?? 5);
     const prefetchAhead = (from: number) => {
       // Prefetch sequentially: building segment n+1 at 100% encoder speed
@@ -20712,7 +20962,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       (async () => {
         for (let i = 1; i <= PREFETCH_SEGMENTS; i++) {
           const nn = from + i;
-          if (nn >= count) break;             // past the end of the film
+          if (nn >= count || nn >= HLS_FAST_START_COUNT) break;  // past the head: sessions take over
           const kk = hlsKey(target, quality, audioTrack, nn);
           if (hlsInFlight.has(kk)) continue;
           if (hlsInFlight.size >= 4) break;   // server is already busy enough
@@ -20722,25 +20972,40 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             break;
           }
         }
-      })().catch(() => { /* speculative — failure is not an error */ });
+      })().catch(() => { /* speculative â€” failure is not an error */ });
     };
 
-    // Already built: send it straight off disk and warm what follows, so
-    // continuing to watch stays ahead of the player.
-    if (servedFromCache) {
+    // Past the fast-start head, a continuous session produces this segment and
+    // the ones after it; it keeps itself ahead of the viewer, so there is no
+    // per-segment prefetch here. Within the head, the old per-segment path runs
+    // and a session is started for the first full-length segment meanwhile.
+    const sendCached = () => {
       res.setHeader("Content-Type", "video/mp2t");
       res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
       res.sendFile(cachePath);
-      prefetchAhead(n);
-      return;
-    }
-
+    };
     try {
-      const buf = await buildSegment(n);
-      res.setHeader("Content-Type", "video/mp2t");
-      res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-      res.send(buf);
-      prefetchAhead(n);
+      if (n >= HLS_FAST_START_COUNT) {
+        await getHlsSegmentViaSession(target, quality, audioTrack, n, fmt, _totalDur);
+        // Keep the session alive (and following the viewer) on cache hits too.
+        const sk = hlsSessions.get(sessionKey(target, quality, audioTrack));
+        if (sk) { sk.lastUse = Date.now(); sk.lastRequested = Math.max(sk.lastRequested, n); }
+        else if (n + 1 < count && !existsSync(path.join(HLS_CACHE_DIR, `${hlsKey(target, quality, audioTrack, n + 1)}.ts`))) {
+          getHlsSegmentViaSession(target, quality, audioTrack, n + 1, fmt, _totalDur).catch(() => {});
+        }
+        return sendCached();
+      }
+      if (servedFromCache) { sendCached(); prefetchAhead(n); }
+      else {
+        const buf = await buildSegment(n);
+        res.setHeader("Content-Type", "video/mp2t");
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        res.send(buf);
+        prefetchAhead(n);
+      }
+      if (HLS_FAST_START_COUNT < count && !hlsSessions.has(sessionKey(target, quality, audioTrack))) {
+        getHlsSegmentViaSession(target, quality, audioTrack, HLS_FAST_START_COUNT, fmt, _totalDur).catch(() => {});
+      }
     } catch (e: any) {
       log("ERROR", `HLS segment ${n} failed for ${rel}: ${e?.message ?? e}`, "media");
       res.status(500).json({ error: "Segment build failed" });
@@ -20748,7 +21013,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
 
-  // ── Media info (FFprobe — duration, audio tracks, subtitle tracks, video codec) ─────────
+  // â”€â”€ Media info (FFprobe â€” duration, audio tracks, subtitle tracks, video codec) â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const _mediaDurationCache = new Map<string, { duration: number; ts: number }>();
   type MediaTrackInfo = {
     duration: number;
@@ -20809,7 +21074,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!rel) return res.status(400).json({ error: "rel required" });
 
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Forbidden" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Forbidden" });
 
     const cached = _mediaTrackCache.get(target);
     if (cached && Date.now() - cached.ts < 600_000) {
@@ -20881,7 +21146,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Watch progress sync (cross-device "Continue Watching") ────────────────
+  // â”€â”€ Watch progress sync (cross-device "Continue Watching") â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/media/progress", async (req, res) => {
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     if (!token) return res.status(401).json({ error: "Missing token" });
@@ -20930,9 +21195,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch { return res.status(401).json({ error: "Invalid token" }); }
   });
 
-  // Local library recommendations — based on watch history and genre matching
+  // Local library recommendations â€” based on watch history and genre matching
   // Full filesystem walk was run on every single call to this route with no
-  // caching at all — cheap on a local disk, but recommendations get hit often
+  // caching at all â€” cheap on a local disk, but recommendations get hit often
   // (home screen load) and this gets worse the moment media sits on a network
   // mount/AWS. Personalization (watch history) still runs fresh per request;
   // only the directory scan itself is cached.
@@ -21112,8 +21377,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Media Delete ──────────────────────────────────────────────
-  // Previously had NO auth check at all — any request that reached the
+  // â”€â”€ Media Delete â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Previously had NO auth check at all â€” any request that reached the
   // server, logged in or not, could permanently unlink arbitrary media
   // files. isAllowedMediaPath() only ever constrained WHICH paths could be
   // touched, never WHO could touch them. Gated the same way as the torrent
@@ -21134,7 +21399,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     for (const rel of safeRels) {
       const target = resolveMediaTarget(rel);
       if (!isAllowedMediaPath(target)) { errors.push(`Blocked: ${rel}`); continue; }
-      try { await unlink(target); deleted++; } catch { /* file already gone or unreadable — not an error */ }
+      try { await unlink(target); deleted++; } catch { /* file already gone or unreadable â€” not an error */ }
     }
     await refreshMediaLibrary().catch(() => {});
     log("INFO", `Media delete: ${deleted} file(s) removed`, "media");
@@ -21180,7 +21445,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // Queues every eligible library file at once — the existing queue already
+  // Queues every eligible library file at once â€” the existing queue already
   // processes strictly one file at a time (see processCompressQueue), so
   // this is safe to fire for a whole library without risking several ffmpeg
   // encodes competing for the same GPU/CPU simultaneously. Files already
@@ -21219,7 +21484,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // Proxy TMDB search for poster art (no TMDB key needed — uses free search endpoint)
+  // Proxy TMDB search for poster art (no TMDB key needed â€” uses free search endpoint)
   app.get("/api/media/poster", async (req, res) => {
     const title = String(req.query.title ?? "").trim();
     if (!title) return res.status(400).json({ error: "title required" });
@@ -21327,7 +21592,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // Shared by the single-item route below and the bulk auto-fetch-all route.
-  // Does not refresh the media library — callers decide when to pay for that
+  // Does not refresh the media library â€” callers decide when to pay for that
   // (once at the end of a bulk run rather than once per subtitle).
   async function downloadBestSubtitleFor(
     target: MediaItem,
@@ -21385,7 +21650,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // "Auto-Fetch Subtitles" in the media scraper panel. Like scan-pc-videos this
   // button POSTed to a route that never existed, so it fell through to the SPA
   // catch-all and surfaced an HTML parse error instead of doing anything.
-  // Responds immediately and works through the library in the background — the
+  // Responds immediately and works through the library in the background â€” the
   // client already polls loadLibrary() rather than waiting on this request.
   app.post("/api/media/subtitles/auto-fetch-all", express.json(), async (req, res) => {
     const language = String((req.body as any)?.lang ?? "eng").trim() || "eng";
@@ -21424,14 +21689,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     })();
   });
 
-  // ── Embedded subtitle extraction — streams MKV subtitle track as WebVTT ────
+  // â”€â”€ Embedded subtitle extraction â€” streams MKV subtitle track as WebVTT â”€â”€â”€â”€
   app.get("/api/media/subtitles/extract", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
     const trackIndex = Math.max(0, parseInt(String(req.query.track ?? "0"), 10) || 0);
     if (!rel) return res.status(400).json({ error: "rel required" });
 
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: "Forbidden" });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Forbidden" });
 
     try {
       const s = await stat(target);
@@ -21466,7 +21731,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Image proxy — routes external CDN images through NexusEmu ────────────
+  // â”€â”€ Image proxy â€” routes external CDN images through NexusEmu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/media/img-proxy", async (req, res) => {
     const url = String(req.query.url ?? "").trim();
     if (!url) return res.status(400).end();
@@ -21501,11 +21766,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── FitGirl Repacks PC Game Search ───────────────────────────
+  // â”€â”€ FitGirl Repacks PC Game Search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Uses FlareSolverr (localhost:8191) to bypass Cloudflare, then parses results
   function parseFitgirlResults(html: string): Array<{ title: string; imageUrl: string | null; size: string; magnets: string[]; pageUrl: string }> {
     const results: Array<{ title: string; imageUrl: string | null; size: string; magnets: string[]; pageUrl: string }> = [];
-    // Extract article blocks — fitgirl uses <article class="post-..."> structure
+    // Extract article blocks â€” fitgirl uses <article class="post-..."> structure
     const articleRe = /<article[^>]*class="[^"]*\bpost\b[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
     let artMatch: RegExpExecArray | null;
     while ((artMatch = articleRe.exec(html)) !== null && results.length < 12) {
@@ -21524,7 +21789,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const imageUrl = imgMatch ? imgMatch[1] : null;
 
       // Size: look for "Original Size:" or "Repack Size:"
-      const sizeRe = /(?:repack|original)\s+size\s*[:\–-]\s*([0-9.,]+\s*(?:GB|MB|TB))/i;
+      const sizeRe = /(?:repack|original)\s+size\s*[:\â€“-]\s*([0-9.,]+\s*(?:GB|MB|TB))/i;
       const sizeMatch = sizeRe.exec(art);
       const size = sizeMatch ? sizeMatch[1].trim() : '';
 
@@ -21571,7 +21836,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Content Discovery (TMDB trending / new releases) ─────────────────────────
+  // â”€â”€ Content Discovery (TMDB trending / new releases) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const TMDB_KEY_DISC = '2dca580c2a14b55200e784d157207b4d';
   const TMDB_BASE_DISC = 'https://api.themoviedb.org/3';
   async function tmdbGet(path: string): Promise<any> {
@@ -21605,10 +21870,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     };
   }
 
-  // ── Media details (rating, plot, cast) for the Media Hub's hover/expand info ──
+  // â”€â”€ Media details (rating, plot, cast) for the Media Hub's hover/expand info â”€â”€
   // Reuses the same TMDB key + tmdbGet/tmdbImg helpers already wired up above for
-  // /api/discover/* — no new external API integration, just a fuller per-title fetch
-  // (search → append_to_response=credits) than the poster-only /api/media/poster route.
+  // /api/discover/* â€” no new external API integration, just a fuller per-title fetch
+  // (search â†’ append_to_response=credits) than the poster-only /api/media/poster route.
   const _detailsCache = new Map<string, { data: any; ts: number }>();
   app.get('/api/media/details', async (req, res) => {
     const title = String(req.query.title ?? '').trim();
@@ -21629,11 +21894,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Skip-Intro marker detection ─────────────────────────────────────────────
+  // â”€â”€ Skip-Intro marker detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Two tiers, cheapest first:
-  //   1. Embedded chapters — exact when present, but scene releases almost never
+  //   1. Embedded chapters â€” exact when present, but scene releases almost never
   //      carry them (verified: a real 1080p WEB-DL episode here reports []).
-  //   2. Black-frame shot boundaries — a title sequence is nearly always fenced
+  //   2. Black-frame shot boundaries â€” a title sequence is nearly always fenced
   //      by two hard cuts to black. Measured on a real episode: black at ~45.3s
   //      and ~78.3s, a 33s gap, which is exactly the intro.
   //
@@ -21669,7 +21934,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }
 
   async function detectIntroMarkers(absPath: string) {
-    // Tier 1 — embedded chapters.
+    // Tier 1 â€” embedded chapters.
     try {
       const raw = await runFf('/usr/bin/ffprobe', ['-v', 'quiet', '-print_format', 'json', '-show_chapters', absPath], 20_000);
       const chapters = JSON.parse(raw || '{}')?.chapters ?? [];
@@ -21684,7 +21949,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     } catch { /* fall through to the scan */ }
 
-    // Tier 2 — black-frame boundaries inside the window an intro can occupy.
+    // Tier 2 â€” black-frame boundaries inside the window an intro can occupy.
     const WINDOW_START = 15;   // seconds; skip studio logos
     const WINDOW_LEN = 285;    // scan up to ~5 min in
     const out = await runFf(FFMPEG_BIN, [
@@ -21708,7 +21973,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     }
 
-    // Tier 3 — single-cut fallback.
+    // Tier 3 â€” single-cut fallback.
     //
     // Plenty of rips fade out of the title sequence but not into it, leaving
     // exactly one black frame. Measured on Malcolm in the Middle S01E01: one
@@ -21716,7 +21981,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // the episode got no markers at all.
     //
     // A lone cut in the plausible window is almost always the END of the
-    // intro, which is the only value that actually matters — the button exists
+    // intro, which is the only value that actually matters â€” the button exists
     // to jump there. The start is only used to decide when to offer it, so it
     // is backed off by a typical title length rather than guessed precisely.
     if (cuts.length === 1) {
@@ -21730,7 +21995,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }
 
   /**
-   * Tier 4 — borrow markers from a sibling episode.
+   * Tier 4 â€” borrow markers from a sibling episode.
    *
    * A title sequence is identical across a season, so an episode that resists
    * detection can reuse a neighbour's timings. This is what makes the feature
@@ -21756,7 +22021,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? '').trim();
     if (!rel) return res.status(400).json({ error: 'rel required' });
     const target = resolveMediaTarget(rel);
-    if (!isAllowedMediaPath(target)) return res.status(403).json({ error: 'Path outside media root' });
+    if (!isServableMediaPath(target)) return res.status(403).json({ error: 'Path outside media root' });
 
     const cache = await loadIntroCache();
     if (Object.prototype.hasOwnProperty.call(cache, rel)) {
@@ -21769,7 +22034,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try {
       let found = await detectIntroMarkers(target);
       if (!found) found = await borrowIntroFromSibling(target, cache);
-      cache[rel] = found;               // null is cached too — never rescan a miss
+      cache[rel] = found;               // null is cached too â€” never rescan a miss
       void saveIntroCache();
       return res.json(found ? { found: true, ...found } : { found: false });
     } catch (e) {
@@ -21777,9 +22042,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Episode still image, for the Media Hub's per-episode card art ────────────
+  // â”€â”€ Episode still image, for the Media Hub's per-episode card art â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Was called by the frontend and allowlisted (see the CORS/API allowlist near
-  // "/api/media/episode-poster") but never actually registered — every call
+  // "/api/media/episode-poster") but never actually registered â€” every call
   // silently 404'd and fell back to the series poster. Mirrors /api/media/details'
   // search-then-lookup shape, scoped down to a single season/episode still.
   const _episodePosterCache = new Map<string, { data: any; ts: number }>();
@@ -21813,9 +22078,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Title info: poster + overview + trailer + reviews ────────
-  // Resolves ANY title string — including a raw scene release name, and
-  // including titles that exist only in the cloud with no local file — into
+  // â”€â”€ Title info: poster + overview + trailer + reviews â”€â”€â”€â”€â”€â”€â”€â”€
+  // Resolves ANY title string â€” including a raw scene release name, and
+  // including titles that exist only in the cloud with no local file â€” into
   // display metadata. This is what lets archived media show real posters and
   // open a detail view instead of being an untitled row in a list.
   //
@@ -21848,7 +22113,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return (d?.results ?? [])[0] ?? null;
       };
 
-      // Try the hinted type first, then the other — folder naming is not a
+      // Try the hinted type first, then the other â€” folder naming is not a
       // reliable movie/series signal.
       let type: 'movie' | 'tv' = wantTv ? 'tv' : 'movie';
       let hit = await search(type);
@@ -21862,7 +22127,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return res.json(miss);
       }
 
-      // Details, trailer and reviews in parallel — three sequential round trips
+      // Details, trailer and reviews in parallel â€” three sequential round trips
       // per card would make a grid feel broken.
       const [details, videos, reviews] = await Promise.all([
         tmdbGet(`/${type}/${hit.id}`).catch(() => null),
@@ -21915,9 +22180,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Matchmaker: vibe-driven discovery ─────────────────────────
+  // â”€â”€ Matchmaker: vibe-driven discovery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Deliberately NOT another trending grid. The user picks how they want to
-  // FEEL — pacing, mood, runtime, era — and those map onto TMDB discover
+  // FEEL â€” pacing, mood, runtime, era â€” and those map onto TMDB discover
   // parameters, then results are grouped into clusters so the answer reads as
   // "here are three kinds of thing that fit" rather than an undifferentiated
   // wall of posters.
@@ -21986,7 +22251,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         genreIds: r.genre_ids ?? [],
       }));
 
-      // ── Clustering ────────────────────────────────────────────────────
+      // â”€â”€ Clustering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // Grouped by genre + decade.
       //
       // Director clustering was BUILT AND MEASURED, then removed: across four
@@ -22003,7 +22268,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const gid = m.genreIds[0];
         const gname = Object.entries(VIBE_MOOD).find(([, v]) => v.genres.includes(gid))?.[1].label
           ?? moodCfg.label;
-        const key = `${gname} · ${decade}`;
+        const key = `${gname} Â· ${decade}`;
         if (!clusters.has(key)) clusters.set(key, []);
         clusters.get(key)!.push(m);
       }
@@ -22055,7 +22320,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch (e) { return res.status(502).json({ error: String(e) }); }
   });
 
-  // ── TMDB full-text search ────────────────────────────────────────────────────
+  // â”€â”€ TMDB full-text search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get('/api/discover/search', async (req, res) => {
     const q = String(req.query.q ?? '').trim();
     const type = String(req.query.type ?? 'all') as 'movie' | 'series' | 'all';
@@ -22094,7 +22359,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch (e) { return res.status(502).json({ error: String(e) }); }
   });
 
-  // ── Taste & Personalization engine ──────────────────────────────────────────
+  // â”€â”€ Taste & Personalization engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const TASTE_FILE = path.join(PERSIST_DIR, 'taste.json');
   type TasteProfile = {
     genreScores: Record<string, number>;
@@ -22146,7 +22411,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch (e) { return res.status(502).json({ error: String(e) }); }
   });
 
-  // ── Manual Launcher Library ──────────────────────────────────────────────────
+  // â”€â”€ Manual Launcher Library â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const MANUAL_LIB_FILE = path.join(PERSIST_DIR, 'manual-library.json');
   type ManualEntry = {
     id: string; title: string; type: string; platform: string;
@@ -22190,7 +22455,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true });
   });
 
-  // ── LaunchBox Images Folder Scanner ──────────────────────────
+  // â”€â”€ LaunchBox Images Folder Scanner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/art/scan-launchbox-images", async (req, res) => {
     const { images_path } = req.body as { images_path: string };
     if (!images_path) return res.status(400).json({ error: "images_path required" });
@@ -22199,18 +22464,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return res.status(400).json({ error: `Folder not found: ${images_path}` });
     }
 
-    // Respond immediately — process in background
+    // Respond immediately â€” process in background
     res.json({ started: true, message: "LaunchBox image scan started in background" });
 
     (async () => {
       if (!dbConnected || !pool) {
-        log("WARN", "LaunchBox image scan skipped — database not connected", "art");
+        log("WARN", "LaunchBox image scan skipped â€” database not connected", "art");
         return;
       }
       let matched = 0, skipped = 0;
       await ensureArtDir();
 
-      // Build lookup: normalised title → game row
+      // Build lookup: normalised title â†’ game row
       const { rows: allGames } = await pool.query("SELECT id, title, platform FROM games");
       const normalize = (s: string) =>
         s.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -22260,7 +22525,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
               const dest = path.join(ART_DIR, `${match.id}${ext}`);
               try {
                 await fsAccess(dest);
-                // already have art — skip unless it's a higher-priority subfolder
+                // already have art â€” skip unless it's a higher-priority subfolder
                 if (sub !== "Box - Front") continue;
               } catch { /* dest doesn't exist, proceed */ }
 
@@ -22278,11 +22543,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       } catch (e) {
         console.error("[art-scan] LaunchBox images scan error:", e);
       }
-      console.log(`[art-scan] Done — matched ${matched} games, skipped ${skipped} unmatched files`);
+      console.log(`[art-scan] Done â€” matched ${matched} games, skipped ${skipped} unmatched files`);
     })();
   });
 
-  // ── LaunchBox Import ──────────────────────────────────────────
+  // â”€â”€ LaunchBox Import â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/vault/import-launchbox", async (req, res) => {
     const { launchbox_path } = req.body as { launchbox_path: string };
     if (!launchbox_path) return res.status(400).json({ error: "launchbox_path required" });
@@ -22408,14 +22673,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             }
           }
         }
-        log("INFO", `LaunchBox import complete — ${totalImported} games, ${totalArt} artworks`, "vault");
+        log("INFO", `LaunchBox import complete â€” ${totalImported} games, ${totalArt} artworks`, "vault");
       } catch (err) {
         log("ERROR", `LaunchBox import error: ${err}`, "vault");
       }
     })().catch(() => {});
   });
 
-  // ── Client Launcher Download (force attachment) ─────────────
+  // â”€â”€ Client Launcher Download (force attachment) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/client-launcher.ps1", (_req, res) => {
     res.redirect(302, "/api/client-launcher/download");
   });
@@ -22448,7 +22713,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // Serve client-launcher.cjs (Node.js version) for download — no admin rights needed
+  // Serve client-launcher.cjs (Node.js version) for download â€” no admin rights needed
   app.get("/api/client-launcher/cjs", async (_req, res) => {
     const cjsPath = path.join(process.cwd(), "client-launcher.cjs");
     try {
@@ -22474,8 +22739,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const protocol = forwardedProto || req.protocol || "http";
     const baseUrl = `${protocol}://${host}`;
 
-    // One-click CMD installer (Node.js client launcher — no PowerShell windows ever):
-    // 1. Checks for Node.js — installs silently via winget if missing
+    // One-click CMD installer (Node.js client launcher â€” no PowerShell windows ever):
+    // 1. Checks for Node.js â€” installs silently via winget if missing
     // 2. Downloads client-launcher.cjs (Node.js HTTP server, no admin rights needed)
     // 3. Creates nexus-runner.vbs (wscript.exe runs node.exe with ZERO visible windows)
     // 4. Registers Task Scheduler autostart via VBS runner (silent on every login)
@@ -22497,7 +22762,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ":: Save preferred host URL for self-update",
       `echo %BASE_URL%> "%CLIENT_DIR%\\preferred-host-url.txt"`,
       "",
-      ":: Check for Node.js — install silently via winget if missing",
+      ":: Check for Node.js â€” install silently via winget if missing",
       `where node >nul 2>&1`,
       "if errorlevel 1 (",
       "  echo [Nexus] Node.js not found. Installing silently via winget...",
@@ -22536,21 +22801,29 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "  exit /b 1",
       ")",
       "",
-      ":: Create silent VBScript runner — wscript.exe calls node.exe with NO visible window",
+      ":: Create silent VBScript runner â€” wscript.exe calls node.exe with NO visible window",
       `echo Set WshShell = CreateObject("WScript.Shell")> "%RUNNER_VBS%"`,
       `echo Dim nodeExe : nodeExe = "!NODE_EXE!">> "%RUNNER_VBS%"`,
       `echo If nodeExe = "" Or nodeExe = "node.exe" Then>> "%RUNNER_VBS%"`,
       `echo   Dim fso : Set fso = CreateObject("Scripting.FileSystemObject")>> "%RUNNER_VBS%"`,
-      `echo   Dim p1 : p1 = WshShell.ExpandEnvironmentStrings("%ProgramFiles%") & "\\nodejs\\node.exe">> "%RUNNER_VBS%"`,
-      `echo   Dim p2 : p2 = WshShell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") & "\\nodejs\\node.exe">> "%RUNNER_VBS%"`,
-      `echo   If fso.FileExists(p1) Then nodeExe = p1 ElseIf fso.FileExists(p2) Then nodeExe = p2 Else nodeExe = "node.exe" End If>> "%RUNNER_VBS%"`,
+      `echo   Dim p1 : p1 = WshShell.ExpandEnvironmentStrings("%ProgramFiles%") ^& "\\nodejs\\node.exe">> "%RUNNER_VBS%"`,
+      `echo   Dim p2 : p2 = WshShell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") ^& "\\nodejs\\node.exe">> "%RUNNER_VBS%"`,
+      // Block form: a one-line If cannot take ElseIf in VBScript, and a compile
+      // error there stops wscript on a modal dialog before node ever starts.
+      `echo   If fso.FileExists(p1) Then>> "%RUNNER_VBS%"`,
+      `echo     nodeExe = p1>> "%RUNNER_VBS%"`,
+      `echo   ElseIf fso.FileExists(p2) Then>> "%RUNNER_VBS%"`,
+      `echo     nodeExe = p2>> "%RUNNER_VBS%"`,
+      `echo   Else>> "%RUNNER_VBS%"`,
+      `echo     nodeExe = "node.exe">> "%RUNNER_VBS%"`,
+      `echo   End If>> "%RUNNER_VBS%"`,
       `echo End If>> "%RUNNER_VBS%"`,
-      `echo WshShell.Run Chr(34) & nodeExe & Chr(34) & " " & Chr(34) & WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\\NexusEmuClient\\client-launcher.cjs" & Chr(34), 0, False>> "%RUNNER_VBS%"`,
+      `echo WshShell.Run Chr(34) ^& nodeExe ^& Chr(34) ^& " " ^& Chr(34) ^& WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") ^& "\\NexusEmuClient\\client-launcher.cjs" ^& Chr(34), 0, False>> "%RUNNER_VBS%"`,
       "",
-      ":: Register Task Scheduler autostart (wscript.exe runner — fully windowless)",
+      ":: Register Task Scheduler autostart (wscript.exe runner â€” fully windowless)",
       "echo [Nexus] Registering autostart via Task Scheduler...",
       `schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1`,
-      `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$xml = '<?xml version=""1.0"" encoding=""UTF-16""?><Task version=""1.2"" xmlns=""http://schemas.microsoft.com/windows/2004/02/mit/task""><Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers><Principals><Principal id=""Author""><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT2M</Interval><Count>999</Count></RestartOnFailure><Enabled>true</Enabled></Settings><Actions><Exec><Command>wscript.exe</Command><Arguments>' + [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA') + '\\\\NexusEmuClient\\\\nexus-runner.vbs</Arguments></Exec></Actions></Task>'; $p=Join-Path $env:TEMP 'nexus-task.xml'; [System.IO.File]::WriteAllText($p,$xml,[System.Text.Encoding]::Unicode); schtasks /create /tn 'NexusEmuClientLauncher' /xml $p /f; Remove-Item $p -Force"`,
+      `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$u = [Environment]::UserDomainName + '\\' + [Environment]::UserName; $xml = '<?xml version=''1.0'' encoding=''UTF-16''?><Task version=''1.2'' xmlns=''http://schemas.microsoft.com/windows/2004/02/mit/task''><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>' + $u + '</UserId></LogonTrigger></Triggers><Principals><Principal id=''Author''><UserId>' + $u + '</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT2M</Interval><Count>999</Count></RestartOnFailure><Enabled>true</Enabled></Settings><Actions><Exec><Command>wscript.exe</Command><Arguments>' + [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA') + '\\\\NexusEmuClient\\\\nexus-runner.vbs</Arguments></Exec></Actions></Task>'; $p=Join-Path $env:TEMP 'nexus-task.xml'; [System.IO.File]::WriteAllText($p,$xml,[System.Text.Encoding]::Unicode); schtasks /create /tn 'NexusEmuClientLauncher' /xml $p /f; Remove-Item $p -Force"`,
       "",
       ":: Register nexusemu:// protocol handler",
       "echo [Nexus] Registering nexusemu:// protocol handler...",
@@ -22558,7 +22831,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       `reg add "HKCU\\Software\\Classes\\nexusemu" /v "URL Protocol" /d "" /f >nul 2>&1`,
       `reg add "HKCU\\Software\\Classes\\nexusemu\\shell\\open\\command" /ve /d "wscript.exe \\\"%CLIENT_DIR%\\nexus-runner.vbs\\"" /f >nul 2>&1`,
       "",
-      ":: Launch the Node.js client launcher right now (via VBS — zero flashing)",
+      ":: Launch the Node.js client launcher right now (via VBS â€” zero flashing)",
       "echo [Nexus] Starting NexusEmu client launcher...",
       `wscript.exe "%RUNNER_VBS%"`,
       "",
@@ -22578,7 +22851,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "  echo.",
       "  echo [Nexus] SUCCESS! Client launcher is running.",
       "  echo         It auto-starts silently at every Windows login.",
-      "  echo         Return to NexusEmu in your browser — you can close this window.",
+      "  echo         Return to NexusEmu in your browser â€” you can close this window.",
       ") else (",
       "  echo.",
       "  echo [Nexus] Launcher started but health check timed out. Task Scheduler will keep it running.",
@@ -22756,13 +23029,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.send(html);
   });
 
-  // ── Cache-clear helper (clears stale PWA service workers) ────
+  // â”€â”€ Cache-clear helper (clears stale PWA service workers) â”€â”€â”€â”€
   app.get('/clear-cache', (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Content-Type', 'text/html');
     res.send(`<!doctype html><html><head><meta charset="UTF-8">
-<title>Clearing cache…</title></head><body>
-<p style="font-family:sans-serif;padding:20px">Clearing service worker cache, please wait…</p>
+<title>Clearing cacheâ€¦</title></head><body>
+<p style="font-family:sans-serif;padding:20px">Clearing service worker cache, please waitâ€¦</p>
 <script>
 (async () => {
   if ('serviceWorker' in navigator) {
@@ -22778,7 +23051,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 </script></body></html>`);
   });
 
-  // ── Nexus Codex ──────────────────────────────────────────────────────────────
+  // â”€â”€ Nexus Codex â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const CODEX_DIR  = path.join(PERSIST_DIR, 'books');
   const CODEX_META = path.join(PERSIST_DIR, 'codex-library.json');
   const CODEX_PROG = path.join(PERSIST_DIR, 'codex-progress.json');
@@ -23138,7 +23411,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true });
   });
 
-  // ── Codex Online Book Search (Project Gutenberg via Gutendex + Open Library) ─
+  // â”€â”€ Codex Online Book Search (Project Gutenberg via Gutendex + Open Library) â”€
   app.get('/api/codex/online-search', async (req, res) => {
     const q = String(req.query.q ?? '').trim();
     if (!q) return res.json({ results: [] });
@@ -23176,7 +23449,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         }
       }
 
-      // Open Library (Internet Archive — EPUB if available)
+      // Open Library (Internet Archive â€” EPUB if available)
       if (olRes.status === 'fulfilled') {
         const data = olRes.value as any;
         for (const doc of (data.docs ?? []).slice(0, 20)) {
@@ -23208,7 +23481,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Codex Online Download ──────────────────────────────────────────────────
+  // â”€â”€ Codex Online Download â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post('/api/codex/online-download', express.json(), async (req, res) => {
     const { downloadUrl, title, author, coverUrl: providedCoverUrl, source } = req.body as {
       downloadUrl: string; title: string; author?: string; coverUrl?: string; source?: string;
@@ -23317,7 +23590,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true, checked: books.length, updated });
   });
 
-  // ── Book covers ──────────────────────────────────────────────────────────
+  // â”€â”€ Book covers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // CodexLibrary renders every grid tile as <img src="/api/codex/books/:id/cover">
   // and falls back to a generated placeholder on error. This route did not
   // exist, so every book showed the placeholder regardless of what was known
@@ -23486,7 +23759,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ─── Music System Mega-Upgrade API ─────────────────────────────────────────
+  // â”€â”€â”€ Music System Mega-Upgrade API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const MUSIC_DIR = path.join(PERSIST_DIR, "music");
   const clientMusicCache = new Map<string, any>();
   const musicTracksCache: any[] = [];
@@ -23715,7 +23988,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
         if (Array.isArray(tracks) && tracks.length > 0) {
           // Was one round trip pair (existence + queue checks) per track,
-          // sequential — a library sync with hundreds of tracks meant hundreds
+          // sequential â€” a library sync with hundreds of tracks meant hundreds
           // of serialized DB round trips. Batched to a fixed 2-3 queries total
           // regardless of track count, same skip-if-known semantics.
           const absPaths = tracks.map((t: any) => t.absPath);
@@ -23862,7 +24135,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       let savedTrack: any = null;
       if (dbConnected && pool) {
         // RETURNING lets the client confirm the row actually landed rather than
-        // inferring success from a 200 — a write that silently inserted nothing
+        // inferring success from a 200 â€” a write that silently inserted nothing
         // is exactly how this failed before (see the music_tracks migration).
         const ins = await pool.query(
           `INSERT INTO music_tracks (title, artist, abs_path, file_size)
@@ -23903,7 +24176,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // Actually performs the "Get" button's download — the frontend
+  // Actually performs the "Get" button's download â€” the frontend
   // (MusicHub.tsx's Discover tab) has been POSTing here and polling the
   // collection for the result since this feature was built, but only a GET
   // (list-the-queue) handler ever existed server-side; this POST 404'd every
@@ -23911,7 +24184,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.post("/api/music/download-queue", express.json(), async (req, res) => {
     const { url, title } = req.body as { url?: string; title?: string };
     if (!url?.trim()) return res.status(400).json({ error: "url required" });
-    // Scoped to YouTube on purpose — this exists to fulfil Discover-tab
+    // Scoped to YouTube on purpose â€” this exists to fulfil Discover-tab
     // results, not as a general-purpose "make the host download any URL"
     // endpoint for an arbitrary authenticated (not necessarily admin) user.
     if (!/^https:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)/.test(url)) {
@@ -23920,7 +24193,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const ytdlp = await execAsync("which yt-dlp 2>/dev/null").then(r => r.stdout.trim()).catch(() => "");
     if (!ytdlp) return res.status(503).json({ error: "yt-dlp not installed on host" });
 
-    // Respond immediately — the frontend already polls fetchCollection() for
+    // Respond immediately â€” the frontend already polls fetchCollection() for
     // up to 90s rather than waiting on this request, matching how upload-track
     // (the manual-pick sibling of this feature) is treated as fire-and-forget too.
     res.json({ ok: true, queued: true });
@@ -24030,7 +24303,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true });
   });
 
-  // Music Discover — search YouTube / SoundCloud via yt-dlp if available
+  // Music Discover â€” search YouTube / SoundCloud via yt-dlp if available
   app.get("/api/music/discover", async (req, res) => {
     const q = String(req.query.q ?? "").trim();
     if (!q) return res.status(400).json({ error: "q required" });
@@ -24041,12 +24314,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return res.json({ results: [], hint: "Install yt-dlp on host for music discovery" });
       }
       // Previously built this as one interpolated shell string run through
-      // exec() — exec always goes through /bin/sh, and only double-quotes
+      // exec() â€” exec always goes through /bin/sh, and only double-quotes
       // were stripped from `q`, so a query containing e.g. "$(...)" or
       // backticks would execute as shell commands on the host under any
       // logged-in account's search box, not just admin. spawn() with an argv
       // array never invokes a shell, so there's nothing here for shell
-      // metacharacters to be interpreted by — `q` is passed through as one
+      // metacharacters to be interpreted by â€” `q` is passed through as one
       // opaque argument no matter what characters it contains.
       const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
         const child = spawn(ytdlp, [
@@ -24068,7 +24341,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch (e) { return res.status(500).json({ error: String(e), results: [] }); }
   });
 
-  // ─── User Profile Images API ───────────────────────────────────────────────
+  // â”€â”€â”€ User Profile Images API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const PROFILE_IMAGES_DIR = path.join(PERSIST_DIR, "profile-images");
   const profileImagesCache: any[] = [];
 
@@ -24234,7 +24507,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── iCloud Alternative — per-user unlimited file & photo storage ─────────────
+  // â”€â”€ iCloud Alternative â€” per-user unlimited file & photo storage â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const USER_STORAGE_DIR = path.join(PERSIST_DIR, "user-storage");
   const USER_STORAGE_QUOTA = 56 * 1024 * 1024 * 1024; // 56 GB per user (free tier)
 
@@ -24324,7 +24597,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true, used, quota, usedMB: Math.round(used / 1e6), quotaGB: Math.round(quota / 1e9), pct: Math.round((used / quota) * 100) });
   });
 
-  // Quota alias — used by StorageHub component
+  // Quota alias â€” used by StorageHub component
   app.get("/api/storage/quota", async (req, res) => {
     const auth = requireAnyAuth(req, res);
     if (!auth) return;
@@ -24436,7 +24709,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const used = await getUserStorageUsed(auth.userId);
     const quota = await getUserStorageQuota(auth.userId);
     if (used + body.length > quota) {
-      // Name the actual limit rather than hardcoding "56 GB free tier" — that
+      // Name the actual limit rather than hardcoding "56 GB free tier" â€” that
       // message was shown to paid users too, who had already paid for more.
       return res.status(413).json({
         error: `Storage quota exceeded (${Math.round(quota / 1e9)} GB). Upgrade your plan for more storage.`,
@@ -24499,7 +24772,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // ── Shared Folders — host exposes media dirs; clients browse/stream/download ──
+  // â”€â”€ Shared Folders â€” host exposes media dirs; clients browse/stream/download â”€â”€
   const SHARES_FILE = path.join(PERSIST_DIR, "shared-folders.json");
 
   type ShareAccess = 'public' | 'users' | 'private';
@@ -24528,7 +24801,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (share.access === 'public') return true;
     if (!auth) return false;
     if (share.access === 'users') return true; // any logged-in user
-    return share.ownerId === (auth.userId ?? ''); // private — owner only
+    return share.ownerId === (auth.userId ?? ''); // private â€” owner only
   }
 
   // Remembers admin status confirmed by a successful DB lookup, so a database
@@ -24537,7 +24810,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // Without this the host fails CLOSED on every DB blip: `dbConnected` goes
   // false, every isAdminUser() call returns false, and the owner is told
   // "Admin only" / "not admin" on their own machine. The host runs on a laptop
-  // against a remote Neon database, so those blips are routine — it was in
+  // against a remote Neon database, so those blips are routine â€” it was in
   // "Memory-only mode" overnight.
   //
   // This only ever REPLAYS a decision the database already made; it can never
@@ -24561,7 +24834,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       adminRoleCache.set(uid, admin);
       return admin;
     } catch {
-      // Query failed (connection dropped mid-flight) — same fallback.
+      // Query failed (connection dropped mid-flight) â€” same fallback.
       return adminRoleCache.get(uid) ?? false;
     }
   }
@@ -24578,9 +24851,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const existing = await loadShares();
     if (existing.length > 0) return;
     const defaults: Array<{ name: string; sub: string; icon: string; desc: string }> = [
-      { name: 'Movies',   sub: 'Movies',   icon: '🎬', desc: 'Feature films' },
-      { name: 'TV Shows', sub: 'TV Shows', icon: '📺', desc: 'Series & episodes' },
-      { name: 'Media',    sub: '',         icon: '🎥', desc: 'All media' },
+      { name: 'Movies',   sub: 'Movies',   icon: 'ðŸŽ¬', desc: 'Feature films' },
+      { name: 'TV Shows', sub: 'TV Shows', icon: 'ðŸ“º', desc: 'Series & episodes' },
+      { name: 'Media',    sub: '',         icon: 'ðŸŽ¥', desc: 'All media' },
     ];
     const seeds: SharedFolder[] = [];
     for (const d of defaults) {
@@ -24717,7 +24990,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     } catch { res.status(404).json({ error: 'File not found' }); }
   });
 
-  // ADD TO LIBRARY — copy a file from user storage → media library + trigger enrich
+  // ADD TO LIBRARY â€” copy a file from user storage â†’ media library + trigger enrich
   app.post('/api/shared-folders/add-to-library', express.json(), async (req, res) => {
     const auth = requireAnyAuth(req, res);
     if (!auth) return;
@@ -24736,11 +25009,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       await copyFile(src, dest);
       // Trigger library refresh + enrichment
       await refreshMediaLibrary().catch(() => {});
-      return res.json({ ok: true, dest, message: `Added to ${targetFolder} — library refreshing with metadata` });
+      return res.json({ ok: true, dest, message: `Added to ${targetFolder} â€” library refreshing with metadata` });
     } catch (e) { return res.status(500).json({ error: String(e) }); }
   });
 
-  // ── Photo Booklet ────────────────────────────────────────────────────────────
+  // â”€â”€ Photo Booklet â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const PHOTOS_DIR = path.join(PERSIST_DIR, "photos");
   const ALBUMS_FILE = path.join(PHOTOS_DIR, "albums.json");
   const PHOTO_PIN_FILE = path.join(PHOTOS_DIR, "pin.json");
@@ -24782,7 +25055,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return album.pinHash === hashPin(supplied);
   }
 
-  // Serve photo file by albumId + filename — used by <img src> tags in the frontend.
+  // Serve photo file by albumId + filename â€” used by <img src> tags in the frontend.
   // Auth is passed as query params (token, photoPin, albumPin) because browsers can't
   // set custom headers on image requests.
   app.get("/api/photos/file", async (req, res) => {
@@ -24834,7 +25107,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         res.setHeader("Content-Length", buf.length);
         return res.end(buf);
       } catch {
-        // sharp not available or failed — fall through to raw stream
+        // sharp not available or failed â€” fall through to raw stream
       }
     }
 
@@ -24990,7 +25263,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // ── Media artwork enrichment ──────────────────────────────────────────────────
+  // â”€â”€ Media artwork enrichment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Release-name tags. Anything here is encoding/source/group metadata, never
   // part of a real title.
   const RELEASE_TAGS = /\b(1080p|720p|480p|2160p|4k|uhd|bluray|blu-ray|bdrip|bdremux|remux|webrip|web-dl|webdl|web|hdrip|dvdrip|dcprip|hdtv|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|ddp?5|dd5|dts|atmos|truehd|dovi|hdr10?|sdr|10bit|8bit|amzn|nf|dsnp|atvp|hmax|adn|itunes|repack|proper|extended|remastered|multi|subfrench|subs?|esp|eng|fre|ita|kor|jpn|dual|dl|yts|yify|rarbg|galaxyrg|kyogo|edith|flux|t3nzin|rcvr|vision|mx)\b/gi;
@@ -25022,7 +25295,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     s = s.replace(/\([^)]*\)/g, ' ').replace(RELEASE_TAGS, ' ');
     s = s.replace(/\b(ep|episode)\s*\d+\b/gi, ' ').replace(/\bS\d{1,2}\s*E?\d{0,3}\b/gi, ' ');
     // Punctuation stranded by removing a parenthesised year, e.g. "Supergirl (".
-    s = s.replace(/[([{\-–—:,]+\s*$/, '').replace(/^\s*[)\]}\-–—:,]+/, '');
+    s = s.replace(/[([{\-â€“â€”:,]+\s*$/, '').replace(/^\s*[)\]}\-â€“â€”:,]+/, '');
     return { title: s.replace(/\s+/g, ' ').trim(), year };
   }
 
@@ -25040,7 +25313,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       // Background: backfill rich metadata (rating/genres/overview/backdrop) and
       // poster art into each title's metadata.json sidecar via the same helper
       // the upload flow uses, so this "Media Scraper" button actually delivers
-      // what it claims — it used to only ever drop a bare cover.jpg next to the
+      // what it claims â€” it used to only ever drop a bare cover.jpg next to the
       // video file with no rating/genre/overview anywhere.
       (async () => {
         let saved = 0;
@@ -25055,7 +25328,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           if (seenDirs.has(titleDir)) continue;
           seenDirs.add(titleDir);
 
-          // Use the title folder's own name — matches exactly what the upload
+          // Use the title folder's own name â€” matches exactly what the upload
           // flow already uses to name/query this same title (see the
           // ensureMediaArtworkAndMetadata call sites in the chunked-upload
           // handler). The raw video filename is a much noisier TMDB query
@@ -25122,13 +25395,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   }
 
-  // ── Phase 6: Subdomain Multi-Tenancy & Tenant Info ────────────────
+  // â”€â”€ Phase 6: Subdomain Multi-Tenancy & Tenant Info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/tenant/info", (req, res) => {
     const tenantUsername = (req as any).tenantUsername || null;
     res.json({ ok: true, tenantUsername });
   });
 
-  // ── Phase 6: Ad-Supported Free Tier & User Config ─────────────────
+  // â”€â”€ Phase 6: Ad-Supported Free Tier & User Config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/user/config", async (req, res) => {
     const auth = getOptionalAuthUser(req);
     let userTier = 'free';
@@ -25181,7 +25454,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Phase 11: Consolidated User Settings & Account Management ─────
+  // â”€â”€ Phase 11: Consolidated User Settings & Account Management â”€â”€â”€â”€â”€
   const _userBoundHosts = new Map<string, Array<{
     id: string;
     name: string;
@@ -25448,7 +25721,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Phase 7: Local PC Game Discovery with Nucleus Compatibility ──
+  // â”€â”€ Phase 7: Local PC Game Discovery with Nucleus Compatibility â”€â”€
   app.get("/api/integrations/steam/discover", async (_req, res) => {
     try {
       const [steamGames, epicGames] = await Promise.all([
@@ -25502,7 +25775,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Phase 7: Co-Op Session Orchestrator ──────────────────────────
+  // â”€â”€ Phase 7: Co-Op Session Orchestrator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.post("/api/integrations/nucleus/launch", express.json(), async (req, res) => {
     const { gameId, playerCount = 2, controllerMap = [] } = req.body ?? {};
     if (!gameId) {
@@ -25539,7 +25812,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  // ── Phase 7: Smart Client Deduplication Scanner (Phone/Watch Sync) ──
+  // â”€â”€ Phase 7: Smart Client Deduplication Scanner (Phone/Watch Sync) â”€â”€
   app.post("/api/sync/scan", express.json(), async (req, res) => {
     try {
       const body = req.body ?? {};
@@ -25609,7 +25882,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Phase 8: AwehChat Ecosystem Integration & Master Contact List ─
+  // â”€â”€ Phase 8: AwehChat Ecosystem Integration & Master Contact List â”€
   app.get("/api/integrations/ecosystem/contacts", async (req, res) => {
     try {
       const contacts = await fetchMasterContactList(AWEHCHAT_API_URL, AWEHCHAT_API_KEY);
@@ -25685,7 +25958,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
-  // ── Phase 9: Gemini AI Game Recommendation Engine ────────────────
+  // â”€â”€ Phase 9: Gemini AI Game Recommendation Engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   type CachedRecommendation = {
     payload: any;
     ts: number;
@@ -25833,14 +26106,14 @@ Format as JSON:
     }
   });
 
-  // ── Updates delivery ────────────────────────────────────────────
+  // â”€â”€ Updates delivery â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Serves latest.yml + installer artifacts for electron-updater and APK downloads.
   const updatesDir = resolvePortableDir("releases", "updates");
   app.use('/updates', express.static(updatesDir, { maxAge: 0 }));
 
   // Installer downloads are served from OUTSIDE the web bundle.
   //
-  // They used to live in public/, which Vite copies into dist/ — and Capacitor
+  // They used to live in public/, which Vite copies into dist/ â€” and Capacitor
   // copies dist/ wholesale into the Android app. The result was an APK that
   // contained the 328 MB desktop .deb and a copy of itself: 16 MB became
   // 357 MB. Keeping the artifacts outside the bundle makes that impossible.
@@ -25896,14 +26169,14 @@ Format as JSON:
   });
 
   // Helper: find the latest desktop installer for a given platform in releases/updates.
-  // Matches by extension rather than a hardcoded name — electron-builder's default NSIS
+  // Matches by extension rather than a hardcoded name â€” electron-builder's default NSIS
   // artifact name uses spaces ("NexusEmu Setup 1.0.3.exe"), not the hyphenated form a
   // naive template-string guess would produce, so a fixed filename silently breaks on
   // every version bump. Same directory-scan shape as findLatestApk() above.
   // Linux accepts .deb as well as .AppImage. The Linux bundle produced by this
   // project is a .deb (AppImage bundling needs patchelf/librsvg, which are not
   // installed), so an AppImage-only pattern made every Linux build invisible to
-  // the updater — the version endpoint reported the new version but returned no
+  // the updater â€” the version endpoint reported the new version but returned no
   // download URL, and the UI kept showing the previous release.
   const DESKTOP_INSTALLER_EXT: Record<'windows' | 'linux' | 'mac', RegExp> = {
     windows: /\.exe$/i,
@@ -25939,7 +26212,7 @@ Format as JSON:
     return 'linux';
   }
 
-  // Public desktop installer download endpoint (no auth required) — one stable link the
+  // Public desktop installer download endpoint (no auth required) â€” one stable link the
   // frontend can hardcode instead of round-tripping through /api/updates/check first.
   app.get('/api/downloads/desktop', async (req, res) => {
     const platform = normalizeDesktopPlatform(String(req.query.platform ?? 'windows'));
@@ -26001,7 +26274,7 @@ Format as JSON:
   });
 
   // Tauri's built-in updater plugin (configured in tauri.conf.json to poll this exact
-  // URL) — this was never actually implemented, so every desktop install has silently
+  // URL) â€” this was never actually implemented, so every desktop install has silently
   // never been able to self-update no matter how far behind it fell. Schema per
   // https://v2.tauri.app/plugin/updater/#update-server-json-format: 204 means "you're
   // current", otherwise a JSON body with the signature the updater needs to verify
@@ -26020,7 +26293,7 @@ Format as JSON:
       try {
         signature = (await readFile(`${installer.filePath}.sig`, 'utf8')).trim();
       } catch {
-        // No .sig on disk for this build — the updater will refuse an unsigned
+        // No .sig on disk for this build â€” the updater will refuse an unsigned
         // bundle anyway, so don't advertise an update we can't actually deliver.
         return res.status(204).end();
       }
@@ -26031,7 +26304,7 @@ Format as JSON:
       // so the catch above never fired, and this endpoint happily advertised
       // an update with signature: "". Every desktop client then downloaded the
       // full ~183MB installer, failed verification, and retried on the next
-      // check — an invisible, permanently-failing update loop.
+      // check â€” an invisible, permanently-failing update loop.
       if (!signature) {
         return res.status(204).end();
       }
@@ -26056,12 +26329,29 @@ Format as JSON:
     }
   });
 
-  // ── Vite / Static ─────────────────────────────────────────────
+  // â”€â”€ Files library â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  registerFilesLibrary(app, {
+    root: FILES_ROOT,
+    getUser: async (payload) => {
+      if (!pool || !dbConnected) return null;
+      const r = await pool.query("SELECT role, media_access, can_upload_media FROM users WHERE id=$1", [payload.userId]);
+      return r.rows[0] ?? null;
+    },
+    log: (level, msg) => log(level as any, msg, "files"),
+    onMediaChanged: () => { refreshMediaLibrary(true).catch(() => {}); },
+  });
+  app.get(["/files", "/files/"], (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow");
+    res.sendFile(path.join(process.cwd(), "web", "files.html"));
+  });
+
+  // â”€â”€ Vite / Static â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const distPath = path.join(process.cwd(), "dist");
   const hasBuiltDist = existsSync(path.join(distPath, "index.html"));
   if (process.env.NODE_ENV !== "production" && !hasBuiltDist) {
     // Only reached running from source with no dist/ built yet (`tsx
-    // server.ts` straight after a fresh clone) — a packaged/deployed build
+    // server.ts` straight after a fresh clone) â€” a packaged/deployed build
     // always ships a pre-built dist/, so hasBuiltDist alone is enough to
     // pick the static-serve branch below even when NODE_ENV was never set
     // to "production" by whatever spawned this process. Relying on NODE_ENV
@@ -26076,12 +26366,12 @@ Format as JSON:
     });
     app.use(vite.middlewares);
   } else {
-    // Hashed assets (/_assets/*.js, *.css) → immutable cache 1 year
+    // Hashed assets (/_assets/*.js, *.css) â†’ immutable cache 1 year
     app.use('/assets', express.static(path.join(distPath, 'assets'), {
       maxAge: '1y',
       immutable: true,
     }));
-    // Everything else — no-store to avoid stale clients holding old UI bundles.
+    // Everything else â€” no-store to avoid stale clients holding old UI bundles.
     app.use(express.static(distPath, {
       maxAge: 0,
       setHeaders: (res, filePath) => {
@@ -26091,7 +26381,7 @@ Format as JSON:
         }
       },
     }));
-    // Block all crawlers — this is a private app, never index it
+    // Block all crawlers â€” this is a private app, never index it
     app.get('/robots.txt', (_req, res) => {
       res.setHeader('Content-Type', 'text/plain');
       res.setHeader('Cache-Control', 'no-store');
@@ -26120,7 +26410,7 @@ Format as JSON:
     });
   }
 
-  // ── Start ─────────────────────────────────────────────────────
+  // â”€â”€ Start â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   startCpuSampling();
   pollGpu();
 
@@ -26129,14 +26419,14 @@ Format as JSON:
     if (cfg.root_path) startVaultWatcher(cfg.root_path).catch(() => {});
   });
 
-  // Boot scan — multi-drive so all content appears immediately
+  // Boot scan â€” multi-drive so all content appears immediately
   refreshMediaLibrary()
     .then((scanned) => {
       log("INFO", `Media library boot load: ${scanned.filter(i => i.kind === 'video').length} video(s) across all drives`, "media");
 
       // Fetch missing posters for the EXISTING library, not just for new
       // uploads. Enrichment previously ran only after an upload, so anything
-      // already on disk never got artwork — which is why a library of hundreds
+      // already on disk never got artwork â€” which is why a library of hundreds
       // of videos had exactly one poster file.
       //
       // Delayed so the boot scan and first requests are not competing with
@@ -26153,7 +26443,7 @@ Format as JSON:
       log("WARN", `Media library boot load failed: ${String(err)}`, "media");
     });
 
-  // ── Periodic Auto-Scan (every 30 minutes) ──────────────────────
+  // â”€â”€ Periodic Auto-Scan (every 30 minutes) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // The Ghost Scanner (chokidar) handles real-time file changes.
   // This is just a safety net for drives that aren't watched.
   setInterval(() => {
@@ -26166,7 +26456,7 @@ Format as JSON:
       .catch(() => {});
   }, 30 * 60 * 1000).unref();
 
-  // Auto-scan vault/games periodically (every 30 minutes — chokidar handles real-time)
+  // Auto-scan vault/games periodically (every 30 minutes â€” chokidar handles real-time)
   setInterval(async () => {
     const cfg = await getVaultConfig().catch(() => null);
     if (cfg?.root_path) {
@@ -26198,7 +26488,7 @@ Format as JSON:
     // Don't exit - try to keep the server running
   });
 
-  // ── Social / Community API ────────────────────────────────────────────────
+  // â”€â”€ Social / Community API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   // Role system
   app.get("/api/social/roles", async (_req, res) => {
@@ -26230,7 +26520,7 @@ Format as JSON:
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const r = await pool.query(
       "INSERT INTO social_groups (name,slug,description,icon,color,owner_id,is_public) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *",
-      [name.trim(), slug + '-' + Date.now(), description ?? '', icon ?? '💬', color ?? '#4d7cff', auth.userId, is_public !== false]
+      [name.trim(), slug + '-' + Date.now(), description ?? '', icon ?? 'ðŸ’¬', color ?? '#4d7cff', auth.userId, is_public !== false]
     );
     return res.json({ ok: true, group: r.rows[0] });
   });
@@ -26339,7 +26629,7 @@ Format as JSON:
       const r = await fetch(c.webhook_url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...(c.api_key ? { Authorization: `Bearer ${c.api_key}` } : {}) },
-        body: JSON.stringify({ bot: c.bot_name, message: "👋 Nexus is connected! All systems online.", type: "system" }),
+        body: JSON.stringify({ bot: c.bot_name, message: "ðŸ‘‹ Nexus is connected! All systems online.", type: "system" }),
         signal: AbortSignal.timeout(8000),
       });
       return res.json({ ok: r.ok, status: r.status });
@@ -26360,7 +26650,7 @@ Format as JSON:
     req.on('close', () => { clearInterval(heartbeat); socialMessageBus.off('message', listener); });
   });
 
-  // ── Galaxy Watch APK download ────────────────────────────────────────────────
+  // â”€â”€ Galaxy Watch APK download â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/api/wear/apk", (_req, res) => {
     const apkPath = path.join(process.cwd(), "NexusWear-GalaxyWatch4.apk");
     res.setHeader("Content-Type", "application/vnd.android.package-archive");
@@ -26371,7 +26661,7 @@ Format as JSON:
     });
   });
 
-  // ── Galaxy Watch / WearOS PWA ─────────────────────────────────────────────
+  // â”€â”€ Galaxy Watch / WearOS PWA â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get("/wear", (_req, res) => {
     const wearPath = path.join(process.cwd(), "public", "wear.html");
     res.setHeader("Cache-Control", "no-store");
@@ -26381,7 +26671,7 @@ Format as JSON:
   });
   app.get("/wear.html", (_req, res) => res.redirect(301, "/wear"));
 
-  // ── Watch Party (WebSocket rooms) ────────────────────────────────────────────
+  // â”€â”€ Watch Party (WebSocket rooms) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const http = await import("http");
   const { WebSocketServer } = await import("ws") as any;
   const httpServer = http.createServer(app);
@@ -26410,11 +26700,11 @@ Format as JSON:
     return room.position + elapsed;
   }
 
-  // Soft safety cap — not a real bottleneck found in this code (broadcast/heartbeat
+  // Soft safety cap â€” not a real bottleneck found in this code (broadcast/heartbeat
   // fan-out below is already O(n) with a single JSON.stringify reused across all
-  // members, not O(n²)), but there was no cap at all before, so one runaway client
-  // opening connections in a loop could grow a room — and therefore the per-message
-  // broadcast cost — without bound. Generous enough to never bind for normal use.
+  // members, not O(nÂ²)), but there was no cap at all before, so one runaway client
+  // opening connections in a loop could grow a room â€” and therefore the per-message
+  // broadcast cost â€” without bound. Generous enough to never bind for normal use.
   const MAX_PARTY_MEMBERS = 50;
 
   // ws defaults maxPayload to 100 MiB, so one client could make the server
@@ -26434,7 +26724,7 @@ Format as JSON:
     if (!room.members.has(memberId) && room.members.size >= MAX_PARTY_MEMBERS) {
       ws.close(4008, "Room is full"); return;
     }
-    // Liveness tracking for the reaper sweep below — a connection that drops
+    // Liveness tracking for the reaper sweep below â€” a connection that drops
     // without a clean TCP close (common on flaky WiFi or through the Cloudflare
     // tunnel) never fires the "close" handler on its own, so without this the
     // member would stay in room.members (and in every broadcast's fan-out)
@@ -26516,7 +26806,7 @@ Format as JSON:
             } catch {}
           }
         } else if (msg.type === "ping") {
-          // Echo pong with server timestamp — client uses for RTT measurement
+          // Echo pong with server timestamp â€” client uses for RTT measurement
           ws.send(JSON.stringify({ type: "pong", serverTs: now, clientTs: msg.clientTs }));
         } else if (msg.type === "latency_report") {
           if (member) member.latencyMs = Number(msg.latencyMs ?? 0);
@@ -26556,8 +26846,8 @@ Format as JSON:
 
   // Reap stale Watch Party connections across all rooms. A dropped connection that
   // never sends a proper close frame (flaky WiFi, a phone locking mid-tunnel, etc.)
-  // would otherwise sit in room.members forever — still counted in every broadcast's
-  // O(n) fan-out and in memberCount — and after enough reconnect cycles a long-running
+  // would otherwise sit in room.members forever â€” still counted in every broadcast's
+  // O(n) fan-out and in memberCount â€” and after enough reconnect cycles a long-running
   // room accumulates zombie entries with no way to clear them short of a server
   // restart. Standard ws ping/pong liveness: mark unresponsive on each sweep, then
   // terminate() next sweep if no pong arrived, which fires the normal "close" handler
@@ -26609,7 +26899,7 @@ Format as JSON:
     res.json({ id: room.id, name: room.name, mediaTitle: room.mediaTitle, mediaRel: room.mediaRel, state: room.state, position: roomPosition(room), memberCount: room.members.size, hostId: room.hostId });
   });
 
-  // ── Co-Op & Multiplayer Hub ──────────────────────────────────────────────────
+  // â”€â”€ Co-Op & Multiplayer Hub â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Step 5 (Final Production): WebSocket-based session management with:
   //   - Host approval queue for join requests
   //   - Separate controller input channel (60 Hz priority)
@@ -26627,7 +26917,7 @@ Format as JSON:
     port: number; hostAddress: string; streamFeedUrl: string | null; createdAt: number;
     // 'pc' sessions auto-launch a Steam/Epic/etc game on the host and skip
     // straight to stream mode (see the pcStreamStartedRef effect in
-    // MultiplayerHub.tsx) — 'rom' is the original RetroArch netplay/stream path.
+    // MultiplayerHub.tsx) â€” 'rom' is the original RetroArch netplay/stream path.
     source: 'rom' | 'pc'; pcGame: CoopPcGame;
     players: Map<string, CoopPlayer>; pendingJoins: Map<string, CoopJoinReq>;
     // Returned only to the creator (inside the host wsUrl). Lets the real host
@@ -26638,18 +26928,18 @@ Format as JSON:
   const coopSessions = new Map<string, CoopSession>();
   const HOST_SECRET = process.env.NEXUS_HOST_SHARE_SECRET ?? process.env.ACCESS_PIN ?? "";
 
-  // ── Virtual gamepad bridge (real split-screen input, not just keyboard) ──
+  // â”€â”€ Virtual gamepad bridge (real split-screen input, not just keyboard) â”€â”€
   // A remote co-op player's browser already captures full analog Gamepad
-  // API state (see MultiplayerHub.tsx's controller-poll loop) — this used to
+  // API state (see MultiplayerHub.tsx's controller-poll loop) â€” this used to
   // dead-end as a 10-key keyboard mapper with no analog support at all,
   // which doesn't work for split-screen PC/Steam games that expect a real
   // second controller. Each connected client that sends "controller"
   // messages during a stream-mode session gets its own uinput-backed
-  // virtual gamepad (scripts/gamepad-bridge.py) that the host OS — and
-  // Steam Input, and the game itself — sees as an actual plugged-in pad.
+  // virtual gamepad (scripts/gamepad-bridge.py) that the host OS â€” and
+  // Steam Input, and the game itself â€” sees as an actual plugged-in pad.
   const gamepadBridges = new Map<string, ReturnType<typeof spawn>>();
   let gamepadBridgeUnavailable = false; // set once if the first spawn attempt fails, so we don't retry-and-fail on every keystroke
-  // Prebuilt by `dotnet publish` — see windows-gamepad-bridge/Program.cs. This
+  // Prebuilt by `dotnet publish` â€” see windows-gamepad-bridge/Program.cs. This
   // is the Windows counterpart to gamepad-bridge.py: same line-delimited JSON
   // wire format, but drives a real virtual Xbox 360 pad via ViGEmBus instead
   // of Linux uinput, since uinput doesn't exist on Windows.
@@ -26658,7 +26948,7 @@ Format as JSON:
 
   // Tells both players in a session whether a given client's controller
   // input is actually reaching the game as a real second pad, or silently
-  // going nowhere. Previously nothing ever sent this — MultiplayerHub.tsx
+  // going nowhere. Previously nothing ever sent this â€” MultiplayerHub.tsx
   // has listened for it since the co-op feature shipped, but the host and
   // guest had no way to find out a remote controller wasn't working except
   // by noticing the game itself never responded to button presses.
@@ -26698,9 +26988,9 @@ Format as JSON:
       proc.on("error", (err: Error) => {
         gamepadBridges.delete(key);
         gamepadBridgeUnavailable = true;
-        log("WARN", `Virtual gamepad bridge failed to spawn (${err.message}) — falling back to keyboard input for this session`, "coop");
+        log("WARN", `Virtual gamepad bridge failed to spawn (${err.message}) â€” falling back to keyboard input for this session`, "coop");
         broadcastGamepadBridgeStatus(sessionId, clientId, false, process.platform === "win32"
-          ? "Virtual controller bridge failed to start — is WindowsGamepadBridge.exe present and ViGEmBus installed? See /api/host/vigembus-status."
+          ? "Virtual controller bridge failed to start â€” is WindowsGamepadBridge.exe present and ViGEmBus installed? See /api/host/vigembus-status."
           : `Virtual controller bridge failed to start (${err.message})`);
       });
       proc.on("exit", (code) => {
@@ -26715,8 +27005,8 @@ Format as JSON:
           gamepadBridgeUnavailable = true;
           const hint = process.platform === "win32"
             ? "ViGEmBus driver not installed? see /api/host/vigembus-status"
-            : "/dev/uinput not writable — run scripts/setup-uinput-permissions.sh";
-          log("WARN", `Virtual gamepad bridge failed to start (${hint}) — falling back to keyboard input for this session`, "coop");
+            : "/dev/uinput not writable â€” run scripts/setup-uinput-permissions.sh";
+          log("WARN", `Virtual gamepad bridge failed to start (${hint}) â€” falling back to keyboard input for this session`, "coop");
           broadcastGamepadBridgeStatus(sessionId, clientId, false, hint);
         }
       });
@@ -26738,7 +27028,7 @@ Format as JSON:
     gamepadBridges.delete(key);
   }
 
-  // ── ViGEmBus preflight (Windows virtual-controller driver) ──────────────
+  // â”€â”€ ViGEmBus preflight (Windows virtual-controller driver) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // MultiplayerHub.tsx checks this before a 'pc' session's guest joins, so
   // the host finds out BEFORE inviting someone that remote controller input
   // won't reach the game, instead of both players discovering it silently
@@ -26747,23 +27037,23 @@ Format as JSON:
 
   app.get("/api/host/vigembus-status", async (_req, res) => {
     if (process.platform !== "win32") {
-      return res.json({ applicable: false, installed: false, detail: "Windows-only — not applicable on this host OS." });
+      return res.json({ applicable: false, installed: false, detail: "Windows-only â€” not applicable on this host OS." });
     }
     try {
       await fsAccess(WINDOWS_GAMEPAD_BRIDGE_EXE);
     } catch {
-      return res.json({ applicable: true, installed: false, detail: "WindowsGamepadBridge.exe is missing from this install — reinstall NexusEmu Desktop." });
+      return res.json({ applicable: true, installed: false, detail: "WindowsGamepadBridge.exe is missing from this install â€” reinstall NexusEmu Desktop." });
     }
     try {
       // `sc query` exits non-zero (execAsync rejects) when the service isn't
-      // registered at all — that failure IS the "not installed" answer, not
+      // registered at all â€” that failure IS the "not installed" answer, not
       // an error to propagate, hence the catch below returning installed:false
       // rather than a 500.
       const { stdout } = await execAsync("sc query ViGEmBus");
       const running = /RUNNING/i.test(stdout);
       res.json({
         applicable: true, installed: true,
-        detail: running ? "ViGEmBus driver is installed and running." : "ViGEmBus driver is installed but not currently running — a reboot may be needed.",
+        detail: running ? "ViGEmBus driver is installed and running." : "ViGEmBus driver is installed but not currently running â€” a reboot may be needed.",
       });
     } catch {
       res.json({ applicable: true, installed: false, detail: "ViGEmBus driver not installed." });
@@ -26779,12 +27069,12 @@ Format as JSON:
       const r = await fetch(VIGEMBUS_INSTALLER_URL, { signal: AbortSignal.timeout(60_000) });
       if (!r.ok) throw new Error(`Download failed: HTTP ${r.status}`);
       await writeFile(tmpPath, Buffer.from(await r.arrayBuffer()));
-      // Runs its own elevated (UAC) installer window — same pattern the app
+      // Runs its own elevated (UAC) installer window â€” same pattern the app
       // already uses for winget-based RetroArch installs. Fire-and-forget:
       // there's no reliable "install finished" signal to wait on, so the
       // frontend just prompts the host to click Re-check once it's done.
       spawn(tmpPath, [], { detached: true, stdio: "ignore" }).unref();
-      res.json({ ok: true, detail: "Installer launched — finish the prompt on this PC, then re-check." });
+      res.json({ ok: true, detail: "Installer launched â€” finish the prompt on this PC, then re-check." });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e?.message ?? "Could not download/launch the ViGEmBus installer. Install manually from github.com/nefarius/ViGEmBus." });
     }
@@ -26819,7 +27109,7 @@ Format as JSON:
   }
   // For the REST lobby, which every signed-in user can read. Player ids are
   // left out because the host's id is what role=host on /ws/coop is checked
-  // against — publishing it in the lobby let any user connect as the host of
+  // against â€” publishing it in the lobby let any user connect as the host of
   // any session, approve themselves and end it. Players in the session still
   // get ids over the socket.
   function coopPublicSummary(s: CoopSession) {
@@ -26833,7 +27123,7 @@ Format as JSON:
   const COOP_CHAT_MAX = 500;
   const coopChatText = (t: unknown) => String(t ?? "").slice(0, COOP_CHAT_MAX);
 
-  // WebSocket — Co-Op signaling, controller input, join approval, WebRTC relay
+  // WebSocket â€” Co-Op signaling, controller input, join approval, WebRTC relay
   const coopWss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD });
 
   // Remote Play input socket. Declared here rather than beside the Remote
@@ -26926,7 +27216,7 @@ Format as JSON:
       }, 30000);
       session.pendingJoins.set(clientId, { clientId, name: clientName, ws, requestedAt: Date.now(), timeout });
 
-      ws.send(JSON.stringify({ type: "join_pending", message: "Waiting for host approval…" }));
+      ws.send(JSON.stringify({ type: "join_pending", message: "Waiting for host approvalâ€¦" }));
       // Notify host
       const host = [...session.players.values()].find(p => p.role === 'host');
       if (host?.ws?.readyState === 1) host.ws.send(JSON.stringify({ type: "join_request", clientId, name: clientName }));
@@ -26984,7 +27274,7 @@ Format as JSON:
           coopBroadcast(session, { type: "session_ended", reason: "Host ended session" });
           setTimeout(() => coopSessions.delete(sessionId), 5000);
         }
-        // WebRTC signaling relay (host ↔ client for P2P DataChannel)
+        // WebRTC signaling relay (host â†” client for P2P DataChannel)
         else if (msg.type === "rtc_offer" || msg.type === "rtc_answer" || msg.type === "rtc_ice") {
           const target = session.players.get(msg.targetId);
           if (target?.ws?.readyState === 1) target.ws.send(JSON.stringify({ ...msg, fromId: clientId }));
@@ -27006,7 +27296,7 @@ Format as JSON:
   });
 
   // Co-Op and Remote Play sockets only got app-level ping/pong (client-sent
-  // {type:"ping"} echoed back) — no server-initiated liveness check, so an
+  // {type:"ping"} echoed back) â€” no server-initiated liveness check, so an
   // idle connection behind a load balancer with a shorter idle timeout than
   // whatever the client's ping interval is would get silently dropped with
   // nothing here to notice. Same standard ws liveness sweep already used for
@@ -27035,7 +27325,7 @@ Format as JSON:
           if (session.mode === 'stream' && msg.buttons) {
             const bridge = getGamepadBridge(session.id, id);
             if (bridge) {
-              // Real virtual controller (analog sticks + full button set) —
+              // Real virtual controller (analog sticks + full button set) â€”
               // what split-screen PC/Steam games actually need, not a 10-key
               // keyboard stand-in. Falls through to the keyboard mapper only
               // if the bridge itself couldn't start (see getGamepadBridge).
@@ -27053,7 +27343,7 @@ Format as JSON:
               }
             } else {
               // A PC/Steam game has no sensible single-key mapping (unlike an
-              // emulator's small fixed button set) — the RetroArch keyboard
+              // emulator's small fixed button set) â€” the RetroArch keyboard
               // fallback above would just press arbitrary keys in an
               // unrelated game. Report the real problem instead of pretending
               // input is being sent somewhere.
@@ -27083,7 +27373,7 @@ Format as JSON:
     if (session.players.size === 0) { setTimeout(() => { if (!coopSessions.get(session.id)?.players.size) coopSessions.delete(session.id); }, 2 * 60 * 1000); }
   }
 
-  // ── Co-Op REST API ──────────────────────────────────────────────
+  // â”€â”€ Co-Op REST API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // GET all active sessions
   app.get("/api/multiplayer/sessions", (_req, res) => {
     const sessions = [...coopSessions.values()].filter(s => s.status !== 'ended').map(coopPublicSummary);
@@ -27095,7 +27385,7 @@ Format as JSON:
     const { gameId, gameTitle, platform, mode, maxPlayers, password, playerName, hostId, source, pcGame } = req.body as any;
     const id = crypto.randomBytes(6).toString("hex");
     const hId = hostId ?? crypto.randomBytes(4).toString("hex");
-    // hostAddress used to be left as the literal string 'auto' — fine for
+    // hostAddress used to be left as the literal string 'auto' â€” fine for
     // "stream" mode (which just needs the existing MJPEG feed URL), but
     // "local" mode is meant to hand joining players a real address to run
     // RetroArch's own --connect against, and 'auto' obviously isn't one.
@@ -27106,7 +27396,7 @@ Format as JSON:
       platform: platform ?? "retroarch", mode: (mode ?? "local") as CoopMode,
       maxPlayers: Math.min(4, Math.max(2, Number(maxPlayers) || 2)), password: password ?? "",
       status: 'waiting', port: 55435, hostAddress: resolvedHostAddress, streamFeedUrl: null,
-      // Previously dropped entirely — the client already sent these
+      // Previously dropped entirely â€” the client already sent these
       // (MultiplayerHub.tsx's handleCreate) so session.source was always
       // undefined server-side, meaning every `session.source === 'pc'` check
       // (both here and in the frontend) silently never matched and the whole
@@ -27121,7 +27411,7 @@ Format as JSON:
       hostKey: crypto.randomBytes(16).toString("hex"),
     };
     coopSessions.set(id, session);
-    log("INFO", `Co-op session created: ${id} — ${session.gameTitle} (${session.mode})`, "coop");
+    log("INFO", `Co-op session created: ${id} â€” ${session.gameTitle} (${session.mode})`, "coop");
     res.json({ ok: true, session: coopSessionSummary(session), hostId: hId, hostKey: session.hostKey, wsUrl: `/ws/coop?session=${id}&id=${encodeURIComponent(hId)}&name=${encodeURIComponent(session.hostName)}&role=host&hk=${session.hostKey}` });
   });
 
@@ -27132,7 +27422,7 @@ Format as JSON:
     res.json(coopPublicSummary(s));
   });
 
-  // Join session (Client — initiates, Host approves via WS)
+  // Join session (Client â€” initiates, Host approves via WS)
   app.post("/api/multiplayer/sessions/:id/join", express.json(), (req, res) => {
     const s = coopSessions.get(req.params.id);
     if (!s) return res.status(404).json({ error: "Session not found" });
@@ -27146,7 +27436,7 @@ Format as JSON:
     });
   });
 
-  // Update session (Host only — set stream URL, mode)
+  // Update session (Host only â€” set stream URL, mode)
   app.patch("/api/multiplayer/sessions/:id", express.json(), (req, res) => {
     const s = coopSessions.get(req.params.id);
     if (!s) return res.status(404).json({ error: "Session not found" });
@@ -27174,12 +27464,12 @@ Format as JSON:
     res.json({ ok: true });
   });
 
-  // Co-Op game library — filtered to games known to support multiplayer
+  // Co-Op game library â€” filtered to games known to support multiplayer
   const COOP_KEYWORDS_SRV = ['mario','sonic','street fighter','mortal kombat','tekken','smash','double dragon','contra','turtles','streets of rage','golden axe','bomberman','kirby','battletoads','metal slug','nba','fifa','soccer','worms','diablo','gauntlet','castle crashers','river city','final fight','x-men','crash','racing','kirby','punch-out','bubble bobble','raiden','gunstar','sunset riders','captain commando'];
   app.get("/api/coop/games", async (_req, res) => {
     // The keyword match MUST run across the whole library, in SQL.
     // This previously selected "ORDER BY title ASC LIMIT 500" and filtered those
-    // 500 rows in JS — so on a real library it only ever inspected the first 500
+    // 500 rows in JS â€” so on a real library it only ever inspected the first 500
     // titles ALPHABETICALLY (which ended at "Bakuten Shoot Beyblade" here) and
     // every co-op classic past the B's was invisible: Contra, Metal Slug,
     // Streets of Rage, TMNT, Golden Axe, Sunset Riders. The browser showed 28
@@ -27214,7 +27504,7 @@ Format as JSON:
 
   log("INFO", `Co-Op Hub: WebSocket server ready at /ws/coop`, "kernel");
 
-  // ── NAS: Drive Pool Manager & API Key Integration ──────────────────────────
+  // â”€â”€ NAS: Drive Pool Manager & API Key Integration â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const NAS_POOLS_FILE = path.join(PERSIST_DIR, 'nas-pools.json');
   const NAS_KEYS_FILE  = path.join(PERSIST_DIR, 'nas-keys.json');
 
@@ -27410,7 +27700,7 @@ Format as JSON:
     } catch (e) { return res.status(500).json({ ok: false, error: String(e) }); }
   });
 
-  // GET /api/nas/ping — validate a NAS API key (public, uses X-NAS-Key header)
+  // GET /api/nas/ping â€” validate a NAS API key (public, uses X-NAS-Key header)
   app.get('/api/nas/ping', async (req, res) => {
     const rawKey = String(req.headers['x-nas-key'] ?? '').trim();
     if (!rawKey) return res.status(400).json({ ok: false, error: 'X-NAS-Key header required' });
@@ -27425,7 +27715,7 @@ Format as JSON:
     } catch (e) { return res.status(500).json({ ok: false, error: String(e) }); }
   });
 
-  // GET /api/nas/manifest — auto-config manifest for NAS client apps (public)
+  // GET /api/nas/manifest â€” auto-config manifest for NAS client apps (public)
   app.get('/api/nas/manifest', async (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     return res.json({
@@ -27445,7 +27735,7 @@ Format as JSON:
     });
   });
 
-  // GET /api/nas/allocation — per-drive storage allocation info
+  // GET /api/nas/allocation â€” per-drive storage allocation info
   app.get('/api/nas/allocation', async (_req, res) => {
     try {
       const drives = await getMountedDrives();
@@ -27461,12 +27751,12 @@ Format as JSON:
     } catch (e) { return res.status(500).json({ ok: false, error: String(e) }); }
   });
 
-  // ── Activity Log API ──────────────────────────────────────────────────────
+  // â”€â”€ Activity Log API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   app.get('/api/activity/events', async (req, res) => {
     if (!pool || !dbConnected) return res.json({ events: [] });
     const payload = (req as any).authPayload as any;
     // payload.role === 'monitor': a long-lived, read-only token minted for
-    // automated log monitoring (see scripts/mint-monitor-token.mjs) — it can
+    // automated log monitoring (see scripts/mint-monitor-token.mjs) â€” it can
     // read activity logs like an admin can, but isn't in the users table and
     // carries no brain/nexus claim, so every other admin-gated write route
     // still rejects it.
@@ -27500,7 +27790,7 @@ Format as JSON:
     if (!pool || !dbConnected) return res.json({ users: [] });
     const payload = (req as any).authPayload as any;
     // payload.role === 'monitor': a long-lived, read-only token minted for
-    // automated log monitoring (see scripts/mint-monitor-token.mjs) — it can
+    // automated log monitoring (see scripts/mint-monitor-token.mjs) â€” it can
     // read activity logs like an admin can, but isn't in the users table and
     // carries no brain/nexus claim, so every other admin-gated write route
     // still rejects it.
@@ -27522,7 +27812,7 @@ Format as JSON:
     }
   });
 
-  // Route WebSocket upgrades manually — multiple noServer instances on one httpServer
+  // Route WebSocket upgrades manually â€” multiple noServer instances on one httpServer
   httpServer.on("upgrade", (req, socket, head) => {
     const pathname = (req.url ?? "").split("?")[0];
     if (pathname === "/ws/watch-party") {
@@ -27536,9 +27826,9 @@ Format as JSON:
     }
   });
 
-  // ── JSON 404 for unmatched API routes ─────────────────────────
+  // â”€â”€ JSON 404 for unmatched API routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Registered LAST, deliberately. Express matches middleware in registration
-  // order, so mounting this any earlier swallows every route defined below it —
+  // order, so mounting this any earlier swallows every route defined below it â€”
   // an earlier attempt sat mid-file and silently shadowed 41 endpoints,
   // including all of Watch Party.
   //
@@ -27554,10 +27844,21 @@ Format as JSON:
     });
   });
 
+  // A server that failed to bind is alive but serves nothing, and the
+  // uncaughtException handler above would keep it that way: the watchdog then
+  // sees a running process and never restarts it. On Windows this happens when
+  // a restart races the old process releasing :3000. Exit so it retries.
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE" || err.code === "EACCES") {
+      console.error(`[NEXUS] Cannot listen on :${PORT} (${err.code}) â€” exiting so the supervisor retries`);
+      process.exit(1);
+    }
+  });
+
   httpServer.listen(PORT, "0.0.0.0", () => {
-    log("INFO", `Nexus Server online — http://localhost:${PORT}`, "kernel");
+    log("INFO", `Nexus Server online â€” http://localhost:${PORT}`, "kernel");
     log("INFO", `Database: ${dbConnected ? "Neon PostgreSQL connected" : "Memory-only mode"}`, "kernel");
-    log("INFO", `AI Core: ${ai ? "Gemini online" : "No API key — AI disabled"}`, "kernel");
+    log("INFO", `AI Core: ${ai ? "Gemini online" : "No API key â€” AI disabled"}`, "kernel");
     log("INFO", `GPU Telemetry: ${gpuLoadCache >= 0 ? "nvidia-smi active" : "Initializing..."}`, "kernel");
     log("INFO", `Host persistence file: ${PERSIST_FILE}`, "kernel");
     log("INFO", `Watch Party: WebSocket server ready`, "kernel");
@@ -27576,7 +27877,7 @@ Format as JSON:
         const romsPerPath = await Promise.all(allPaths.map(p => stat(p).then(() => scanVaultDir(p)).catch(() => [])));
         const roms = romsPerPath.flat();
 
-        // Batch existence check — one query instead of N
+        // Batch existence check â€” one query instead of N
         const allIds = roms.map(rom => crypto.createHash("md5").update(rom.relativePath).digest("hex"));
         const existingIds = new Set<string>(
           dbConnected && pool
@@ -27614,11 +27915,11 @@ Format as JSON:
   syncPersistedFallbackFromLiveSources().catch(() => {});
 
   const onShutdown = (signal: string) => {
-    log("INFO", `${signal} received — shutting down gracefully`, "shutdown");
+    log("INFO", `${signal} received â€” shutting down gracefully`, "shutdown");
     // AWS (ECS/Fargate) sends SIGTERM then SIGKILL after a grace period
-    // (default 30s) — bail out well before that if something hangs.
+    // (default 30s) â€” bail out well before that if something hangs.
     const forceExit = setTimeout(() => {
-      log("WARN", "Graceful shutdown timed out after 10s — forcing exit", "shutdown");
+      log("WARN", "Graceful shutdown timed out after 10s â€” forcing exit", "shutdown");
       process.exit(1);
     }, 10_000);
     forceExit.unref();
