@@ -343,6 +343,41 @@ Pirate Bay, LimeTorrents, Uindex, kickasstorrents.to...); Prowlarr tests each
 one first, and they are sent on to Sonarr and Radarr. There is a beginner's
 guide with the official download links.
 
+**Deep search** (same module): every 6 hours, and from "Deep search now",
+missing seasons and films are searched in Prowlarr under several wordings
+("Show (2009) Season 4", "Film (2019)") and well-seeded matches are pushed to
+Sonarr/Radarr (`/api/v3/release/push`), which still apply their own quality
+rules. At most `NEXUS_DEEP_MAX_PER_RUN` (3) grabs a run; shows with more than
+`NEXUS_DEEP_MAX_MISSING` (150) missing episodes are skipped; 50 GB is always
+left free. When downloads "sit", first compare qBittorrent's newest torrent
+with Sonarr's log: in October 2026 Sonarr had lost its program files and
+could not hand anything to qBittorrent (the health card now says so).
+
+## Media uploads
+
+Movies & TV > Upload (`server/upload-batches.ts`, `web-src/app/MediaUpload.jsx`):
+a folder is described to the server first, which plans every file's place
+as a whole (episodes without a show name take it from their folders or
+siblings, spelling variants merge, Specials are season 0, subtitles and
+posters follow their video, samples are skipped). The plan and each file's
+state live in `upload-batches/` in the data folder, so an interrupted upload
+continues from any device; Chrome remembers the folder, elsewhere the folder
+is picked again and finished files are skipped. Chunks are kept in
+`tmp/uploads/` and cleared after 14 days untouched.
+
+## Service keys
+
+Plans > Service keys (`server/service-keys.ts`): Resend, PayFast passphrase,
+Gemini and TMDB keys, entered in the app, stored encrypted in
+`service-keys.json`, tested against the service. A saved key wins over `.env`.
+
+## App builds
+
+Android: `scripts/windows/build-apk.ps1` (version from package.json, so
+1.0.60 is versionCode 1000060). The desktop installer (Tauri) was built from
+`I:\NexussEmu`, which is no longer on the Drive; `releases/updates` keeps the
+last installer (1.0.41) until its source is found.
+
 ## Box art
 
 Art comes from libretro's thumbnail index: exact name first, then the

@@ -7,8 +7,9 @@ android {
         applicationId "com.savestate.nexus"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        // From package.json via scripts/windows/build-apk.ps1, so each build can update the last.
+        versionCode((project.findProperty('nxVersionCode') ?: '1') as Integer)
+        versionName(project.findProperty('nxVersionName') ?: '1.0')
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

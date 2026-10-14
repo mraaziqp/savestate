@@ -34,7 +34,11 @@ if ($LASTEXITCODE -ne 0) { throw 'cap sync failed' }
 
 Write-Host '==> Building the release APK'
 Push-Location (Join-Path $root 'android')
-& .\gradlew.bat --no-daemon assembleRelease
+# 1.0.60 -> versionCode 10060: Android installs an update only over a lower code.
+$ver = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
+$parts = $ver.Split('.') | ForEach-Object { [int]$_ }
+$verCode = $parts[0] * 1000000 + $parts[1] * 10000 + $parts[2]
+& .\gradlew.bat --no-daemon assembleRelease "-PnxVersionCode=$verCode" "-PnxVersionName=$ver"
 $code = $LASTEXITCODE
 Pop-Location
 if ($code -ne 0) { throw 'gradle build failed' }
