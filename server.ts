@@ -29,6 +29,7 @@ import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
+import { createDownloader } from "./server/downloader.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -5676,6 +5677,14 @@ async function startServer() {
     log: (level, msg) => log(level, msg, "household"),
   });
   household.register(app);
+
+  // Sonarr / Radarr / Prowlarr / qBittorrent: find, connect, and say why downloads stall (server/downloader.ts).
+  createDownloader({
+    callerOf: (req) => access.callerOf(req),
+    loadArr: () => loadArrConfig(), saveArr: (cfg) => saveArrConfig(cfg),
+    loadQbt: () => loadQbtConfig(), qbtLogin: (cfg) => qbtLogin(cfg),
+    log: (level, msg) => log(level, msg, "downloads"),
+  }).register(app);
 
   // Steps aside while a game runs on this PC (server/game-mode.ts).
   const gameMode = createGameMode({

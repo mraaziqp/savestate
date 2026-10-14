@@ -333,6 +333,16 @@ also ones that crawl (under 90% after 6 h with an ETA over 3 days or below
 20 kB/s), and Sonarr/Radarr search for another release. Search results
 are cached for 10 minutes.
 
+Downloads > Downloader setup (admins, `server/downloader.ts`) asks each app
+how it is doing and says what to fix in plain words: sites failing in
+Prowlarr, no download client, no indexers, a full or missing library folder,
+a firewalled qBittorrent, stuck queue items. "Find on this PC" reads Sonarr
+and Radarr's address and API key from `C:\ProgramData\<App>\config.xml`.
+"Add more sites" adds recommended public sites to Prowlarr (Knaben, The
+Pirate Bay, LimeTorrents, Uindex, kickasstorrents.to...); Prowlarr tests each
+one first, and they are sent on to Sonarr and Radarr. There is a beginner's
+guide with the official download links.
+
 ## Box art
 
 Art comes from libretro's thumbnail index: exact name first, then the

@@ -125,6 +125,7 @@ const before = shell;
     `NxDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DrivesPage}))),` +
     `NxMyDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MyDrives}))),` +
     `NxHousehold=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Household}))),` +
+    `NxDownloader=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DownloaderSetup}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -190,6 +191,10 @@ shell = patch(shell, "profile menu filter", `C=(0,s.useCallback)(m=>{if(window._
 }
 shell = patch(shell, "profile bottom bar", `As.filter(m=>!window.__nxAllow||window.__nxAllow.has(m.id)).map(m=>{const c=t===m.id;`,
   `As.map(m=>{const c=t===m.id;`, `As.filter(m=>!window.__nxAllow||window.__nxAllow.has(m.id)).map(m=>{const c=t===m.id;`);
+
+// Downloads: the downloader setup and health card, for admins, above the downloads.
+shell = patch(shell, "downloader setup", `x==="torrent"&&(0,e.jsxs)(e.Fragment,{children:[Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxDownloader,{})}),(0,e.jsx)(vl,{})]})`,
+  `x==="torrent"&&(0,e.jsx)(vl,{})`, `x==="torrent"&&(0,e.jsxs)(e.Fragment,{children:[Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxDownloader,{})}),(0,e.jsx)(vl,{})]})`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,

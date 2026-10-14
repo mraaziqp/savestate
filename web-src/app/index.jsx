@@ -13,3 +13,4 @@ export { SetupGuide as EmulationTab } from "./SetupGuide.jsx";
 export { DrivesPage } from "./Drives.jsx";
 export { MyDrives } from "./MyDrives.jsx";
 export { Household, ProfileLayer } from "./Household.jsx";
+export { DownloaderSetup } from "./Downloader.jsx";

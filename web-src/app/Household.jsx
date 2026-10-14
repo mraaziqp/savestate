@@ -308,7 +308,7 @@ function ParentPin({ on, onDone }) {
   return (
     <div className="nxa-card">
       <div className="nxa-card-head">
-        <div><h3><Icon name="shield" /> Parent PIN {on ? <span className="nxa-pill ok">On</span> : <span className="nxa-pill warn">Not set</span>}</h3>
+        <div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="shield" /> Parent PIN {on ? <span className="nxa-pill ok">On</span> : <span className="nxa-pill warn">Not set</span>}</h3>
           <p className="nxa-sub">{on ? "Needed to leave a profile, and to choose your own account on \"Who's watching?\"." : "Without it, anyone using a profile on this device can switch back to your full account. Set one if children use SaveState."}</p></div>
         <div className="nxa-row">
           <button className="nxa-btn sm" onClick={() => setOpen((v) => !v)}>{on ? "Change" : "Set a PIN"}</button>
@@ -416,7 +416,7 @@ export function Household() {
     <div className="nxa nxa-page">
       <div className="nxa-card">
         <div className="nxa-card-head">
-          <div><h3><Icon name="users" /> Household profiles</h3>
+          <div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="users" /> Household profiles</h3>
             <p className="nxa-sub">One account for the whole home. Each profile has its own watch history, and you choose what it can open, the highest age rating, how long it can be used each day and whether it needs a PIN. Share a profile with a link to put it on another device without your password.</p></div>
           {cfg && !editing && <button className="nxa-btn primary" disabled={full} onClick={() => setEditing({})} title={full ? `Your plan includes ${max} profile${max === 1 ? "" : "s"}` : ""}><Icon name="plus" /> Add profile</button>}
         </div>
