@@ -6094,9 +6094,11 @@ async function startServer() {
     });
 
     // Auth
+    // Without a PIN the PIN sign-in is refused (503), so everyone signs in with
+    // an account; that is a safe state, not an open door.
     await check('Auth: PIN', true, async () => {
       const pin = process.env.ACCESS_PIN?.trim();
-      return { ok: !!pin, msg: pin ? 'PIN configured' : 'ACCESS_PIN not set — all clients can connect without PIN' };
+      return { ok: true, msg: pin ? 'Host PIN sign-in is on' : 'Host PIN sign-in is off; everyone signs in with an account' };
     });
 
     // ── Checks below answer "what is actually serving right now" ──────────
@@ -6136,7 +6138,14 @@ async function startServer() {
       let result: { ok: boolean; msg: string; warn?: boolean };
 
       if (!usingSa && !usingOauth) {
-        result = { ok: false, warn: true, msg: 'No Drive credentials — Drive-hosted media unavailable' };
+        // The library reaches Drive through Drive for Desktop (a folder on this
+        // PC) and the Cloud Drives accounts (rclone); the old API credentials
+        // are only for the legacy Drive streaming route.
+        const root = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
+        const reachable = await fsAccess(root).then(() => true).catch(() => false);
+        result = reachable
+          ? { ok: true, msg: `Library folder reachable (${root})` }
+          : { ok: false, warn: true, msg: `Library folder not reachable (${root}); is Google Drive for Desktop running?` };
       } else {
         const client = await getGoogleDriveClient();
         if (!client) {

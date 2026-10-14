@@ -181,7 +181,7 @@ shell = patch(shell, "profiles tab", `x==="household"&&(0,e.jsx)(s.Suspense,{fal
   `x==="plans"&&(0,e.jsx)(dl,{onNavigate:S}),`, `x==="household"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHousehold,{})}),x==="plans"&&(0,e.jsx)(dl,{onNavigate:S}),`);
 shell = patch(shell, "profiles menu item", `{id:"household",icon:us,label:"Profiles"`,
   `{id:"plans",icon:xs,label:"Plans & Pricing"`, `{id:"household",icon:us,label:"Profiles",color:"#f472b6",glow:"rgba(244,114,182,0.25)"},{id:"plans",icon:xs,label:"Plans & Pricing"`);
-shell = patch(shell, "profiles title", `ql={household:"Profiles",cloud:"Cloud Drives",`, `ql={cloud:"Cloud Drives",`, `ql={household:"Profiles",cloud:"Cloud Drives",`);
+shell = patch(shell, "profiles title", `household:"Profiles",cloud:"Cloud Drives",`, `ql={cloud:"Cloud Drives",`, `ql={household:"Profiles",cloud:"Cloud Drives",`);
 shell = patch(shell, "profile menu filter", `C=(0,s.useCallback)(m=>{if(window.__nxAllow&&!window.__nxAllow.has(m))return!1;if(Mr.has(m))return y;`,
   `C=(0,s.useCallback)(m=>{if(Mr.has(m))return y;`, `C=(0,s.useCallback)(m=>{if(window.__nxAllow&&!window.__nxAllow.has(m))return!1;if(Mr.has(m))return y;`);
 {
@@ -195,6 +195,14 @@ shell = patch(shell, "profile bottom bar", `As.filter(m=>!window.__nxAllow||wind
 // Downloads: the downloader setup and health card, for admins, above the downloads.
 shell = patch(shell, "downloader setup", `x==="torrent"&&(0,e.jsxs)(e.Fragment,{children:[Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxDownloader,{})}),(0,e.jsx)(vl,{})]})`,
   `x==="torrent"&&(0,e.jsx)(vl,{})`, `x==="torrent"&&(0,e.jsxs)(e.Fragment,{children:[Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxDownloader,{})}),(0,e.jsx)(vl,{})]})`);
+
+// Page titles: tabs missing from the title map showed their raw id
+// ("Ai", "Phonebackup", "Become-host").
+shell = patch(shell, "page titles", `ql={ai:"SaveState AI",`,
+  `ql={household:"Profiles",`,
+  `ql={ai:"SaveState AI",phonebackup:"Phone Backup",remoteplay:"Remote Play","become-host":"Become a Host",party:"Watch Party",gallery:"Photos",photos:"Photo Booklet",matchmaker:"What to Watch",library:"Games",multiplayer:"Multiplayer",emulation:"Emulation Setup",storage:"Storage",activity:"Activity",settings:"Settings",controller:"Controller",logs:"Logs",profile:"Profile",plans:"Plans & Pricing",music:"Music",household:"Profiles",`);
+shell = patch(shell, "page title names", `media:"Movies & TV",`, `media:"Movies",`, `media:"Movies & TV",`);
+shell = patch(shell, "ebooks title", `codex:"eBooks",`, `codex:"Codex",`, `codex:"eBooks",`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,

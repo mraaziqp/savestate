@@ -77,14 +77,9 @@
       #root { visibility: hidden; }
       #root.mounted { visibility: visible; }
 
-      /* TV overscan: only screens without a mouse (TVs, remotes). It used to apply to every display over 1200px wide, so desktop browsers got a black frame round the app. */
-      @media screen and (min-width: 900px) and (hover: none) {
-        :root {
-          --tv-pad-top: 14px;
-          --tv-pad-bottom: 20px;
-          --tv-pad-side: 24px;
-        }
-      }
+      /* TV overscan padding is set only for real TVs, by the user-agent check
+         at the end of <body>. A media query ("wide, no mouse") also caught
+         tablets in landscape and touch-screen laptops, which got a black frame. */
       :focus-visible {
         outline: 3px solid #00f0ff !important;
         outline-offset: 4px !important;
@@ -100,14 +95,14 @@
         border-radius: 4px;
       }
     </style>
-    <script type="module" crossorigin src="/assets/NexusBoot-r40.js"></script>
-    <script type="module" crossorigin src="/assets/index-CKnFRVZB-r40.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-CfSZB2vO-r40.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-icons-Btsoypng-r40.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-react-C_B4NnYc-r40.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-motion-Cv7i68yK-r40.js">
-    <link rel="modulepreload" crossorigin href="/assets/proxy-BC7yw7QF-r40.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-1ZNanW1_-r40.css">
+    <script type="module" crossorigin src="/assets/NexusBoot-r41.js"></script>
+    <script type="module" crossorigin src="/assets/index-CKnFRVZB-r41.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-CfSZB2vO-r41.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-icons-Btsoypng-r41.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-react-C_B4NnYc-r41.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-motion-Cv7i68yK-r41.js">
+    <link rel="modulepreload" crossorigin href="/assets/proxy-BC7yw7QF-r41.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-1ZNanW1_-r41.css">
   <link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
   <body>
     <div id="root"></div>

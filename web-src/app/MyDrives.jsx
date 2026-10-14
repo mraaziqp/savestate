@@ -78,7 +78,7 @@ export function MyDrives() {
         {accounts?.length === 0 && cfg?.google && (
           <ol className="nxa-steps" style={{ marginTop: 14, paddingLeft: 0, listStyle: "none" }}>
             <li className="nxa-step"><div><b>Press "Connect Google Drive"</b><p>You go to Google's own sign-in page; SaveState never sees your password.</p></div></li>
-            <li className="nxa-step"><div><b>Choose your account and allow access</b><p>If Google says the app isn't verified yet, choose Advanced, then Continue.</p></div></li>
+            <li className="nxa-step"><div><b>Choose your account and allow access</b><p>Pick the Google account whose Drive you want. If Google says "Google hasn't verified this app", choose <b>Advanced</b> &gt; <b>Go to SaveState</b>, tick the Drive permission and press <b>Continue</b>.</p></div></li>
             <li className="nxa-step"><div><b>You're back here with your drive open</b><p>Disconnect any time; nothing on the drive is touched.</p></div></li>
           </ol>
         )}

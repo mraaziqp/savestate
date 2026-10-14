@@ -282,17 +282,27 @@ function ConnectCard({ onChanged }) {
           <ol className="nxa-steps" style={{ marginTop: 12, paddingLeft: 0, listStyle: "none" }}>
             <li className="nxa-step"><div><b>Create a project</b><p>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener noreferrer">Google Cloud: new project <Icon name="ext" size={11} /></a>, name it "SaveState" and create it.</p></div></li>
             <li className="nxa-step"><div><b>Turn on the Drive API</b><p><a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer">Google Drive API <Icon name="ext" size={11} /></a> &gt; Enable.</p></div></li>
-            <li className="nxa-step"><div><b>Consent screen</b><p><a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener noreferrer">Google Auth Platform <Icon name="ext" size={11} /></a>: app name SaveState, audience <b>External</b>, your email as contact. Under Data access add the scope <span className="nxa-code">.../auth/drive</span>. Then <b>Publish app</b> (in "Testing" mode Google signs everyone out after 7 days).</p></div></li>
-            <li className="nxa-step"><div><b>Create the client</b><p>Clients &gt; Create client &gt; <b>Web application</b>. Under Authorised redirect URIs add exactly:
-              <span className="nxa-row" style={{ marginTop: 6 }}><span className="nxa-code">{info.redirectUri}</span><button type="button" className="nxa-btn sm" onClick={() => navigator.clipboard?.writeText(info.redirectUri)}><Icon name="copy" size={12} /> Copy</button></span></p></div></li>
-            <li className="nxa-step"><div><b>Paste the ID and secret here</b>
+            <li className="nxa-step"><div><b>Name the app</b><p><a href="https://console.cloud.google.com/auth/branding" target="_blank" rel="noopener noreferrer">Branding <Icon name="ext" size={11} /></a> (pick the SaveState project at the top if Google asks): App name <b>SaveState</b>, your email as support and developer contact, Save. If it shows "Get started" instead, follow it with the same answers and choose <b>External</b>.</p></div></li>
+            <li className="nxa-step"><div><b>Allow Drive access</b><p><a href="https://console.cloud.google.com/auth/scopes" target="_blank" rel="noopener noreferrer">Data access <Icon name="ext" size={11} /></a> &gt; Add or remove scopes &gt; tick <span className="nxa-code">.../auth/drive</span> (search "drive") &gt; Update &gt; Save.</p></div></li>
+            <li className="nxa-step"><div><b>Publish it</b><p><a href="https://console.cloud.google.com/auth/audience" target="_blank" rel="noopener noreferrer">Audience <Icon name="ext" size={11} /></a> &gt; <b>Publish app</b> &gt; Confirm. (Left in "Testing", Google signs every account out after 7 days.)</p></div></li>
+            <li className="nxa-step"><div><b>Create the client</b><p><a href="https://console.cloud.google.com/auth/clients/create" target="_blank" rel="noopener noreferrer">Create client <Icon name="ext" size={11} /></a> &gt; Application type <b>Web application</b>, name SaveState. Under <b>Authorised redirect URIs</b> &gt; Add URI, paste exactly:
+              <span className="nxa-row nxa-wrap" style={{ marginTop: 6 }}><span className="nxa-code" style={{ wordBreak: "break-all" }}>{info.redirectUri}</span><button type="button" className="nxa-btn sm" onClick={() => navigator.clipboard?.writeText(info.redirectUri)}><Icon name="copy" size={12} /> Copy</button></span>
+              Then Create. Google shows the Client ID and secret (and offers "Download JSON").</p></div></li>
+            <li className="nxa-step"><div><b>Paste the ID and secret here</b><p className="nxa-faint" style={{ fontSize: 12, margin: "2px 0 0" }}>Or paste the whole downloaded JSON into the first box; both are read from it.</p>
               <form onSubmit={saveApp} className="nxa-form" style={{ marginTop: 8 }}>
-                <div className="nxa-field"><label>Client ID</label><input className="nxa-input sm" value={app.clientId} onChange={(e) => setApp({ ...app, clientId: e.target.value })} placeholder="1234-abc.apps.googleusercontent.com" /></div>
+                <div className="nxa-field"><label>Client ID</label><input className="nxa-input sm" value={app.clientId} placeholder="1234-abc.apps.googleusercontent.com"
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    // The "Download JSON" file: {"web":{"client_id":...,"client_secret":...}}
+                    try { const j = JSON.parse(v); const w = j.web ?? j.installed ?? j; if (w.client_id) return setApp({ clientId: w.client_id, clientSecret: w.client_secret ?? app.clientSecret }); } catch { /* not JSON */ }
+                    setApp({ ...app, clientId: v.trim() });
+                  }} /></div>
                 <div className="nxa-field"><label>Client secret</label><input className="nxa-input sm" type="password" value={app.clientSecret} onChange={(e) => setApp({ ...app, clientSecret: e.target.value })} autoComplete="off" /></div>
                 <div className="nxa-row wide"><button className="nxa-btn primary" disabled={busy === "app"}>{busy === "app" ? <Icon name="spinner" /> : <Icon name="check" />} Save Google app</button></div>
               </form></div></li>
+            <li className="nxa-step"><div><b>Connect your Drive</b><p>Press <b>Connect a Google account</b> above and sign in with the Google account whose Drive you want. Google then says "Google hasn't verified this app" (it's your own app, so that's expected): choose <b>Advanced</b> &gt; <b>Go to SaveState (unsafe)</b>, tick the Drive permission and <b>Continue</b>. You come straight back here with the drive connected. Repeat for each account.</p></div></li>
           </ol>
-          <p className="nxa-faint" style={{ fontSize: 12 }}>Google shows an "unverified app" notice to people who connect until Google reviews the app; they choose Advanced &gt; Continue. Up to 100 accounts can connect before a review is needed.</p>
+          <p className="nxa-faint" style={{ fontSize: 12 }}>Members connect their own drives the same way under My Drives, with one button and no setup. Up to 100 accounts can connect before Google asks to review the app.</p>
         </div>
       ) : <button className="nxa-link" style={{ marginTop: 6 }} onClick={() => setSetup(true)}>Change the Google app</button>}
       {shared.length > 0 && info.google && (
@@ -382,7 +392,7 @@ export function DrivesPage() {
           <div key={a.name} className="nxa-card nxa-grow" style={{ minWidth: 240 }}>
             <p className="nxa-label">GOOGLE DRIVE</p>
             <h3 style={{ wordBreak: "break-all" }}>{a.email ?? a.name}</h3>
-            <p className="nxa-sub">{gb(a.free)} free of {gb(a.total)}</p>
+            <p className="nxa-sub">{a.total ? `${gb(a.free)} free of ${gb(a.total)}` : "Checking space…"}</p>
             <SpaceBar used={a.used} total={a.total} />
           </div>
         ))}
