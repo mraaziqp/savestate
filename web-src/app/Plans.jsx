@@ -180,6 +180,65 @@ function MemberPlans({ plans, me, reloadMe, payments }) {
   );
 }
 
+// ── Admin: service keys (server/service-keys.ts) ───────────────────────
+function KeyRow({ k, reload }) {
+  const [value, setValue] = useState("");
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  async function save(v) {
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api(`/api/admin/service-keys/${k.env}`, { method: "PUT", body: { value: v } });
+      setValue(""); setOpen(false);
+      setMsg({ kind: r.check && /fail|refused|isn't|no domain/i.test(r.check) ? "warn" : "ok",
+        text: (r.check ?? (v ? "Saved." : "Removed.")) + (r.restartNeeded ? " It takes effect the next time the host restarts." : "") });
+      reload();
+    } catch (e) { setMsg({ kind: "bad", text: e.message }); } finally { setBusy(false); }
+  }
+  async function test() {
+    setBusy(true); setMsg(null);
+    try { const r = await api(`/api/admin/service-keys/${k.env}/test`, { method: "POST" }); setMsg({ kind: r.ok ? "ok" : "bad", text: r.message }); }
+    catch (e) { setMsg({ kind: "bad", text: e.message }); } finally { setBusy(false); }
+  }
+  return (
+    <div className="nxa-card" style={{ padding: 16 }}>
+      <div className="nxa-card-head" style={{ marginBottom: 0 }}>
+        <div>
+          <h3 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>{k.label}
+            {k.set ? <span className="nxa-pill ok">Set{k.ending ? ` …${k.ending}` : ""}{k.source === "env" ? " (from .env)" : ""}</span> : <span className="nxa-pill warn">Not set</span>}</h3>
+          <p className="nxa-sub" style={{ margin: 0 }}>{k.purpose}</p>
+        </div>
+        <div className="nxa-row nxa-wrap">
+          <button className="nxa-btn sm" onClick={() => setOpen((v) => !v)}><Icon name="key" /> {k.set ? "Replace" : "Add key"}</button>
+          {k.set && k.testable && <button className="nxa-btn sm" disabled={busy} onClick={test}>{busy ? <Icon name="spinner" /> : <Icon name="check" />} Test</button>}
+          {k.source === "app" && <button className="nxa-btn sm" disabled={busy} onClick={() => window.confirm(`Remove the saved ${k.label} key?`) && save("")}>Remove</button>}
+          <a className="nxa-btn sm" href={k.getUrl} target="_blank" rel="noreferrer"><Icon name="ext" /> Get one</a>
+        </div>
+      </div>
+      {open && (
+        <form className="nxa-row nxa-wrap" style={{ marginTop: 10 }} onSubmit={(e) => { e.preventDefault(); if (value.trim()) save(value.trim()); }}>
+          <input className="nxa-input sm nxa-grow" type="password" autoComplete="off" spellCheck={false} value={value} onChange={(e) => setValue(e.target.value)} placeholder="Paste the key" aria-label={`${k.label} key`} autoFocus style={{ minWidth: 220 }} />
+          <button type="submit" className="nxa-btn sm primary" disabled={busy || !value.trim()}>{busy ? <Icon name="spinner" /> : <Icon name="check" />} Save{k.testable ? " & test" : ""}</button>
+          <p className="nxa-faint" style={{ width: "100%", margin: "4px 0 0", fontSize: 12 }}>Where to find it: {k.where}</p>
+        </form>
+      )}
+      {msg && <div style={{ marginTop: 10 }}><Note kind={msg.kind}>{msg.text}</Note></div>}
+    </div>
+  );
+}
+
+function KeysAdmin() {
+  const keys = useLoad(() => api("/api/admin/service-keys"), []);
+  if (!keys.data) return keys.error ? <Note kind="bad">{keys.error}</Note> : <p className="nxa-dim"><Icon name="spinner" /> Loading…</p>;
+  return (
+    <>
+      <Note>Keys for outside services, stored encrypted on the host. A key saved here is used instead of the same one in .env.</Note>
+      {keys.data.keys.map((k) => <KeyRow key={k.env} k={k} reload={keys.reload} />)}
+    </>
+  );
+}
+
 // ── Admin: tiers ────────────────────────────────────────────────────────
 const BLANK = { name: "", tagline: "", priceCents: 0, currency: "ZAR", period: "month", color: "#22d3ee", badge: "", isPublic: true, checkoutUrl: "", perks: [] };
 
@@ -612,7 +671,7 @@ export function PlansPage() {
   if ((plans.loading && !plans.data) || (me.loading && !me.data)) return <div className="nxa nxa-page"><p className="nxa-dim"><Icon name="spinner" /> Loading plans…</p></div>;
   if (!plans.data) return <div className="nxa nxa-page"><Note kind="bad">{plans.error ?? "Could not load the plans."} <button className="nxa-link" onClick={plans.reload}>Try again</button></Note></div>;
 
-  const tabs = [["plans", "Plans", "star"], ["tiers", "Tiers", "edit"], ["features", "Paid features", "lock"], ["members", "Members", "users"], ["requests", "Payments & requests", "mail"], ["host", "Host PC", "chip"]];
+  const tabs = [["plans", "Plans", "star"], ["tiers", "Tiers", "edit"], ["features", "Paid features", "lock"], ["members", "Members", "users"], ["requests", "Payments & requests", "mail"], ["keys", "Service keys", "key"], ["host", "Host PC", "chip"]];
   return (
     <div className="nxa nxa-page">
       {isAdmin && (
@@ -635,6 +694,7 @@ export function PlansPage() {
         : view === "features" ? <FeaturesAdmin data={admin.data} reload={reloadAll} />
         : view === "members" ? <MembersAdmin data={admin.data} reload={admin.reload} />
         : view === "requests" ? <RequestsAdmin data={admin.data} resets={resets.data ?? []} reload={admin.reload} reloadResets={resets.reload} />
+        : view === "keys" ? <KeysAdmin />
         : <HostAdmin />}
     </div>
   );

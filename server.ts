@@ -30,6 +30,7 @@ import { createDrives } from "./server/drives.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createDownloader } from "./server/downloader.ts";
+import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -378,7 +379,8 @@ const FFMPEG_BIN = process.platform === "win32" ? "ffmpeg" : (existsSync("/usr/b
 const FFPROBE_BIN = process.platform === "win32" ? "ffprobe" : (existsSync("/usr/bin/ffprobe") ? "/usr/bin/ffprobe" : "ffprobe");
 
 // ─── Gemini AI ──────────────────────────────────────────────────────────────
-const ai = process.env.GEMINI_API_KEY
+// Re-created when an admin saves a key under Plans > Service keys.
+let ai: GoogleGenAI | null = process.env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
   : null;
 
@@ -422,6 +424,8 @@ const PERSIST_FILE = path.join(PERSIST_DIR, "host-state.json");
 const FILES_ROOT = (process.env.NEXUS_FILES_ROOT?.trim() && isPathValidForThisPlatform(process.env.NEXUS_FILES_ROOT))
   ? process.env.NEXUS_FILES_ROOT.trim()
   : path.join(PERSIST_DIR, "files");
+// Keys saved in the app (server/service-keys.ts) win over .env.
+if (applyServiceKeysSync(PERSIST_DIR, decryptSecret).includes("GEMINI_API_KEY")) ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
 const LEGACY_PERSIST_DIR = path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "NexusEmuHost");
 
 const BOOTSTRAP_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -2030,7 +2034,7 @@ function extractLikelyTitleFromPath(relPathOrName: string, allowStemFallback = t
   return null;
 }
 
-const TMDB_KEY_MEDIA = "2dca580c2a14b55200e784d157207b4d";
+const TMDB_KEY_MEDIA = process.env.TMDB_API_KEY?.trim() || "2dca580c2a14b55200e784d157207b4d";
 
 function tmdbImgMedia(p: string | null | undefined, size = "w500"): string | null {
   return p ? `https://image.tmdb.org/t/p/${size}${p}` : null;
@@ -5758,6 +5762,14 @@ async function startServer() {
     rc: drives.rc, emailOf: drives.emailOf, callerOf: (req) => access.callerOf(req),
     encrypt: encryptSecret, decrypt: decryptSecret,
     log: (level, msg) => log(level, msg, "drives"),
+  }).register(app);
+
+  // API keys for outside services, entered in the app (server/service-keys.ts).
+  createServiceKeys({
+    persistDir: PERSIST_DIR, encrypt: encryptSecret, decrypt: decryptSecret,
+    callerOf: (req) => access.callerOf(req),
+    onChange: (env) => { if (env === "GEMINI_API_KEY") ai = process.env.GEMINI_API_KEY ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY }) : null; },
+    log: (level, msg) => log(level, msg, "security"),
   }).register(app);
 
   // Card / EFT payments for tiers (server/payfast.ts).
@@ -15236,10 +15248,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   const publicUser = (u: any) => ({
     id: u.id, username: u.username, display_name: u.display_name, role: u.role, email: u.email ?? null, created_at: u.created_at,
   });
-  const RESET_RESEND_KEY = process.env.RESEND_API_KEY ?? "";
+  const resendKey = () => process.env.RESEND_API_KEY ?? "";
 
   app.get("/api/auth/config", (_req, res) => {
-    res.json({ emailReset: !!RESET_RESEND_KEY, minPassword: MIN_PASSWORD, signUpOpen: process.env.NEXUS_SIGNUP !== "closed" });
+    res.json({ emailReset: !!resendKey(), minPassword: MIN_PASSWORD, signUpOpen: process.env.NEXUS_SIGNUP !== "closed" });
   });
 
   const lookupLimiter = rateLimit({
@@ -15341,8 +15353,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // Deliberately uniform response — see note above.
     const generic = {
       ok: true,
-      emailEnabled: !!RESET_RESEND_KEY,
-      message: RESET_RESEND_KEY
+      emailEnabled: !!resendKey(),
+      message: resendKey()
         ? "If that account exists, a reset link is on its way. No email on file? The host has been asked to send you one."
         : "If that account exists, the host has been asked to send you a reset link.",
     };
@@ -15356,12 +15368,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (!u?.id) return res.json(generic);
 
       let emailed = false;
-      if (RESET_RESEND_KEY && u.email) {
+      if (resendKey() && u.email) {
         const token = await createResetToken(u.id);
         const link = `${RESET_BASE_URL}/?reset=${token}`;
         const sent = await fetch("https://api.resend.com/emails", {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${RESET_RESEND_KEY}` },
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${resendKey()}` },
           body: JSON.stringify({
             from: RESET_RESEND_FROM,
             to: u.email,
@@ -16647,7 +16659,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       try {
         const r = await fetch("https://api.resend.com/emails", {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${RESET_RESEND_KEY}` },
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendKey()}` },
           body: JSON.stringify({
             from: RESET_RESEND_FROM,
             to: [notif.to_email],
