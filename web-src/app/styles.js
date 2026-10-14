@@ -173,6 +173,8 @@ select.nxa-input option{background:#15172a;color:#f4f5fb}
 .nxa-files{display:grid;gap:8px}
 .nxa-file{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:11px;border:1px solid var(--line);background:rgba(0,0,0,.2);font-size:13px}
 .nxa-file small{display:block;color:var(--faint);font-size:11.5px;margin-top:2px;word-break:break-all}
+.nxa-progress{height:8px;border-radius:8px;background:rgba(255,255,255,.08);overflow:hidden}
+.nxa-progress i{display:block;height:100%;border-radius:8px;background:linear-gradient(90deg,#22d3ee,#4d7cff);transition:width .4s}
 .nxa-who{position:fixed;inset:0;z-index:5000;display:grid;place-items:center;padding:24px 16px;background:radial-gradient(ellipse at top,#1b1f3b,#07080f 70%);overflow:auto}
 .nxa-who-in{display:grid;justify-items:center;gap:28px;max-width:900px;width:100%}
 .nxa-who-in h1{margin:0;font-size:clamp(26px,5vw,44px);font-weight:900;letter-spacing:-.02em}

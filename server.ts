@@ -31,6 +31,7 @@ import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
+import { createUploadBatches } from "./server/upload-batches.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -20350,6 +20351,38 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   const UPLOAD_TEMP_DIR = path.join(PERSIST_DIR, "tmp", "uploads");
 
+  // Folder uploads planned as a whole and remembered (server/upload-batches.ts).
+  const uploadBatches = createUploadBatches({
+    persistDir: PERSIST_DIR, tempDir: UPLOAD_TEMP_DIR,
+    classify: (rel, size) => {
+      const name = path.posix.basename(rel);
+      const ext = path.extname(name).toLowerCase();
+      const kind = VIDEO_EXT.has(ext) ? "video" as const : SUBTITLE_EXT.has(ext) ? "subtitle" as const : IMAGE_EXT.has(ext) ? "image" as const : "other" as const;
+      const safeName = name.replace(/[\/:*?"<>|]/g, "_");
+      const meta = detectSeriesMeta(path.basename(safeName, ext), rel);
+      const title = meta.isSeries ? normalizeSeriesTitle(meta.title) : "";
+      return {
+        kind, junk: kind !== "other" && isReleaseJunk(name, size),
+        isSeries: kind === "video" && meta.isSeries,
+        title: title && !/^(?:movies?|tv\s*shows?|series|season|unknown\s*series)$/i.test(title) ? title : null,
+        season: meta.season, episode: meta.episode,
+        target: kind === "other" ? "" : canonicalMediaRelativeTarget(rel, safeName, ext),
+      };
+    },
+    normTitle: (t) => normalizeSeriesTitle(t), seriesKey: (t) => seriesKey(t),
+    safeSegment: (t) => sanitizeMediaPathSegment(t), seasonFolder: (n) => formatSeasonFolder(n),
+    uploader: async (req) => { const c = await access.callerOf(req); return c.userId && c.upload && !c.profile ? c.userId : null; },
+    log: (level, msg) => log(level, msg, "upload"),
+  });
+  uploadBatches.register(app);
+  /** A batch target from the plan: relative, inside the library's own folders. */
+  const safeBatchTarget = (t: string | null | undefined): string | null => {
+    if (!t) return null;
+    const parts = t.replace(/\\/g, "/").split("/").filter(Boolean);
+    if (parts.length < 2 || parts.some((p) => p === ".." || p === ".") || !/^(TV Shows|Movies|Assets)$/.test(parts[0])) return null;
+    return parts.map((p) => p.replace(/[\/:*?"<>|]/g, "_").trim()).join("/");
+  };
+
   /**
    * Where an uploaded video should go. The media root is normally the rclone
    * mount of Google Drive, which is mounted read-only on purpose, so every
@@ -20425,6 +20458,15 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // library being re-sent by a batch that lost track of what it had done.
     // A client that sends ?sha256= gets both handled before a single byte of
     // payload moves.
+    // A resumed session belongs to the folder upload asking now, which may be
+    // a fresh plan of the same folder: point it there, or that plan never
+    // learns the file arrived.
+    const rebatch = async (dir: string, m: any) => {
+      if (!req.query.batch) return;
+      m.batch = String(req.query.batch); m.index = Number(req.query.index);
+      m.target = await uploadBatches.targetFor(m.batch, m.index, authUser.userId);
+      await writeFile(path.join(UPLOAD_TEMP_DIR, dir, "meta.json"), JSON.stringify(m, null, 2)).catch(() => {});
+    };
     const sha256 = String(req.query.sha256 ?? "").trim().toLowerCase();
     if (sha256 && !/^[a-f0-9]{64}$/.test(sha256)) {
       return res.status(400).json({ error: "sha256 must be 64 hex characters" });
@@ -20461,6 +20503,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           }
           received.sort((a, b) => a - b);
           log("INFO", `Resuming upload by content hash: ${received.length}/${m.totalChunks} chunks held`, "upload");
+          await rebatch(dir, m);
           return res.json({ ok: true, uploadId: dir, resumed: true, matchedBy: "sha256", receivedChunks: received });
         }
       } catch { /* fall through to the path-based match below */ }
@@ -20490,6 +20533,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         }
         received.sort((a, b) => a - b);
         log("INFO", `Resuming upload ${relRaw || filenameRaw}: ${received.length}/${totalChunks} chunks already held`, "upload");
+        await rebatch(dir, m);
         return res.json({ ok: true, uploadId: dir, resumed: true, receivedChunks: received });
       }
     } catch { /* no resumable session — fall through and start fresh */ }
@@ -20514,6 +20558,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         // Recorded so a later attempt can match this session by content even
         // if the file is renamed or moved between tries.
         sha256: sha256 || null,
+        // Part of a planned folder upload: where the plan puts it.
+        ...(req.query.batch ? {
+          batch: String(req.query.batch), index: Number(req.query.index),
+          target: await uploadBatches.targetFor(String(req.query.batch), Number(req.query.index), authUser.userId),
+        } : {}),
       };
       await writeFile(path.join(tempUploadDir, "meta.json"), JSON.stringify(meta, null, 2));
       return res.json({ ok: true, uploadId });
@@ -20588,7 +20637,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!uploadId) return res.status(400).json({ error: "uploadId required" });
 
     const tempUploadDir = path.join(UPLOAD_TEMP_DIR, uploadId);
-    let meta: { filename: string; rel: string; root: string; totalChunks: number; totalSize?: number; userId: string };
+    let meta: { filename: string; rel: string; root: string; totalChunks: number; totalSize?: number; userId: string; batch?: string; index?: number; target?: string | null };
     try {
       meta = JSON.parse(await readFile(path.join(tempUploadDir, "meta.json"), "utf8"));
     } catch {
@@ -20629,7 +20678,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         relativeTarget = parts.join("/");
       }
     }
-    relativeTarget = await reuseExistingShowFolder(root, canonicalMediaRelativeTarget(relativeTarget, safeName, ext));
+    const planned = safeBatchTarget(meta.target);
+    relativeTarget = await reuseExistingShowFolder(root, planned ?? canonicalMediaRelativeTarget(relativeTarget, safeName, ext));
     const target = path.resolve(root, relativeTarget);
     if (!isAllowedMediaPath(target)) {
       return res.status(403).json({ error: "Path outside media root" });
@@ -20711,6 +20761,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // would make the whole library point at the uploads folder.
     if (!fellBack) mediaRoot = root;
     log("INFO", `Media uploaded (chunked): ${relativeTarget} (${bytesWritten} bytes)`, "media");
+    if (meta.batch && Number.isInteger(meta.index)) await uploadBatches.markDone(meta.batch, meta.index!, meta.userId, relativeTarget);
     recordSetupEvent("Media Upload", true, `${relativeTarget} (${bytesWritten} bytes)`, "media");
     await refreshMediaLibrary(fellBack ? true : root);
     await persistHostStateNow(true).catch(() => {});

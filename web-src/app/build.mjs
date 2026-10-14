@@ -262,6 +262,25 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   if (next !== hub) writeFileSync(file, next);
 }
 
+// 3e. Movies & TV > upload: the planned, resumable folder uploader
+//     (MediaUpload.jsx) replaces the three upload tiles, which stay in the
+//     page but hidden so the chunk's own state code is untouched.
+{
+  const file = path.join(assets, find("MediaHub-"));
+  let hub = readFileSync(file, "utf8").replace(anyApp, APP);
+  const before = hub;
+  const grid = `(0,e.jsxs)("div",{className:"grid md:grid-cols-3 gap-3",children:[(0,e.jsxs)("label",{className:\`rounded-2xl border border-white/15 p-5 bg-black/35`;
+  hub = patch(hub, "new uploader", "(0,e.jsx)(nxUp(),{})",
+    grid, `(0,e.jsx)(r.Suspense,{fallback:null,children:(0,e.jsx)(nxUp(),{})}),${grid.replace('className:"grid md:grid-cols-3 gap-3",', 'className:"grid md:grid-cols-3 gap-3",style:{display:"none"},')}`);
+  const hubExport = /export\{(\w+) as MediaHub\};\s*$/.exec(hub)?.[0] ?? "";
+  hub = patch(hub, "uploader loader", "function nxUp(){", hubExport || /export\{\w+ as MediaHub\};\s*$/,
+    `var NxUpC;function nxUp(){return NxUpC||(NxUpC=(0,r.lazy)(()=>import(${APP}).then(t=>({default:t.MediaUploader}))))}${hubExport}`);
+  hub = patch(hub, "uploader hint", "Episodes are grouped by show and season however the folders are laid out.",
+    "For series, upload the entire show folder (for example: Game of Thrones/Season 01/S01E01.mkv). Nexus keeps folder structure and auto-categorizes episodes.",
+    "Upload a show's folder or a whole collection. Episodes are grouped by show and season however the folders are laid out.");
+  if (hub !== before) writeFileSync(file, hub);
+}
+
 // 3b. Movies & TV showed every member the host's own controls (media root
 //     picker, rescan, the metadata scraper), which only admins can use. They
 //     are tagged here and hidden for everyone else by the boot script's CSS.
