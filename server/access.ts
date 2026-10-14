@@ -44,7 +44,19 @@ export type Caller = {
   tier: string | null;
   tierExpiresAt: number | null;
   /** Set when the token is valid but the account is gone or the token predates a password change. */
-  stale?: "deleted" | "password-changed";
+  stale?: "deleted" | "password-changed" | "profile-ended";
+  /** A household profile of the account (household.ts): never an admin, limited to its sections. */
+  profile?: ProfileSession;
+};
+
+export type ProfileSession = {
+  id: string; ownerId: string; name: string; avatar: string; color: string;
+  /** Tabs of the app this profile may open. */
+  tabs: string[];
+  sections: string[];
+  /** "link": signed in from a shared link, so it can never become the account. */
+  via: "picker" | "link";
+  version: number;
 };
 
 export type Need = "member" | "media" | "games" | "upload" | "admin" | "self";
@@ -60,6 +72,10 @@ export type AccessDeps = {
   /** 402 when a signed-in member's tier does not include the feature behind this path. */
   featureGate?: (caller: Caller, method: string, path: string) => { feature: string; label: string; tiers: string[] } | null;
   log: (level: string, msg: string) => void;
+  /** A household profile by id; null when it is gone, undefined when that cannot be told (DB down). */
+  profileOf?: (id: string) => Promise<ProfileSession | null | undefined>;
+  /** For a profile session: a refusal for this request, or null to carry on. */
+  profileGate?: (caller: Caller, req: express.Request) => Promise<{ status: number; body: Record<string, unknown> } | null>;
 };
 
 const ADMIN_ROLES = new Set(["admin", "superadmin", "ultra_admin"]);
@@ -144,6 +160,11 @@ const RULES: Rule[] = [
 
   // ── The host's films, shows, music, books and photos ───────────────────
   ["*", /^\/api\/media\/(library|recommendations|continue-watching|progress|subtitles\/)/, "media"],
+  // The films themselves. These were on the public list (a <video> cannot send
+  // a header), so until 2026-10-14 anyone with a file's path could stream it
+  // without signing in. The session cookie or ?token= signs them in now.
+  ["*", /^\/api\/media\/(file|stream|hls\/|info|prewarm|thumbnail|intro-markers)/, "media"],
+  ["*", /^\/api\/stream\/(gdrive|media)\//, "media"],
   ["*", "/api/watch/", "media"],
   ["*", "/api/taste", "media"],
   ["*", "/api/arr/", "media"],
@@ -272,13 +293,27 @@ export function createAccess(deps: AccessDeps) {
     const role = row.role ?? "user";
     const admin = ADMIN_ROLES.has(role);
     const media = admin || !!row.media_access;
-    return done({
+    const account: Caller = {
       authed: true, host: false, admin, userId, username: row.username, role,
       media,
       games: admin || (row.games_access == null ? media : !!row.games_access),
       upload: admin || !!row.can_upload_media,
       tier: row.user_tier,
       tierExpiresAt: row.tier_expires_at ? new Date(row.tier_expires_at).getTime() : null,
+    };
+    if (!payload.profileId) return done(account);
+
+    // A household profile: what the account may see, narrowed to the profile's
+    // sections, and never anything an admin can do.
+    const profile = deps.profileOf ? await deps.profileOf(String(payload.profileId)) : null;
+    if (profile === undefined) return done({ ...ANON, stale: "profile-ended" });
+    if (!profile || profile.ownerId !== userId || profile.version !== Number(payload.pv ?? 1)) return done({ ...ANON, stale: "profile-ended" });
+    const via = payload.via === "link" ? "link" : "picker";
+    return done({
+      ...account, admin: false, upload: false, role: "profile",
+      media: account.media && profile.sections.includes("media"),
+      games: account.games && profile.sections.includes("games"),
+      profile: { ...profile, via },
     });
   }
 
@@ -304,9 +339,15 @@ export function createAccess(deps: AccessDeps) {
       // password reset must be able to sign in with the new password.
       if (caller.stale && !(deps.isPublic?.(req.path) && !need)) {
         return res.status(401).json({
-          error: caller.stale === "deleted" ? "This account no longer exists." : "Your password was changed. Please sign in again.",
+          error: caller.stale === "deleted" ? "This account no longer exists."
+            : caller.stale === "profile-ended" ? "This profile was signed out by the account owner."
+            : "Your password was changed. Please sign in again.",
           code: "session_expired",
         });
+      }
+      if (caller.profile && deps.profileGate) {
+        const refusal = await deps.profileGate(caller, req);
+        if (refusal) return res.status(refusal.status).json(refusal.body);
       }
       if (need) {
         if (!caller.authed) {

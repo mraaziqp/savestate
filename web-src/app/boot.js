@@ -40,6 +40,37 @@
     } catch { /* offline: keep the last answer */ }
   }
 
+  // ── Household profiles ──────────────────────────────────────────────────
+  // Inside a profile the menu offers only the tabs it may open (the shell
+  // reads window.__nxAllow; the server refuses the rest regardless).
+  const profileId = () => { try { return JSON.parse(atob(read().split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).profileId ?? null; } catch { return null; } };
+  try {
+    const tabs = JSON.parse(localStorage.getItem("nexus_profile_tabs") || "null");
+    if (profileId() && Array.isArray(tabs)) window.__nxAllow = new Set(tabs);
+    else localStorage.removeItem("nexus_profile_tabs");
+  } catch { /* private mode */ }
+  // A shared profile link (?profile=...) signs this device in as that profile.
+  (async () => {
+    const q = new URLSearchParams(location.search);
+    const link = q.get("profile");
+    if (!link) return;
+    q.delete("profile");
+    const clean = location.pathname + (q.toString() ? "?" + q : "") + location.hash;
+    try {
+      const r = await fetch("/api/household/link", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: link }) });
+      const body = await r.json().catch(() => ({}));
+      if (r.ok && body.token) {
+        localStorage.setItem(KEY, body.token);
+        localStorage.removeItem("nexus_profile_tabs");
+        try { await caches.delete("nexus-api"); } catch { /* no Cache API */ }
+        location.replace(clean);
+        return;
+      }
+      history.replaceState(null, "", clean);
+      alert(body.error || "This profile link isn't valid any more.");
+    } catch { history.replaceState(null, "", clean); }
+  })();
+
   // ── Harmless device refusals ────────────────────────────────────────────
   // Phones and TVs that cannot lock screen rotation or keep the screen awake
   // reject those calls; the player carries on fine without them, but each one
@@ -126,7 +157,7 @@
   const inner = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const res = await inner(input, init);
-    if (res.status !== 402 && res.status !== 401) return res;
+    if (res.status !== 402 && res.status !== 401 && res.status !== 403) return res;
     try {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (!url || !url.includes("/api/")) return res;
@@ -137,6 +168,8 @@
           label: "See plans",
           run: () => window.dispatchEvent(new CustomEvent("nexus:navigate-tab", { detail: { tab: "plans" } })),
         });
+      } else if (res.status === 403 && body?.error === "time_up") {
+        window.dispatchEvent(new CustomEvent("nexus:time-up", { detail: { timeUp: true, message: body.message } }));
       } else if (res.status === 401 && body?.code === "session_expired" && read()) {
         try { localStorage.removeItem(KEY); } catch { /* ignore */ }
         await mirror();

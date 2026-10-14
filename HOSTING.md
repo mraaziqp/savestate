@@ -230,6 +230,22 @@ Password resets are emailed when `RESEND_API_KEY` is set and the account has
 an email; otherwise the request appears under Plans > Requests and an admin
 sends the link. A reset or password change signs every other device out.
 
+The films themselves (`/api/media/file`, `/stream`, `/hls/`, `/info` and
+`/api/stream/gdrive|media/`) need a signed-in account with media access. A
+`<video>` sends the session cookie; the players also add `?token=`.
+
+**Household profiles** (`server/household.ts`, Profiles tab): an account adds
+profiles for the people it shares with. Each has its own watch history and,
+set by the account holder: the sections it may open, the highest age rating
+(certifications from TMDB, cached in `certifications.json`; unrated titles
+are hidden from capped profiles unless allowed), a daily allowance, allowed
+hours, and a PIN. A parent PIN guards leaving a profile. "Share link" puts
+one profile on another device without the password; such a session can only
+sign out, and a new link, "Revoke" or "Sign out everywhere" ends it. A profile
+session is a token with `profileId`: access.ts makes it a non-admin caller and
+`household.gate` refuses anything outside its sections, over its rating or out
+of time. Tiers can cap profiles per account ("Household profiles" on a tier).
+
 `.env` switches: `NEXUS_SIGNUP=closed` stops new sign-ups.
 `NEXUS_MUSIC_ROOTS` adds music folders (default: uploads, `~/Music`,
 `<files root>/Music`, `<media root>/music`, `Music` at the top of D:-H:).
@@ -289,9 +305,40 @@ uplink makes everything slow, so they are capped: `NEXUS_UPLOAD_BWLIMIT`
 1-7), `NEXUS_UPLOAD_BWLIMIT_GAMING` (64k) while game mode is on. One upload
 runs at a time.
 
-rclone warns that its shared Google client ID is being retired during 2026.
-Before that happens, create your own OAuth client (https://rclone.org/drive/#making-your-own-client-id)
-and add `client_id`/`client_secret` to both remotes with `rclone config`.
+Failed uploads retry after 5 min, 15 min, 1 h and 6 h; an upload that moves
+no bytes for 30 min is restarted. "Keep synced" (on by default for ROMs)
+re-copies the folder daily, so new ROMs reach Drive without anyone asking.
+A job refuses relative paths, the app and data folders, the home folder,
+Windows and Program Files.
+
+**Connecting drives from the app** (`server/connect.ts`). Google sign-in
+needs an OAuth client once: Cloud Drives → "Connect a drive" walks an admin
+through creating it in Google Cloud and pasting the ID and secret (stored
+encrypted in `cloud-connect.json`, or set `GOOGLE_OAUTH_CLIENT_ID` /
+`GOOGLE_OAUTH_CLIENT_SECRET`). After that, "Connect Google Drive" is a
+button: in Cloud Drives it adds a host drive, in My Drives it adds the
+member's own drive (rclone remote `u_<userId>_<n>`, visible only to them).
+WebDAV drives (Nextcloud, pCloud, Koofr...) connect with a URL and password.
+The redirect URI to register in Google is `https://<domain>/api/drives/oauth/callback`.
+Cloud Drives flags remotes still on rclone's shared client ID (retired
+during 2026); reconnect them once your own client is set up.
+
+## Downloader (Sonarr, Radarr, Prowlarr, qBittorrent)
+
+The server pushes a release policy into the Arr apps on start
+(`ARR_POLICY_VERSION`): every indexer and the Prowlarr app profile require
+`NEXUS_MIN_SEEDERS` (default 5) seeders, so dead releases are never grabbed.
+The stuck-download watchdog removes and blocklists torrents that stall, and
+also ones that crawl (under 90% after 6 h with an ETA over 3 days or below
+20 kB/s), and Sonarr/Radarr search for another release. Search results
+are cached for 10 minutes.
+
+## Box art
+
+Art comes from libretro's thumbnail index: exact name first, then the
+closest title by shared words (disc numbers must agree). Until real art is
+found, `/api/art/<id>` serves a cover drawn from the title and the console's
+colours, so no shelf shows a blank tile. A background job keeps filling.
 
 ## App downloads
 

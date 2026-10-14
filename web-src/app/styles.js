@@ -173,5 +173,25 @@ select.nxa-input option{background:#15172a;color:#f4f5fb}
 .nxa-files{display:grid;gap:8px}
 .nxa-file{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border-radius:11px;border:1px solid var(--line);background:rgba(0,0,0,.2);font-size:13px}
 .nxa-file small{display:block;color:var(--faint);font-size:11.5px;margin-top:2px;word-break:break-all}
+.nxa-who{position:fixed;inset:0;z-index:5000;display:grid;place-items:center;padding:24px 16px;background:radial-gradient(ellipse at top,#1b1f3b,#07080f 70%);overflow:auto}
+.nxa-who-in{display:grid;justify-items:center;gap:28px;max-width:900px;width:100%}
+.nxa-who-in h1{margin:0;font-size:clamp(26px,5vw,44px);font-weight:900;letter-spacing:-.02em}
+.nxa-who-grid{display:flex;flex-wrap:wrap;justify-content:center;gap:22px}
+.nxa-who-tile{display:grid;justify-items:center;gap:10px;background:none;border:0;color:var(--dim);font-weight:700;font-size:15px;cursor:pointer;padding:6px;border-radius:18px}
+.nxa-who-name{display:flex;align-items:center;gap:6px}
+.nxa-who-tile:hover,.nxa-who-tile:focus-visible{color:var(--text)}
+.nxa-who-tile:hover .nxa-who-av,.nxa-who-tile:focus-visible .nxa-who-av{outline:3px solid #fff;outline-offset:3px;transform:scale(1.04)}
+.nxa-who-av{display:inline-grid;place-items:center;border-radius:22%;flex:none;color:#fff;font-weight:900;box-shadow:0 10px 30px rgba(0,0,0,.45);transition:transform .15s}
+.nxa-who-pin{display:grid;justify-items:center;gap:14px;text-align:center;max-width:420px;width:100%}
+.nxa-who-pin h2,.nxa-who-pin h3{margin:0}
+.nxa-who-chip{position:fixed;right:16px;bottom:16px;z-index:4500;display:flex;align-items:center;gap:10px;padding:6px 6px 6px 8px;border-radius:14px;background:rgba(21,23,42,.92);border:1px solid var(--line);box-shadow:0 12px 34px rgba(0,0,0,.5);backdrop-filter:blur(8px);font-size:13px}
+.nxa-who-chip span{display:grid;line-height:1.2}
+.nxa-who-chip small{color:var(--faint);font-size:11px}
+.nxa-who-pick{width:38px;height:38px;border-radius:10px;border:1px solid var(--line);background:rgba(0,0,0,.25);font-size:20px;cursor:pointer}
+.nxa-who-pick.on{border-color:var(--acc);background:rgba(34,211,238,.15)}
+.nxa-who-dot{width:24px;height:24px;border-radius:50%;border:2px solid transparent;cursor:pointer}
+.nxa-who-dot.on{border-color:#fff}
+.nxa-who-card{border-left:4px solid var(--pc,var(--acc))}
+@media (max-width:767px){.nxa-who-chip{bottom:76px;right:10px}}
 @media (max-width:640px){.nxa-kv{grid-template-columns:1fr;gap:2px 0}.nxa-kv dd{margin-bottom:8px}.nxa-card{padding:16px}}
 `;

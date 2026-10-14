@@ -28,6 +28,7 @@ import { createGameMode } from "./server/game-mode.ts";
 import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
 import { createConnect } from "./server/connect.ts";
+import { createHousehold } from "./server/household.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -5498,6 +5499,8 @@ async function startServer() {
     query: dbRows, dbUp: () => !!pool && dbConnected,
     isPublic: (p) => PUBLIC_API_PREFIXES.some((prefix) => p === prefix || p.startsWith(prefix)),
     featureGate: (caller, method, p) => tiers.featureGate(caller, method, p),
+    profileOf: (id) => household.profileOf(id),
+    profileGate: (caller, req) => household.gate(caller, req),
     log: (level, msg) => log(level, msg, "access"),
   });
 
@@ -5524,6 +5527,7 @@ async function startServer() {
     "/api/music/scan-progress",
     "/api/drives/oauth/callback", // Google sends the browser back here; checked by its signed state  // EventSource opens before the session cookie exists; counts only
     "/api/payments/payfast/notify", // PayFast's server calls this; checked by signature and with PayFast itself
+    "/api/household/link",      // a shared profile link signs a device in; checked by the link's token
     "/api/client/bootstrap-pack",
     "/api/client/android/",
     "/api/client-launcher/",
@@ -5651,6 +5655,27 @@ async function startServer() {
   // Roles, library grants and plan gates, for every route (server/access.ts).
   app.use(access.guard);
   tiers.register(app);
+
+  // Household profiles: PINs, age ratings, sections, screen time (server/household.ts).
+  const household = createHousehold({
+    persistDir: PERSIST_DIR, jwtSecret: JWT_SECRET, tmdbKey: TMDB_KEY_MEDIA,
+    query: dbRows, dbUp: () => !!pool && dbConnected,
+    callerOf: (req) => access.callerOf(req),
+    sessionFor: (req, res, u) => sessionFor(req, res, u),
+    setSessionCookie: (req, res, t) => access.setSessionCookie(req, res, t),
+    maxProfiles: (c) => (c.admin ? null : tiers.tierOf(c).maxProfiles ?? null),
+    media: () => mem.media as any,
+    titleOf: (item) => {
+      if (item.category === "series") return item.seriesTitle ? { type: "tv" as const, title: String(item.seriesTitle) } : null;
+      const t = (extractLikelyTitleFromPath(item.relPath) ?? deriveMovieTitle(path.basename(item.name, path.extname(item.name)))).trim();
+      if (!t) return null;
+      const m = /^(.*?)\s*\(?((?:19|20)\d{2})\)?$/.exec(t);
+      return m && m[1] ? { type: "movie" as const, title: m[1].trim(), year: m[2] } : { type: "movie" as const, title: t };
+    },
+    publicUrl: () => (process.env.NEXUS_PUBLIC_URL ?? process.env.PUBLIC_BASE_URL ?? "https://savestate.co.za").trim().replace(/\/$/, ""),
+    log: (level, msg) => log(level, msg, "household"),
+  });
+  household.register(app);
 
   // Steps aside while a game runs on this PC (server/game-mode.ts).
   const gameMode = createGameMode({

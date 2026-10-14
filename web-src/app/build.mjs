@@ -123,12 +123,15 @@ const before = shell;
     `NxGate=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.TabGate}))),` +
     `NxSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.EmulationTab}))),` +
     `NxDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DrivesPage}))),` +
-    `NxMyDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MyDrives})));` +
+    `NxMyDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MyDrives}))),` +
+    `NxHousehold=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Household}))),` +
+    `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsx)(Yl,{})}` +
+    // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
@@ -161,7 +164,7 @@ shell = patch(shell, "cloud is admin-only in the menu", `brain:"manage_system",c
 
 shell = patch(shell, "cloud drives label", `{id:"cloud",icon:Xa,label:"Cloud Drives"`, `{id:"cloud",icon:Xa,label:"Cloud"`, `{id:"cloud",icon:Xa,label:"Cloud Drives"`);
 
-shell = patch(shell, "cloud drives title", `ql={cloud:"Cloud Drives",myfiles:"Files",`, `ql={myfiles:"Files",`, `ql={cloud:"Cloud Drives",myfiles:"Files",`);
+shell = patch(shell, "cloud drives title", `cloud:"Cloud Drives",myfiles:"Files",`,`ql={myfiles:"Files",`, `ql={cloud:"Cloud Drives",myfiles:"Files",`);
 
 // My Drives: every member can connect and manage their own cloud drives, at
 // the top of what was "My Storage".
@@ -171,9 +174,27 @@ shell = patch(shell, "my drives", `x==="files"&&(0,e.jsxs)("div",{className:"spa
 shell = patch(shell, "my drives label", `{id:"files",icon:Bt,label:"My Drives"`, `{id:"files",icon:Bt,label:"My Storage"`, `{id:"files",icon:Bt,label:"My Drives"`);
 shell = patch(shell, "my drives title", `files:"My Drives",`, `files:"My Files",`, `files:"My Drives",`);
 
+// Household profiles: the Profiles tab, and a menu that offers a profile
+// only what it may open (boot.js sets window.__nxAllow).
+shell = patch(shell, "profiles tab", `x==="household"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHousehold,{})}),x==="plans"&&`,
+  `x==="plans"&&(0,e.jsx)(dl,{onNavigate:S}),`, `x==="household"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHousehold,{})}),x==="plans"&&(0,e.jsx)(dl,{onNavigate:S}),`);
+shell = patch(shell, "profiles menu item", `{id:"household",icon:us,label:"Profiles"`,
+  `{id:"plans",icon:xs,label:"Plans & Pricing"`, `{id:"household",icon:us,label:"Profiles",color:"#f472b6",glow:"rgba(244,114,182,0.25)"},{id:"plans",icon:xs,label:"Plans & Pricing"`);
+shell = patch(shell, "profiles title", `ql={household:"Profiles",cloud:"Cloud Drives",`, `ql={cloud:"Cloud Drives",`, `ql={household:"Profiles",cloud:"Cloud Drives",`);
+shell = patch(shell, "profile menu filter", `C=(0,s.useCallback)(m=>{if(window.__nxAllow&&!window.__nxAllow.has(m))return!1;if(Mr.has(m))return y;`,
+  `C=(0,s.useCallback)(m=>{if(Mr.has(m))return y;`, `C=(0,s.useCallback)(m=>{if(window.__nxAllow&&!window.__nxAllow.has(m))return!1;if(Mr.has(m))return y;`);
+{
+  const head = `className:"w-full flex items-center justify-between px-3 py-1.5 text-[9px] font-black uppercase tracking-[0.2em] text-white/35 hover:text-white/60 transition-colors",children:[(0,e.jsx)("span",{children:`;
+  shell = patch(shell, "empty games heading", `style:x.length?void 0:{display:"none"},${head}"Games"`, `${head}"Games"`, `style:x.length?void 0:{display:"none"},${head}"Games"`);
+  shell = patch(shell, "empty tools heading", `style:A.length?void 0:{display:"none"},${head}"System & Tools"`, `${head}"System & Tools"`, `style:A.length?void 0:{display:"none"},${head}"System & Tools"`);
+}
+shell = patch(shell, "profile bottom bar", `As.filter(m=>!window.__nxAllow||window.__nxAllow.has(m.id)).map(m=>{const c=t===m.id;`,
+  `As.map(m=>{const c=t===m.id;`, `As.filter(m=>!window.__nxAllow||window.__nxAllow.has(m.id)).map(m=>{const c=t===m.id;`);
+
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
-shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"]`,
+shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
   `"cloud","phonebackup","matchmaker"]`, `"cloud","phonebackup","matchmaker","music","multiplayer","remoteplay","ai"]`);
+shell = patch(shell, "profiles tab is known", `"remoteplay","ai","household"]`, `"remoteplay","ai"]`, `"remoteplay","ai","household"]`);
 
 // Media first: everyone lands on Movies & TV (client mode used to open Games),
 // and the menu leads with watching, then listening and reading.
@@ -203,7 +224,7 @@ shell = patch(shell, "first-visit update notice", "__nxHadSW",
   if (!mArr) throw new Error('patch "menu order": media menu not found');
   const items = mArr[1].split(/,(?=\{id:")/);
   const idOf = (s) => /^\{id:"([\w-]+)"/.exec(s)?.[1];
-  const order = ["media", "matchmaker", "discover", "music", "codex", "party", "torrent", "gallery", "photos", "myfiles", "files", "cloud", "phonebackup", "hosts", "friends", "plans"];
+  const order = ["media", "matchmaker", "discover", "music", "codex", "party", "torrent", "gallery", "photos", "myfiles", "files", "cloud", "phonebackup", "hosts", "friends", "household", "plans"];
   const rank = (s) => { const i = order.indexOf(idOf(s)); return i < 0 ? order.length : i; };
   const sorted = [...items].sort((a, b) => rank(a) - rank(b));
   if (sorted.length !== items.length) throw new Error('patch "menu order": lost an item');
@@ -222,6 +243,18 @@ if (shell !== before) writeFileSync(path.join(assets, shellFile), shell);
   const next = music.replace(re, (all) => all + tok);
   if (!next.includes("&token=")) throw new Error('patch "music token": stream URL not found');
   if (next !== music) writeFileSync(file, next);
+}
+
+// 3a. Films and covers are signed in the same way: the session cookie covers
+//     the browser, the token in the URL covers clients it does not reach.
+for (const chunk of ["MediaHub-", "WatchParty-"]) {
+  const file = path.join(assets, find(chunk));
+  const hub = readFileSync(file, "utf8");
+  const tok = "${(()=>{try{const k=localStorage.getItem(\"nexus_token\");return k?\"&token=\"+encodeURIComponent(k):\"\"}catch{return\"\"}})()}";
+  const re = /\/api\/media\/(?:file|stream|hls\/playlist\.m3u8)\?rel=\$\{encodeURIComponent\([\w.]+\)\}(?!\$\{\(\(\)=>)/g;
+  const next = hub.replace(re, (all) => all + tok);
+  if (!next.includes("&token=")) throw new Error(`patch "media token": media URLs not found in ${chunk}`);
+  if (next !== hub) writeFileSync(file, next);
 }
 
 // 3b. Movies & TV showed every member the host's own controls (media root

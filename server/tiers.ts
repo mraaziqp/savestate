@@ -95,6 +95,8 @@ export type Tier = {
   period: "free" | "month" | "year" | "once";
   color: string; badge: string; sortOrder: number; isDefault: boolean; isPublic: boolean;
   storageLimitGb: number | null; maxStreams: number | null; maxQuality: string | null;
+  /** Household profiles an account may add (null: no limit). */
+  maxProfiles: number | null;
   checkoutUrl: string; perks: string[];
 };
 type Gate = { gated: boolean; tiers: string[] };
@@ -128,6 +130,7 @@ const SCHEMA = `
     resolved_at TIMESTAMPTZ, resolved_by TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_plan_upgrade_requests_status ON plan_upgrade_requests(status, created_at DESC);
+  ALTER TABLE plan_tiers ADD COLUMN IF NOT EXISTS max_profiles INTEGER;
 `;
 
 // users.user_tier already holds free / pro / unlimited for the existing
@@ -136,13 +139,13 @@ const SCHEMA = `
 const SEED: Tier[] = [
   { id: "free", name: "Free", tagline: "Everything you need to get started", priceCents: 0, currency: "ZAR", period: "free",
     color: "#94a3b8", badge: "", sortOrder: 0, isDefault: true, isPublic: true, storageLimitGb: null, maxStreams: null,
-    maxQuality: null, checkoutUrl: "", perks: [] },
+    maxQuality: null, maxProfiles: null, checkoutUrl: "", perks: [] },
   { id: "pro", name: "Pro", tagline: "", priceCents: 0, currency: "ZAR", period: "month",
     color: "#22d3ee", badge: "", sortOrder: 1, isDefault: false, isPublic: false, storageLimitGb: null, maxStreams: null,
-    maxQuality: null, checkoutUrl: "", perks: [] },
+    maxQuality: null, maxProfiles: null, checkoutUrl: "", perks: [] },
   { id: "unlimited", name: "Unlimited", tagline: "", priceCents: 0, currency: "ZAR", period: "month",
     color: "#a855f7", badge: "", sortOrder: 2, isDefault: false, isPublic: false, storageLimitGb: null, maxStreams: null,
-    maxQuality: null, checkoutUrl: "", perks: [] },
+    maxQuality: null, maxProfiles: null, checkoutUrl: "", perks: [] },
 ];
 
 const rowToTier = (r: any): Tier => ({
@@ -153,6 +156,7 @@ const rowToTier = (r: any): Tier => ({
   storageLimitGb: r.storage_limit_gb == null ? null : Number(r.storage_limit_gb),
   maxStreams: r.max_streams == null ? null : Number(r.max_streams),
   maxQuality: r.max_quality || null, checkoutUrl: r.checkout_url ?? "",
+  maxProfiles: r.max_profiles == null ? null : Number(r.max_profiles),
   perks: Array.isArray(r.perks) ? r.perks.map(String) : [],
 });
 
@@ -293,6 +297,9 @@ export function createTiers(deps: TiersDeps) {
       res.json({
         tier, expiresAt: caller.tierExpiresAt && tier.id === caller.tier ? caller.tierExpiresAt : null,
         isAdmin: caller.admin, features, lockedTabs,
+        // A household profile (household.ts): which tabs it may open.
+        profile: caller.profile ? { id: caller.profile.id, name: caller.profile.name, avatar: caller.profile.avatar, color: caller.profile.color,
+          tabs: caller.profile.tabs, via: caller.profile.via } : null,
         access: { media: caller.media, games: caller.games, upload: caller.upload },
         pendingRequest: pending,
       });
@@ -353,6 +360,7 @@ export function createTiers(deps: TiersDeps) {
       if (typeof b.isPublic === "boolean") out.is_public = b.isPublic;
       intOrNull("storageLimitGb", "storage_limit_gb", 1_000_000);
       intOrNull("maxStreams", "max_streams", 100);
+      intOrNull("maxProfiles", "max_profiles", 50);
       if (b.maxQuality === null || b.maxQuality === "") out.max_quality = null;
       else if (["480p", "720p", "1080p", "4k"].includes(b.maxQuality)) out.max_quality = b.maxQuality;
       if (typeof b.checkoutUrl === "string") {

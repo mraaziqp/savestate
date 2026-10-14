@@ -200,6 +200,7 @@ function TierEditor({ tier, count, onSaved, onCancel, onDelete }) {
       name: f.name, tagline: f.tagline, priceCents: Math.round(price * 100), currency: f.currency,
       period: price === 0 && f.period !== "once" ? "free" : f.period === "free" ? "month" : f.period,
       color: f.color, badge: f.badge, isPublic: f.isPublic, checkoutUrl: f.checkoutUrl,
+      maxProfiles: String(f.maxProfiles ?? "").trim() === "" ? null : Number(f.maxProfiles),
       perks: f.perksText.split("\n").map((p) => p.trim()).filter(Boolean),
     };
     try {
@@ -224,6 +225,7 @@ function TierEditor({ tier, count, onSaved, onCancel, onDelete }) {
           </select>
         </div>
         <div className="nxa-field"><label>Badge <i>(optional)</i></label><input className="nxa-input sm" value={f.badge} onChange={set("badge")} maxLength={24} placeholder="Most popular" /></div>
+        <div className="nxa-field"><label>Household profiles <i>(blank: no limit)</i></label><input className="nxa-input sm" value={f.maxProfiles ?? ""} onChange={(e) => set("maxProfiles")(e.target.value.replace(/\D/g, "").slice(0, 2))} inputMode="numeric" placeholder="No limit" /></div>
         <div className="nxa-field"><label>Colour</label><input className="nxa-input sm" type="color" value={f.color} onChange={set("color")} style={{ padding: 3, height: 36 }} /></div>
         <div className="nxa-field wide"><label>Tagline <i>(optional)</i></label><input className="nxa-input sm" value={f.tagline} onChange={set("tagline")} maxLength={120} placeholder="For households that watch every day" /></div>
         <div className="nxa-field wide"><label>Payment link <i>(optional, only used when PayFast is off: Yoco, PayPal.me... shown after a member asks for this tier)</i></label>

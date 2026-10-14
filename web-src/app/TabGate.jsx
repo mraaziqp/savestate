@@ -13,6 +13,7 @@ import { useStyles, api, token, Icon, Note, goTab } from "./lib.jsx";
 
 const MEDIA_TABS = new Set(["media", "music", "codex", "torrent", "party", "playlists", "gallery", "photos", "matchmaker"]);
 const GAMES_TABS = new Set(["library", "consoles"]);
+const PROFILE_TABS = { media: "Movies & TV", music: "Music", codex: "Books", library: "Games", gallery: "Photos", party: "Watch Party", household: "Profiles" };
 const TAB_NAMES = { media: "Movies & TV", music: "Music", codex: "eBooks", torrent: "Downloads", party: "Watch Party", playlists: "Playlists",
   gallery: "Photos", photos: "Photo Booklet", matchmaker: "What to Watch" };
 
@@ -113,6 +114,21 @@ export function TabGate({ tab }) {
   useStyles();
   const me = useEntitlements();
   if (!me || me.isAdmin) return null;
+
+  // Inside a household profile: only the tabs the account holder allowed.
+  if (me.profile && !me.profile.tabs.includes(tab)) {
+    const open = me.profile.tabs.filter((t) => PROFILE_TABS[t]);
+    return (
+      <div className="nxa nxa-locked nxa-gate-on">
+        <span><Icon name="lock" size={28} /></span>
+        <h2>Not on {me.profile.name}'s profile</h2>
+        <p className="nxa-dim">This part of SaveState isn't switched on for this profile.</p>
+        <div className="nxa-row nxa-wrap" style={{ justifyContent: "center" }}>
+          {open.map((t) => <button key={t} className="nxa-btn" onClick={() => goTab(t)}>{PROFILE_TABS[t]}</button>)}
+        </div>
+      </div>
+    );
+  }
 
   const locked = me.lockedTabs?.[tab];
   if (locked) {
