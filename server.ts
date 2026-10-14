@@ -5513,6 +5513,14 @@ async function startServer() {
   // All /api/* routes require a valid JWT (PIN session or user account).
   // Token accepted via Authorization header, ?token= (SSE/EventSource), or the
   // session cookie on reads (<img>/<audio>/<video> cannot send a header).
+  // A URL can carry ?token= twice (a player adding its own to one that has
+  // it); Express then hands routes an array, which never verifies. One is enough.
+  app.use((req, _res, next) => {
+    const t = (req.query as any)?.token;
+    if (Array.isArray(t)) (req.query as any).token = String(t[0] ?? "");
+    next();
+  });
+
   const PUBLIC_API_PREFIXES = [
     "/api/health",              // includes /api/health/full
     "/api/auth/login",

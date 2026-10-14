@@ -264,8 +264,11 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   const file = path.join(assets, find(chunk));
   const hub = readFileSync(file, "utf8");
   const tok = "${(()=>{try{const k=localStorage.getItem(\"nexus_token\");return k?\"&token=\"+encodeURIComponent(k):\"\"}catch{return\"\"}})()}";
-  const re = /\/api\/media\/(?:file|stream|hls\/playlist\.m3u8)\?rel=\$\{encodeURIComponent\([\w.]+\)\}(?!\$\{\(\(\)=>)/g;
-  const next = hub.replace(re, (all) => all + tok);
+  // Not the HLS playlist: the player passes that through its own helper, which
+  // adds the token, and two tokens in one URL are refused.
+  const re = /\/api\/media\/(?:file|stream)\?rel=\$\{encodeURIComponent\([\w.]+\)\}(?!\$\{\(\(\)=>)/g;
+  const next = hub.split(`/api/media/hls/playlist.m3u8?rel=\${encodeURIComponent(n.relPath)}${tok}`).join("/api/media/hls/playlist.m3u8?rel=${encodeURIComponent(n.relPath)}")
+    .replace(re, (all) => all + tok);
   if (!next.includes("&token=")) throw new Error(`patch "media token": media URLs not found in ${chunk}`);
   if (next !== hub) writeFileSync(file, next);
 }
