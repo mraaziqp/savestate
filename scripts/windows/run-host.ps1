@@ -38,6 +38,9 @@ function Start-Part($name, $exe, [string[]]$argList, $workDir) {
   if ($env:OS -eq 'Windows_NT') { $opts.WindowStyle = 'Hidden' }
   try {
     $p = Start-Process @opts
+    # A scheduled task runs at below-normal priority and its children inherit
+    # that; the tunnel and the server should not lose to every other program.
+    try { $p.PriorityClass = 'Normal' } catch { }
     Say "started $name (pid $($p.Id))"
     return $p
   } catch {
@@ -73,6 +76,35 @@ $procs = @{}
 $backoff = @{}
 Say 'watchdog up'
 
+# Google Drive for Desktop sometimes drops its drive letter while its process
+# keeps running (2026-10-13: I: vanished mid-afternoon and the library showed
+# 15 videos instead of 1,023 until Drive was restarted by hand). When the
+# library path has been gone for 30 seconds, restart Drive; the server
+# rescans by itself once the path is back. At most one attempt every 5 minutes.
+$libraryMisses = 0
+$driveRestartedAt = [datetime]::MinValue
+function Repair-LibraryMount {
+  if (-not $cfg.waitForPath) { return }
+  if (Test-Path -LiteralPath $cfg.waitForPath) {
+    if ($script:libraryMisses -ge 3) { Say "library path is back: $($cfg.waitForPath)" }
+    $script:libraryMisses = 0
+    return
+  }
+  $script:libraryMisses++
+  if ($script:libraryMisses -ne 3 -and ($script:libraryMisses % 30) -ne 0) { return }
+  if (((Get-Date) - $script:driveRestartedAt).TotalMinutes -lt 5) { return }
+  $driveDir = Join-Path $env:ProgramFiles 'Google\Drive File Stream'
+  $exe = Get-ChildItem $driveDir -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^\d+(\.\d+)+$' -and (Test-Path (Join-Path $_.FullName 'GoogleDriveFS.exe')) } |
+    Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+  if (-not $exe) { Say "library path missing and Google Drive for Desktop not found: $($cfg.waitForPath)"; return }
+  Say "library path missing ($($cfg.waitForPath)) - restarting Google Drive"
+  $script:driveRestartedAt = Get-Date
+  Get-Process GoogleDriveFS -ErrorAction SilentlyContinue | Stop-Process -Force -Confirm:$false -ErrorAction SilentlyContinue
+  Start-Sleep -Seconds 3
+  try { Start-Process -FilePath (Join-Path $exe.FullName 'GoogleDriveFS.exe') } catch { Say "could not start Google Drive: $($_.Exception.Message)" }
+}
+
 # Google Drive for Desktop mounts its drive a little after logon. Starting the
 # server before it appears would index an empty library until the next rescan.
 if ($cfg.waitForPath) {
@@ -98,5 +130,6 @@ while ($true) {
     $p = $procs[$k]
     if ($p -and -not $p.HasExited -and ((Get-Date) - $p.StartTime).TotalMinutes -gt 10) { $backoff[$k] = 0 }
   }
+  Repair-LibraryMount
   Start-Sleep -Seconds 10
 }

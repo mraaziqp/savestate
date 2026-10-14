@@ -195,6 +195,116 @@ a move, check that the `NexusArchive` folder is still shared with it.
   the player still uses hls.js there, because the native player never steps
   down on a weak link.
 
+## Accounts, access and plans
+
+Sign-up is open, so what an account can reach is decided in one place,
+`server/access.ts`, for every `/api` route:
+
+- **admin**: host administration (config, scans, installers, logs, keys).
+  Roles `admin`, `superadmin`, `ultra_admin`, and the PIN / Brain-key session.
+- **media** / **games**: the host's own films, music, books, photos, ROMs and
+  BIOS files. Per-person switches (Plans > Members). Invites, groups and
+  access approvals only grant them when they come from an admin. A tier never
+  grants them.
+- **member**: any signed-in account. A new account can use its own files,
+  Discover, the setup guide and whatever its tier includes, and sees a
+  "request access" screen on the host's library.
+
+Plans (`server/tiers.ts`, Plans tab): admins create tiers and choose which
+features are paid. Nothing is paid until a feature is switched to "Paid".
+There is no payment processor: a tier can carry a payment link, members ask
+for an upgrade, and an admin approves it (optionally with an end date).
+
+**PayFast** (`server/payfast.ts`): with `PAYFAST_MERCHANT_ID` and
+`PAYFAST_MERCHANT_KEY` in `.env`, "Get <tier>" on the Plans page sends the
+member to PayFast, and the tier switches on when PayFast's notification
+(`https://savestate.co.za/api/payments/payfast/notify`) passes the signature
+check, PayFast's own confirmation and the amount check. `PAYFAST_PASSPHRASE`
+must equal the passphrase in PayFast > Settings > Security (if one is set
+there, nothing works without it) and turns monthly/yearly tiers into
+subscriptions. Prices must be in ZAR, at least R5. Plans > Payments &
+requests lists payments and has a "Check PayFast connection" button.
+`PAYFAST_SANDBOX=1` uses PayFast's test site.
+
+Password resets are emailed when `RESEND_API_KEY` is set and the account has
+an email; otherwise the request appears under Plans > Requests and an admin
+sends the link. A reset or password change signs every other device out.
+
+`.env` switches: `NEXUS_SIGNUP=closed` stops new sign-ups.
+`NEXUS_MUSIC_ROOTS` adds music folders (default: uploads, `~/Music`,
+`<files root>/Music`, `<media root>/music`, `Music` at the top of D:-H:).
+
+Check it all: `node scripts/test-accounts-plans.mjs` (creates and removes two
+test accounts), `node scripts/audit-routes.cjs` (every GET route, as an admin).
+
+## Game mode
+
+When a game runs on the host PC the server steps aside (`server/game-mode.ts`):
+below-normal priority for itself and its ffmpeg processes, no library scans,
+artwork fetches or compression, and qBittorrent on its alternative speed
+limits. Streams to other people keep running. It ends ~25 s after the game
+closes. Recognised: emulators, anything under a Steam / Epic / GOG / Xbox /
+`Games` folder or a PC-games library folder, exclusive full-screen apps, and
+programs an admin has marked under Plans > Host PC. `NEXUS_GAME_MODE=off`
+disables it; `NEXUS_GAME_EXES` / `NEXUS_GAME_DIRS` add names and folders.
+
+The watchdog starts the server and tunnel at normal priority (a scheduled
+task would otherwise run them below normal), and restarts Google Drive when
+the library path has been missing for 30 seconds.
+
+## Changing the frontend
+
+Only the compiled bundle in `dist/` survives (see `.gitignore`). New screens
+are written as source under `web-src/` and wired into the bundle:
+
+```bash
+node web-src/watch/build.mjs     # Discover, What to Watch
+node web-src/app/build.mjs       # sign-in, welcome, Plans, setup guide, tab gate
+node scripts/rev-dist.mjs r<N>   # always: new file names, or browsers keep the old ones
+```
+
+Then rebuild the server (`host-up.ps1` does, or the esbuild line in it) and
+restart it.
+
+## Cloud Drives (Google Drive accounts, upload & verify)
+
+The Cloud Drives tab (admins) is `server/drives.ts` on top of rclone, which
+holds a sign-in per Google account (`rclone config` remotes; `gdrive` =
+backupe9@gmail.com, 5 TB, is also Drive for Desktop's `I:`; `groms` =
+mraaziqp@gmail.com, 15 GB). Two panes show any account or local disk:
+browse, new folder, rename, delete (to Drive's trash), download, upload,
+copy/move between accounts.
+
+"Upload & verify" moves a folder from this PC to Drive: `rclone copy`
+(resumes after pause, restart or reboot; state in `offload-jobs.json` in the
+data folder), then `rclone check` compares every file's size and MD5 with
+Drive. Only then does the page offer to delete the local copies, and only
+files that check confirmed and that have not changed since are deleted (they
+skip the Recycle Bin; the Drive copies stay). Movies, TV, music and ROMs put
+under `NexusArchive/` appear in SaveState through `I:`.
+
+Uploads share the internet uplink with the site and streams, and a full
+uplink makes everything slow, so they are capped: `NEXUS_UPLOAD_BWLIMIT`
+(default 650k) by day, full speed during `NEXUS_UPLOAD_FULL_HOURS` (default
+1-7), `NEXUS_UPLOAD_BWLIMIT_GAMING` (64k) while game mode is on. One upload
+runs at a time.
+
+rclone warns that its shared Google client ID is being retired during 2026.
+Before that happens, create your own OAuth client (https://rclone.org/drive/#making-your-own-client-id)
+and add `client_id`/`client_secret` to both remotes with `rclone config`.
+
+## App downloads
+
+- **Android**: `powershell -ExecutionPolicy Bypass -File scripts\windows\build-apk.ps1`
+  builds, signs and publishes `releases\updates\SaveState-<version>.apk`
+  (served by `/api/downloads/apk`). The app is a thin client of the live site,
+  so it only needs rebuilding when the Android shell changes. Signing key:
+  `NEXUS_APK_KEYSTORE` (in the host data folder) and its password in `.env`.
+  **Back the keystore up**: Android refuses an update signed with another key.
+- **Windows**: with no packaged desktop build in `releases\updates`, the
+  download hands out the one-click client installer
+  (`/api/client-launcher/windows-installer`).
+
 ## Failover
 
 The site runs **only from the home host**. Nothing is served from AWS.

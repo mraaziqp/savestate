@@ -56,3 +56,6 @@ android/app/src/main/assets/public/
 
 # Local editor/preview config (machine-specific paths)
 .claude/
+
+# Built app installers published by the host (scripts/windows/build-apk.ps1, desktop builds)
+releases/

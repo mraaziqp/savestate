@@ -20,6 +20,8 @@ const STREAMING = new Set([
   '/api/ai/stream', '/api/daemon/stream', '/api/music/scan-progress', '/api/stream/feed',
   // Large binary downloads; these legitimately outlast the probe timeout.
   '/api/client/android/retroarch-apk', '/api/storage/download',
+  // These open a native file dialog on the host's desktop and wait for a person.
+  '/api/system/pick-folder', '/api/system/pick-file',
 ]);
 
 const all = [...new Set(
@@ -29,12 +31,17 @@ const routes = all.filter((r) => !STREAMING.has(r));
 
 const secret = (fs.readFileSync(path.join(ROOT, '.env'), 'utf8').match(/^JWT_SECRET=(.*)$/m) || [])[1].trim();
 const jwt = require(path.join(ROOT, 'node_modules', 'jsonwebtoken'));
-const tok = jwt.sign({ userId: process.env.AUDIT_ADMIN_ID, username: 'audit' }, secret, { expiresIn: '20m' });
+// A host session (what the PIN login issues) unless a specific account is
+// named. A token with neither is refused outright, and every route then
+// "passed" with a 401.
+const tok = process.env.AUDIT_ADMIN_ID
+  ? jwt.sign({ userId: process.env.AUDIT_ADMIN_ID, username: 'audit' }, secret, { expiresIn: '20m' })
+  : jwt.sign({ nexus: true, ts: Date.now() }, secret, { expiresIn: '20m' });
 
 (async () => {
   console.log(`Auditing ${routes.length} parameterless GET routes against ${BASE}`);
   console.log(`(skipping ${all.length - routes.length} long-lived stream endpoints: ${[...STREAMING].join(', ')})\n`);
-  const bad = [], slow = [], ok = [], unsupported = [];
+  const bad = [], slow = [], ok = [], unsupported = [], refused = [];
   for (const r of routes) {
     const t0 = Date.now();
     try {
@@ -48,18 +55,23 @@ const tok = jwt.sign({ userId: process.env.AUDIT_ADMIN_ID, username: 'audit' }, 
       // native picker). That is a stated limitation, not a fault.
       if (res.status === 501) unsupported.push({ r, snip: body.slice(0, 90) });
       else if (res.status >= 500) bad.push({ r, status: res.status, ms, snip: body.slice(0, 140) });
-      else { ok.push(r); if (ms > 3000) slow.push({ r, ms }); }
+      else if (res.status === 401 || res.status === 403 || res.status === 404) refused.push({ r, status: res.status, snip: body.slice(0, 90) });
+      else { ok.push(r); if (ms > 1000) slow.push({ r, ms }); }
     } catch (e) {
       bad.push({ r, status: 'TIMEOUT/ERR', ms: Date.now() - t0, snip: String(e.message).slice(0, 120) });
     }
   }
   console.log(`  ✓ ${ok.length} healthy`);
+  if (refused.length) {
+    console.log(`\n  REFUSED OR MISSING for an admin session (${refused.length}):`);
+    for (const x of refused) console.log(`    ${x.status}  ${x.r}  ${x.snip}`);
+  }
   if (unsupported.length) {
     console.log(`\n  NOT SUPPORTED ON THIS HOST (501, by design):`);
     for (const u of unsupported) console.log(`    ${u.r}`);
   }
   if (slow.length) {
-    console.log(`\n  SLOW (>3s):`);
+    console.log(`\n  SLOW (>1s):`);
     for (const s of slow.sort((a, b) => b.ms - a.ms)) console.log(`    ${String(s.ms).padStart(6)}ms  ${s.r}`);
   }
   if (bad.length) {

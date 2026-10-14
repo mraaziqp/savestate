@@ -18,7 +18,7 @@ const target = process.env.NEXUS_APK_URL ?? 'https://savestate.co.za';
 
 const config: CapacitorConfig = {
   appId: 'com.savestate.nexus',
-  appName: 'NexusEmu',
+  appName: 'SaveState',
   webDir: 'dist',
   android: {
     // The TV UI paints its own dark ground; allowing mixed content would let a
