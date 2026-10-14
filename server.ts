@@ -5685,6 +5685,7 @@ async function startServer() {
 
   // Sonarr / Radarr / Prowlarr / qBittorrent: find, connect, and say why downloads stall (server/downloader.ts).
   createDownloader({
+    persistDir: PERSIST_DIR,
     callerOf: (req) => access.callerOf(req),
     loadArr: () => loadArrConfig(), saveArr: (cfg) => saveArrConfig(cfg),
     loadQbt: () => loadQbtConfig(), qbtLogin: (cfg) => qbtLogin(cfg),
@@ -22356,7 +22357,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           "-show_streams",
           "-show_format",
           target,
-        ], { timeout: 15000 }, (err, stdout) => {
+        ], { timeout: 45000 }, (err, stdout) => {
           if (err) return reject(err);
           try {
             const data = JSON.parse(stdout) as any;
@@ -22415,7 +22416,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       warmFromInfo(req, target, rel, info);
       return res.json({ ok: true, ...info, rel });
     } catch (e) {
-      return res.status(500).json({ error: String(e) });
+      // A slow first read through Google Drive can outlast the full probe. The
+      // player still needs the length and codec to choose how to play, and the
+      // lighter probe the segment builder uses usually has them already.
+      const fmt = await probeVideoFormat(target).catch(() => null);
+      if (fmt && fmt.duration > 0) {
+        return res.json({ ok: true, partial: true, duration: fmt.duration, videoCodec: fmt.codec, is10Bit: fmt.is10Bit, width: fmt.width, height: fmt.height,
+          audioTracks: fmt.audioCodec ? [{ index: 0, language: "und", title: "", codec: fmt.audioCodec, channels: fmt.audioChannels || 2, default: true }] : [], subtitleTracks: [], rel });
+      }
+      log("WARN", `Media info failed for ${rel}: ${String(e).slice(0, 160)}`, "media");
+      return res.status(503).json({ error: "Could not read this file yet. Try again in a moment." });
     }
   });
 

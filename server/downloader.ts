@@ -12,7 +12,7 @@
  * qbt-config.json in server.ts); this only reads and fills them.
  */
 import type express from "express";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Caller } from "./access.ts";
 
@@ -20,6 +20,7 @@ type ArrConfig = { radarrUrl: string; radarrApiKey: string; sonarrUrl: string; s
 type QbtConfig = { host: string; username: string; password: string };
 
 export type DownloaderDeps = {
+  persistDir: string;
   callerOf: (req: express.Request) => Promise<Caller>;
   loadArr: () => Promise<ArrConfig | null>;
   saveArr: (cfg: ArrConfig) => Promise<void>;
@@ -109,6 +110,19 @@ async function arrHealth(id: "sonarr" | "radarr", url: string, key: string) {
       if (!r.ok) out.problems.push({ level: "bad", text: `${APPS[id].label} can't reach its library folder ${r.path}.` });
       else if (r.freeGb != null && r.freeGb < 20) out.problems.push({ level: r.freeGb < 5 ? "bad" : "warn", text: `Only ${r.freeGb} GB free on ${r.path}.`, fix: "Free some space (Cloud Drives > Upload & verify) or add a root folder on a bigger disk." });
     }
+    // Sonarr once lost most of its program files in a failed self-update and,
+    // for nine days, approved releases it could not hand to qBittorrent
+    // ("Couldn't add release ... to download queue"). Nothing else showed it.
+    const logs = await arrGet(url, key, "v3", "log?page=1&pageSize=100&sortKey=time&sortDirection=descending").catch(() => null);
+    const cantSend = (logs?.records ?? []).filter((r: any) => /couldn't add release|could not load file or assembly/i.test(String(r.message ?? "") + String(r.exception ?? ""))
+      && Date.now() - new Date(r.time).getTime() < 2 * 86400_000
+      // Only since it last started: a repaired install should stop being reported.
+      && (!status?.startTime || new Date(r.time).getTime() > new Date(status.startTime).getTime()));
+    if (cantSend.length) {
+      const why = String(cantSend[0].exception ?? cantSend[0].message ?? "").split("\n")[0].slice(0, 200);
+      out.problems.unshift({ level: "bad", text: `${APPS[id].label} can't send downloads to qBittorrent (${cantSend.length} failed in the last 2 days): ${why}`,
+        fix: /assembly|FileNotFound/i.test(why) ? `${APPS[id].label}'s program files are damaged: reinstall it from the official site (settings are kept).` : "Check the download client in its Settings > Download Clients." });
+    }
     if (out.queue.stuck) out.problems.push({ level: "warn", text: `${out.queue.stuck} download(s) need attention in ${APPS[id].label}'s queue (import blocked or warning).`, fix: `Open ${APPS[id].label} > Activity > Queue.` });
     for (const h of health as any[]) {
       if (h.type === "notice") continue;
@@ -163,7 +177,155 @@ async function prowlarrHealth() {
   return out;
 }
 
+// ── Deep search ───────────────────────────────────────────────────────────
+// Sonarr and Radarr search each site one way ("The Middle S04"). Plenty of
+// good copies are only listed under other wordings ("The Middle (2009)
+// Season 4 S04 ..."), so a season can sit missing for ever while dead
+// single-episode releases are all that turn up (seen 2026-10-14: The Middle
+// season 4, 1 of 24 episodes, while a 60-seeder season pack existed). This
+// asks Prowlarr with several wordings, keeps well-seeded matches, and hands
+// the best to Sonarr / Radarr's release-push API: they still parse and judge
+// it against their own quality rules before anything downloads.
+const MIN_SEEDERS = Number(process.env.NEXUS_MIN_SEEDERS ?? 5) || 5;
+// A run grabs a few things, not a whole back catalogue: the first version sent
+// fifteen Simpsons season packs in a minute (stopped before they downloaded).
+const MAX_SENT_PER_RUN = Number(process.env.NEXUS_DEEP_MAX_PER_RUN ?? 3) || 3;
+// Shows with an enormous backlog (The Simpsons: 800 episodes) are left to the
+// owner to fetch on purpose, as retryWantedArr does.
+const MAX_MISSING_PER_SHOW = Number(process.env.NEXUS_DEEP_MAX_MISSING ?? 150) || 150;
+// Never let a grab eat the last of the library disk.
+const KEEP_FREE_BYTES = 50 * 1024 ** 3;
+const norm = (s: string) => s.toLowerCase().replace(/&/g, " and ").replace(/['’]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+const pad = (n: number) => String(n).padStart(2, "0");
+
 export function createDownloader(deps: DownloaderDeps) {
+  const stateFile = path.join(deps.persistDir, "deep-search.json");
+  let tried: Record<string, { at: number; result: string }> = {};
+  let lastRun: { at: number; checked: number; sent: string[]; running: boolean } = { at: 0, checked: 0, sent: [], running: false };
+  readFile(stateFile, "utf8").then((t) => { const j = JSON.parse(t); tried = j.tried ?? {}; lastRun = { ...lastRun, ...(j.lastRun ?? {}), running: false }; }).catch(() => {});
+  const saveState = () => writeFile(stateFile, JSON.stringify({ tried, lastRun })).catch(() => {});
+
+  async function prowlarrSearch(p: { url: string; apiKey: string }, query: string, cat: string): Promise<any[]> {
+    try {
+      const r = await fetch(`${p.url}/api/v1/search?query=${encodeURIComponent(query)}&type=search&limit=100&categories=${cat}`, { headers: { "X-Api-Key": p.apiKey }, signal: AbortSignal.timeout(120000) });
+      return r.ok ? ((await r.json()) as any[]) : [];
+    } catch { return []; }
+  }
+  async function push(app: { url: string; key: string }, rel: any): Promise<{ approved: boolean; why: string }> {
+    const body = { title: rel.title, downloadUrl: rel.downloadUrl || rel.magnetUrl, magnetUrl: rel.magnetUrl, protocol: "torrent", publishDate: rel.publishDate, indexer: rel.indexer, seeders: rel.seeders, size: rel.size };
+    try {
+      const r = await fetch(`${app.url.replace(/\/$/, "")}/api/v3/release/push`, { method: "POST", headers: { "X-Api-Key": app.key, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
+      const out = await r.json().catch(() => null);
+      const d = Array.isArray(out) ? out[0] : out;
+      return { approved: !!d?.approved, why: (d?.rejections ?? []).join("; ") || (r.ok ? "" : `HTTP ${r.status}`) };
+    } catch (e: any) { return { approved: false, why: e?.message ?? String(e) }; }
+  }
+  const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  async function deepSearch(limit = { seasons: 12, movies: 8 }) {
+    if (lastRun.running) return lastRun;
+    const prowlarr = await localApp("prowlarr");
+    const arr = await deps.loadArr();
+    if (!prowlarr || !arr) return lastRun;
+    lastRun = { at: Date.now(), checked: 0, sent: [], running: true };
+    const DAY = 86400_000;
+    try {
+      // ── TV: seasons (or single episodes) still missing ──
+      if (arr.sonarrUrl && arr.sonarrApiKey) {
+        const S = { url: arr.sonarrUrl, key: arr.sonarrApiKey };
+        const [series, queue] = await Promise.all([
+          arrGet(S.url, S.key, "v3", "series", 30000).catch(() => []),
+          arrGet(S.url, S.key, "v3", "queue?pageSize=500", 30000).catch(() => ({ records: [] })),
+        ]);
+        const busy = new Set((queue.records ?? []).map((q: any) => `${q.seriesId}:${q.seasonNumber}`));
+        const roots = (await arrGet(S.url, S.key, "v3", "rootfolder").catch(() => [])) as any[];
+        const freeFor = (p: string) => roots.filter((r) => p.toLowerCase().startsWith(String(r.path).toLowerCase())).map((r) => Number(r.freeSpace) || 0)[0] ?? Infinity;
+        let budget = limit.seasons;
+        for (const s of series as any[]) {
+          if (budget <= 0) break;
+          if (!s.monitored || lastRun.sent.length >= MAX_SENT_PER_RUN) continue;
+          const eps = await arrGet(S.url, S.key, "v3", `episode?seriesId=${s.id}`, 30000).catch(() => []);
+          const allMissing = (eps as any[]).filter((e) => e.monitored && !e.hasFile && e.seasonNumber > 0 && e.airDateUtc && new Date(e.airDateUtc).getTime() < Date.now()).length;
+          if (allMissing > MAX_MISSING_PER_SHOW) continue;
+          const now = Date.now();
+          const bySeason = new Map<number, any[]>();
+          for (const e of eps as any[]) {
+            if (!e.monitored || e.hasFile || e.seasonNumber === 0 || !e.airDateUtc || new Date(e.airDateUtc).getTime() > now - DAY) continue;
+            bySeason.set(e.seasonNumber, [...(bySeason.get(e.seasonNumber) ?? []), e]);
+          }
+          for (const [season, missing] of bySeason) {
+            if (budget <= 0 || lastRun.sent.length >= MAX_SENT_PER_RUN) break;
+            const key = `tv:${s.id}:${season}`;
+            if (busy.has(`${s.id}:${season}`) || (tried[key] && now - tried[key].at < DAY)) continue;
+            budget--; lastRun.checked++;
+            const title = s.title.replace(/\s*\(\d{4}\)$/, "");
+            const one = missing.length === 1 ? missing[0] : null;
+            const queries = one
+              ? [`${title} S${pad(season)}E${pad(one.episodeNumber)}`, `${title} ${s.year} S${pad(season)}E${pad(one.episodeNumber)}`]
+              : [`${title} S${pad(season)}`, `${title} Season ${season}`, `${title} ${s.year} S${pad(season)}`, `${title} (${s.year}) Season ${season}`];
+            const seen = new Map<string, any>();
+            for (const q of queries) { for (const r of await prowlarrSearch(prowlarr, q, "5000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+            const t = norm(title);
+            const seasonRe = one ? new RegExp(`\\bs0?${season}e0?${one.episodeNumber}\\b`, "i") : new RegExp(`\\b(s0?${season}(?!\\s?e\\d)|season\\s?0?${season})\\b`, "i");
+            const otherSeason = /\bs(\d{1,2})\b|season\s?(\d{1,2})\b/gi;
+            const candidates = [...seen.values()].filter((r) => {
+              const n = norm(r.title);
+              if ((r.seeders ?? 0) < MIN_SEEDERS || !n.startsWith(t + " ") || !seasonRe.test(r.title.replace(/[._]/g, " "))) return false;
+              // A pack of several seasons, or of another season, is not this one.
+              const seasons = new Set([...r.title.replace(/[._]/g, " ").matchAll(otherSeason)].map((m) => Number(m[1] ?? m[2])));
+              return seasons.size <= 1;
+            }).filter((r) => (Number(r.size) || 0) < freeFor(s.path) - KEEP_FREE_BYTES).sort((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0));
+            let result = candidates.length ? "nothing approved" : "no well-seeded copy found (or not enough disk space)";
+            for (const c of candidates.slice(0, 4)) {
+              const d = await push(S, c);
+              if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${s.title} S${pad(season)}${one ? `E${pad(one.episodeNumber)}` : ""}`); break; }
+            }
+            tried[key] = { at: Date.now(), result };
+            deps.log("INFO", `Deep search ${s.title} S${pad(season)} (${missing.length} missing): ${result}`);
+          }
+        }
+      }
+      // ── Films still missing ──
+      if (arr.radarrUrl && arr.radarrApiKey) {
+        const R = { url: arr.radarrUrl, key: arr.radarrApiKey };
+        const [movies, queue] = await Promise.all([
+          arrGet(R.url, R.key, "v3", "movie", 30000).catch(() => []),
+          arrGet(R.url, R.key, "v3", "queue?pageSize=500", 30000).catch(() => ({ records: [] })),
+        ]);
+        const busy = new Set((queue.records ?? []).map((q: any) => q.movieId));
+        const roots = (await arrGet(R.url, R.key, "v3", "rootfolder").catch(() => [])) as any[];
+        const freeFor = (p: string) => roots.filter((r) => p.toLowerCase().startsWith(String(r.path).toLowerCase())).map((r) => Number(r.freeSpace) || 0)[0] ?? Infinity;
+        let budget = limit.movies;
+        for (const m of movies as any[]) {
+          if (budget <= 0 || lastRun.sent.length >= MAX_SENT_PER_RUN) break;
+          const key = `movie:${m.id}`;
+          if (!m.monitored || m.hasFile || !m.isAvailable || busy.has(m.id) || (tried[key] && Date.now() - tried[key].at < DAY)) continue;
+          budget--; lastRun.checked++;
+          const seen = new Map<string, any>();
+          for (const q of [`${m.title} ${m.year}`, `${m.title} (${m.year})`]) { for (const r of await prowlarrSearch(prowlarr, q, "2000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+          const t = norm(m.title);
+          const candidates = [...seen.values()].filter((r) => (r.seeders ?? 0) >= MIN_SEEDERS && norm(r.title).startsWith(t + " ") && r.title.includes(String(m.year)) && (Number(r.size) || 0) < freeFor(m.path ?? "") - KEEP_FREE_BYTES)
+            .sort((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0));
+          let result = candidates.length ? "nothing approved" : "no well-seeded copy found";
+          for (const c of candidates.slice(0, 4)) {
+            const d = await push(R, c);
+            if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${m.title} (${m.year})`); break; }
+          }
+          tried[key] = { at: Date.now(), result };
+          deps.log("INFO", `Deep search ${m.title} (${m.year}): ${result}`);
+        }
+      }
+    } finally {
+      lastRun.running = false;
+      lastRun.at = Date.now();
+      for (const [k, v] of Object.entries(tried)) if (Date.now() - v.at > 30 * DAY) delete tried[k];
+      await saveState();
+    }
+    return lastRun;
+  }
+  setTimeout(() => void deepSearch().catch(() => {}), 20 * 60_000).unref?.();
+  setInterval(() => void deepSearch().catch(() => {}), 6 * 3600_000).unref?.();
+
   async function qbtHealth() {
     const cfg = await deps.loadQbt();
     const out: any = { id: "qbittorrent", ...QBT, url: cfg?.host ?? "", configured: !!cfg, connected: false, problems: [] as Problem[] };
@@ -214,7 +376,8 @@ export function createDownloader(deps: DownloaderDeps) {
         qbtHealth(),
       ]);
       res.setHeader("Cache-Control", "no-store");
-      res.json({ apps: [qbittorrent, prowlarr, sonarr, radarr] });
+      const recent = Object.entries(tried).sort((a, b) => b[1].at - a[1].at).slice(0, 12).map(([k, v]) => ({ key: k, ...v }));
+      res.json({ apps: [qbittorrent, prowlarr, sonarr, radarr], deep: { ...lastRun, recent } });
     });
 
     // Fills Sonarr and Radarr's address and API key from their own settings on this PC.
@@ -282,6 +445,16 @@ export function createDownloader(deps: DownloaderDeps) {
         deps.log("INFO", `Prowlarr sites added: ${added.join(", ") || "none"}${skipped.length ? `; not reachable: ${skipped.join(", ")}` : ""}`);
         res.json({ ok: true, added, skipped });
       } catch (e: any) { res.status(502).json({ error: `Prowlarr didn't answer: ${e?.message ?? e}` }); }
+    });
+
+    // Look for missing seasons and films under other wordings now.
+    app.post("/api/admin/downloader/deep-search", async (req, res) => {
+      if (!(await admin(req, res))) return;
+      if (lastRun.running) return res.json({ ok: true, running: true });
+      // Asked for by hand: everything is due again.
+      tried = {};
+      void deepSearch({ seasons: 30, movies: 20 }).catch(() => {});
+      res.json({ ok: true, started: true });
     });
 
     // Retry the failing sites now instead of waiting out Prowlarr's back-off.

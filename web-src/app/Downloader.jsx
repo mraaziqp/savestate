@@ -161,6 +161,25 @@ export function DownloaderSetup() {
                 onRetest={() => run("/api/admin/downloader/prowlarr-retest", (r) => `Tested ${r.tested} site(s); ${r.failed} still failing.`)}
                 onAddSites={() => run("/api/admin/downloader/prowlarr-add-sites", (r) => (r.added.length ? `Added ${r.added.join(", ")} and sent them to Sonarr and Radarr.` : "No new sites could be added from this connection.") + (r.skipped.length ? ` Not reachable from here: ${r.skipped.join(", ")}.` : ""))} />
             ))}
+            <div className="nxa-card" style={{ padding: 16 }}>
+              <div className="nxa-card-head" style={{ marginBottom: 0 }}>
+                <div>
+                  <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>Deep search {data.deep?.running && <span className="nxa-pill acc"><Icon name="spinner" size={11} /> Running</span>}</h3>
+                  <p className="nxa-sub" style={{ margin: 0 }}>Every 6 hours SaveState looks again for seasons and films that are still missing, under other names sites list them by ("Show (2009) Season 4", "Film (2019)"), and hands well-seeded copies to Sonarr and Radarr.
+                    {data.deep?.at ? ` Last run ${new Date(data.deep.at).toLocaleString()}: checked ${data.deep.checked}, found ${data.deep.sent?.length ?? 0}.` : ""}</p>
+                </div>
+                <button className="nxa-btn sm primary" disabled={busy || data.deep?.running} onClick={() => run("/api/admin/downloader/deep-search", (r) => (r.running ? "A deep search is already running." : "Deep search started; results appear here as it goes (it takes a few minutes)."))}>
+                  <Icon name="bolt" /> Deep search now</button>
+              </div>
+              {data.deep?.recent?.length > 0 && (
+                <ul style={{ margin: "8px 0 0", paddingLeft: 0, listStyle: "none", display: "grid", gap: 4, fontSize: 12.5 }}>
+                  {data.deep.recent.map((r) => (
+                    <li key={r.key}><span className={`nxa-pill ${r.result.startsWith("sent") ? "ok" : ""}`} style={{ marginRight: 6 }}>{r.result.startsWith("sent") ? "Found" : "Not yet"}</span>
+                      {r.result.startsWith("sent") ? r.result.replace(/^sent: /, "") : `${r.key.startsWith("tv") ? "Season" : "Film"} ${r.key.split(":").slice(1).join(" ")}: ${r.result}`}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         )}
       </div>
