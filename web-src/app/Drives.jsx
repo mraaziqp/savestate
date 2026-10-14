@@ -25,7 +25,7 @@ function SpaceBar({ used, total }) {
     <i style={{ display: "block", height: "100%", width: `${pct}%`, background: pct > 90 ? "#fb7185" : pct > 75 ? "#fbbf24" : "linear-gradient(90deg,#22d3ee,#4d7cff)" }} /></div>;
 }
 
-function Pane({ side, sources, state, setState, other, onChanged, onOffload, notice }) {
+export function Pane({ side, sources, state, setState, other, onChanged, onOffload, notice, base = "/api/admin/drives" }) {
   const { fs, path } = state;
   const [items, setItems] = useState(null);
   const [error, setError] = useState("");
@@ -35,7 +35,7 @@ function Pane({ side, sources, state, setState, other, onChanged, onOffload, not
   const load = useCallback(async () => {
     if (!fs) return;
     setError(""); setItems(null); setSel(new Set());
-    try { setItems((await api(`/api/admin/drives/list?fs=${encodeURIComponent(fs)}&path=${encodeURIComponent(path)}`)).items); }
+    try { setItems((await api(`${base}/list?fs=${encodeURIComponent(fs)}&path=${encodeURIComponent(path)}`)).items); }
     catch (e) { setError(e.message); setItems([]); }
   }, [fs, path]);
   useEffect(() => { load(); }, [load, state.version]);
@@ -45,11 +45,11 @@ function Pane({ side, sources, state, setState, other, onChanged, onOffload, not
   const toggle = (p) => setSel((s) => { const n = new Set(s); n.has(p) ? n.delete(p) : n.add(p); return n; });
   const act = async (label, fn) => { setBusy(label); setError(""); try { await fn(); await load(); onChanged?.(); } catch (e) { setError(e.message); } finally { setBusy(""); } };
 
-  const mkdir = () => { const n = window.prompt("New folder name"); if (n?.trim()) act("mkdir", () => api("/api/admin/drives/mkdir", { method: "POST", body: { fs, path: joinPath(path, n.trim()) } })); };
-  const rename = (x) => { const n = window.prompt("New name", x.name); if (n?.trim() && n.trim() !== x.name) act("rename", () => api("/api/admin/drives/rename", { method: "POST", body: { fs, from: x.path, to: joinPath(parentOf(x.path), n.trim()), isDir: x.isDir } })); };
+  const mkdir = () => { const n = window.prompt("New folder name"); if (n?.trim()) act("mkdir", () => api(`${base}/mkdir`, { method: "POST", body: { fs, path: joinPath(path, n.trim()) } })); };
+  const rename = (x) => { const n = window.prompt("New name", x.name); if (n?.trim() && n.trim() !== x.name) act("rename", () => api(`${base}/rename`, { method: "POST", body: { fs, from: x.path, to: joinPath(parentOf(x.path), n.trim()), isDir: x.isDir } })); };
   const del = () => {
     if (!picked.length || !window.confirm(`Move ${picked.length} item(s) to the Google Drive trash? You can restore them from drive.google.com for 30 days.`)) return;
-    act("delete", async () => { for (const x of picked) await api("/api/admin/drives/delete", { method: "POST", body: { fs, path: x.path, isDir: x.isDir } }); });
+    act("delete", async () => { for (const x of picked) await api(`${base}/delete`, { method: "POST", body: { fs, path: x.path, isDir: x.isDir } }); });
   };
   const send = (move) => {
     if (!picked.length || !other.fs) return;
@@ -61,7 +61,7 @@ function Pane({ side, sources, state, setState, other, onChanged, onOffload, not
       return;
     }
     act("transfer", async () => {
-      for (const x of picked) await api("/api/admin/drives/transfer", { method: "POST", body: { fromFs: fs, fromPath: x.path, toFs: other.fs, toPath: joinPath(other.path, x.name), isDir: x.isDir, move } });
+      for (const x of picked) await api(`${base}/transfer`, { method: "POST", body: { fromFs: fs, fromPath: x.path, toFs: other.fs, toPath: joinPath(other.path, x.name), isDir: x.isDir, move } });
       notice(`${move ? "Moving" : "Copying"} ${picked.length} item(s). Progress is under Transfers below.`);
     });
   };
@@ -71,15 +71,15 @@ function Pane({ side, sources, state, setState, other, onChanged, onOffload, not
     if (!files.length) return;
     act("upload", async () => {
       for (const f of files) {
-        const { id } = await api("/api/admin/drives/upload/init", { method: "POST", body: { fs, path, name: f.name, size: f.size } });
+        const { id } = await api(`${base}/upload/init`, { method: "POST", body: { fs, path, name: f.name, size: f.size } });
         for (let off = 0; off < f.size || off === 0; off += 8 * 1024 * 1024) {
           setBusy(`upload ${f.name} ${f.size ? Math.round((off / f.size) * 100) : 0}%`);
-          const r = await fetch(`/api/admin/drives/upload/${id}`, { method: "PUT", body: f.slice(off, off + 8 * 1024 * 1024), headers: { "Content-Type": "application/octet-stream" } });
+          const r = await fetch(`${base}/upload/${id}`, { method: "PUT", body: f.slice(off, off + 8 * 1024 * 1024), headers: { "Content-Type": "application/octet-stream" } });
           if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `Upload failed (${r.status})`);
           if (!f.size) break;
         }
         setBusy(`saving ${f.name} to Drive`);
-        await api(`/api/admin/drives/upload/${id}/complete`, { method: "POST", body: {} });
+        await api(`${base}/upload/${id}/complete`, { method: "POST", body: {} });
       }
     });
   };
@@ -107,8 +107,8 @@ function Pane({ side, sources, state, setState, other, onChanged, onOffload, not
           {local
             ? <button className="nxa-btn sm primary" onClick={() => send(true)}><Icon name="cloud" size={13} /> Upload & verify to the other side</button>
             : <>
-              <button className="nxa-btn sm" onClick={() => send(false)}><Icon name="copy" size={13} /> Copy to other side</button>
-              <button className="nxa-btn sm" onClick={() => send(true)}><Icon name="arrow" size={13} /> Move to other side</button>
+              {other?.fs && <button className="nxa-btn sm" onClick={() => send(false)}><Icon name="copy" size={13} /> Copy to other side</button>}
+              {other?.fs && <button className="nxa-btn sm" onClick={() => send(true)}><Icon name="arrow" size={13} /> Move to other side</button>}
               <button className="nxa-btn sm danger" onClick={del}><Icon name="trash" size={13} /> Delete</button>
             </>}
           <button className="nxa-link" onClick={() => setSel(new Set())}>Clear</button>
@@ -132,7 +132,7 @@ function Pane({ side, sources, state, setState, other, onChanged, onOffload, not
                 </td>
                 <td className="nxa-faint" style={{ whiteSpace: "nowrap", fontSize: 12 }}>{x.isDir ? "" : gb(x.size)}</td>
                 <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
-                  {!x.isDir && !local && <a className="nxa-btn sm" href={`/api/admin/drives/download?fs=${encodeURIComponent(fs)}&path=${encodeURIComponent(x.path)}`} title="Download"><Icon name="down" size={12} /></a>}
+                  {!x.isDir && !local && <a className="nxa-btn sm" href={`${base}/download?fs=${encodeURIComponent(fs)}&path=${encodeURIComponent(x.path)}`} title="Download"><Icon name="down" size={12} /></a>}
                   {!local && <button className="nxa-btn sm" style={{ marginLeft: 4 }} onClick={() => rename(x)} title="Rename"><Icon name="edit" size={12} /></button>}
                 </td>
               </tr>
@@ -189,7 +189,125 @@ function JobCard({ job, onAction }) {
       )}
       {job.verify?.problems?.length > 0 && job.status === "incomplete" && <Note kind="warn">{job.verify.problems.slice(0, 5).join(" · ")}{job.verify.problems.length > 5 ? " …" : ""}</Note>}
       {job.deleted && <p className="nxa-faint" style={{ fontSize: 12, marginTop: 6 }}>Freed {gb(job.deleted.bytes)} ({job.deleted.files} files){job.deleted.skipped ? `; ${job.deleted.skipped} file(s) left because they changed or were in use` : ""}.</p>}
-      {job.lastError && job.status !== "verified" && <p style={{ fontSize: 12, marginTop: 6, color: "#fca5a5" }}>{job.lastError}</p>}
+      {job.lastError && job.status !== "verified" && <p style={{ fontSize: 12, marginTop: 6, color: "#fca5a5" }}>{job.lastError}{job.status === "failed" && job.retryAt ? ` · trying again by itself at ${new Date(job.retryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</p>}
+      <div className="nxa-row nxa-wrap" style={{ marginTop: 8, fontSize: 12 }}>
+        <button className={`nxa-switch ${job.keepSynced ? "on" : ""}`} role="switch" aria-checked={!!job.keepSynced} aria-label="Keep this folder backed up"
+          onClick={() => onAction(job, job.keepSynced ? "sync-off" : "sync-on")} />
+        <span className="nxa-dim">{job.keepSynced
+          ? <>Kept backed up: new files in this folder go to Drive every day{job.nextSyncAt ? ` (next ${new Date(job.nextSyncAt).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })})` : ""}</>
+          : "Back up once"}</span>
+        {["verified", "kept", "done"].includes(job.status) && <button className="nxa-link" onClick={() => onAction(job, "sync-now")}>Check for new files now</button>}
+      </div>
+    </div>
+  );
+}
+
+// ── Connecting accounts ──────────────────────────────────────────────────
+function returnedFromGoogle() {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    const out = { ok: q.get("drive_connected"), error: q.get("drive_error") };
+    if (out.ok || out.error) {
+      const u = new URL(window.location.href);
+      u.searchParams.delete("drive_connected"); u.searchParams.delete("drive_error");
+      window.history.replaceState(null, "", u.toString());
+    }
+    return out;
+  } catch { return {}; }
+}
+
+export function WebdavForm({ purpose, onDone }) {
+  const [f, setF] = useState({ url: "", user: "", pass: "", vendor: "nextcloud", label: "" });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const save = async (e) => {
+    e.preventDefault(); setBusy(true); setError("");
+    try { await api("/api/drives/connect/webdav", { method: "POST", body: { ...f, purpose } }); onDone(); }
+    catch (err) { setError(err.message); } finally { setBusy(false); }
+  };
+  return (
+    <form onSubmit={save} className="nxa-form" style={{ marginTop: 12 }}>
+      <div className="nxa-field"><label>Service</label>
+        <select className="nxa-input sm" value={f.vendor} onChange={set("vendor")}><option value="nextcloud">Nextcloud</option><option value="owncloud">ownCloud</option><option value="other">Other WebDAV (pCloud, Koofr, a NAS)</option></select></div>
+      <div className="nxa-field wide"><label>WebDAV address <i>(Nextcloud: Files &gt; Settings &gt; WebDAV)</i></label><input className="nxa-input sm" value={f.url} onChange={set("url")} placeholder="https://cloud.example.com/remote.php/dav/files/you/" /></div>
+      <div className="nxa-field"><label>User name</label><input className="nxa-input sm" value={f.user} onChange={set("user")} autoComplete="off" /></div>
+      <div className="nxa-field"><label>Password <i>(an app password if the service offers one)</i></label><input className="nxa-input sm" type="password" value={f.pass} onChange={set("pass")} autoComplete="new-password" /></div>
+      <div className="nxa-field"><label>Name it</label><input className="nxa-input sm" value={f.label} onChange={set("label")} placeholder="My Nextcloud" /></div>
+      <div className="nxa-row wide"><button className="nxa-btn primary" disabled={busy || !f.url}>{busy ? <Icon name="spinner" /> : <Icon name="link" />} Connect</button>{error && <span style={{ color: "#fca5a5", fontSize: 13 }}>{error}</span>}</div>
+    </form>
+  );
+}
+
+function ConnectCard({ onChanged }) {
+  const [info, setInfo] = useState(null);
+  const [app, setApp] = useState({ clientId: "", clientSecret: "" });
+  const [msg, setMsg] = useState(() => returnedFromGoogle());
+  const [busy, setBusy] = useState("");
+  const [webdav, setWebdav] = useState(false);
+  const [setup, setSetup] = useState(false);
+  const load = useCallback(() => api("/api/admin/drives/connections").then(setInfo).catch((e) => setMsg({ error: e.message })), []);
+  useEffect(() => { load(); }, [load]);
+  const google = async (replace) => {
+    setBusy(replace ?? "new");
+    try { const r = await api("/api/drives/connect/google", { method: "POST", body: { purpose: "host", replace } }); window.location.href = r.url; }
+    catch (e) { setMsg({ error: e.message }); setBusy(""); }
+  };
+  const saveApp = async (e) => {
+    e.preventDefault(); setBusy("app");
+    try { await api("/api/admin/drives/google-app", { method: "PUT", body: app }); setSetup(false); setMsg({ ok: "Google app saved. You can connect accounts now." }); load(); }
+    catch (err) { setMsg({ error: err.message }); } finally { setBusy(""); }
+  };
+  const disconnect = async (a) => {
+    if (!window.confirm(`Disconnect ${a.label}? Nothing on the drive is deleted; you can connect it again later.`)) return;
+    try { await api(`/api/admin/drives/connections/${encodeURIComponent(a.name)}`, { method: "DELETE" }); load(); onChanged(); } catch (e) { setMsg({ error: e.message }); }
+  };
+  if (!info) return null;
+  const shared = info.accounts.filter((a) => a.sharedClient);
+  return (
+    <div className="nxa-card">
+      <div className="nxa-card-head"><div><h3>Connected accounts</h3>
+        <p className="nxa-sub">Add Google Drive accounts with a normal Google sign-in, or any WebDAV drive. Members can connect their own drives under My Drives once the Google app below is set up{info.personalCount ? ` (${info.personalCount} connected so far)` : ""}.</p></div>
+        <div className="nxa-row nxa-wrap">
+          <button className="nxa-btn primary" disabled={!info.google || !!busy} onClick={() => google(null)}>{busy === "new" ? <Icon name="spinner" /> : <Icon name="plus" />} Connect a Google account</button>
+          <button className="nxa-btn" onClick={() => setWebdav((v) => !v)}><Icon name="link" /> WebDAV / Nextcloud</button>
+        </div>
+      </div>
+      {msg?.ok && <Note kind="ok">Connected: {msg.ok}</Note>}
+      {msg?.error && <Note kind="bad">{msg.error}</Note>}
+      {webdav && <WebdavForm purpose="host" onDone={() => { setWebdav(false); load(); onChanged(); setMsg({ ok: "WebDAV drive" }); }} />}
+      {(!info.google || setup) ? (
+        <div style={{ marginTop: 12 }}>
+          <Note kind="warn">{info.google ? "Replacing the Google app." : "One-time setup: Google needs an app of yours before anyone can connect a Drive from SaveState. It takes about five minutes and is free."}</Note>
+          <ol className="nxa-steps" style={{ marginTop: 12, paddingLeft: 0, listStyle: "none" }}>
+            <li className="nxa-step"><div><b>Create a project</b><p>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener noreferrer">Google Cloud: new project <Icon name="ext" size={11} /></a>, name it "SaveState" and create it.</p></div></li>
+            <li className="nxa-step"><div><b>Turn on the Drive API</b><p><a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer">Google Drive API <Icon name="ext" size={11} /></a> &gt; Enable.</p></div></li>
+            <li className="nxa-step"><div><b>Consent screen</b><p><a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noopener noreferrer">Google Auth Platform <Icon name="ext" size={11} /></a>: app name SaveState, audience <b>External</b>, your email as contact. Under Data access add the scope <span className="nxa-code">.../auth/drive</span>. Then <b>Publish app</b> (in "Testing" mode Google signs everyone out after 7 days).</p></div></li>
+            <li className="nxa-step"><div><b>Create the client</b><p>Clients &gt; Create client &gt; <b>Web application</b>. Under Authorised redirect URIs add exactly:
+              <span className="nxa-row" style={{ marginTop: 6 }}><span className="nxa-code">{info.redirectUri}</span><button type="button" className="nxa-btn sm" onClick={() => navigator.clipboard?.writeText(info.redirectUri)}><Icon name="copy" size={12} /> Copy</button></span></p></div></li>
+            <li className="nxa-step"><div><b>Paste the ID and secret here</b>
+              <form onSubmit={saveApp} className="nxa-form" style={{ marginTop: 8 }}>
+                <div className="nxa-field"><label>Client ID</label><input className="nxa-input sm" value={app.clientId} onChange={(e) => setApp({ ...app, clientId: e.target.value })} placeholder="1234-abc.apps.googleusercontent.com" /></div>
+                <div className="nxa-field"><label>Client secret</label><input className="nxa-input sm" type="password" value={app.clientSecret} onChange={(e) => setApp({ ...app, clientSecret: e.target.value })} autoComplete="off" /></div>
+                <div className="nxa-row wide"><button className="nxa-btn primary" disabled={busy === "app"}>{busy === "app" ? <Icon name="spinner" /> : <Icon name="check" />} Save Google app</button></div>
+              </form></div></li>
+          </ol>
+          <p className="nxa-faint" style={{ fontSize: 12 }}>Google shows an "unverified app" notice to people who connect until Google reviews the app; they choose Advanced &gt; Continue. Up to 100 accounts can connect before a review is needed.</p>
+        </div>
+      ) : <button className="nxa-link" style={{ marginTop: 6 }} onClick={() => setSetup(true)}>Change the Google app</button>}
+      {shared.length > 0 && info.google && (
+        <Note kind="warn">{shared.map((a) => a.label).join(" and ")} still sign{shared.length === 1 ? "s" : ""} in through rclone's shared Google app, which is being retired.{" "}
+          {shared.map((a) => <button key={a.name} className="nxa-link" disabled={!!busy} onClick={() => google(a.name)}>Reconnect {a.label}</button>)} (sign in with the same account; nothing changes on the drive).</Note>
+      )}
+      <table className="nxa-table" style={{ marginTop: 10 }}><tbody>
+        {info.accounts.map((a) => (
+          <tr key={a.name}>
+            <td><b>{a.label}</b> <span className="nxa-faint" style={{ fontSize: 12 }}>{a.type === "webdav" ? "WebDAV" : "Google Drive"}</span>{!a.ok && <span className="nxa-pill bad" style={{ marginLeft: 6 }}>Can't reach it</span>}</td>
+            <td className="nxa-faint" style={{ fontSize: 12 }}>{a.free != null ? `${gb(a.free)} free of ${gb(a.total)}` : ""}</td>
+            <td style={{ textAlign: "right" }}>{a.type === "drive" && info.google && <button className="nxa-btn sm" onClick={() => google(a.name)}>Reconnect</button>} <button className="nxa-btn sm" onClick={() => disconnect(a)}>Disconnect</button></td>
+          </tr>
+        ))}
+      </tbody></table>
     </div>
   );
 }
@@ -203,6 +321,7 @@ export function DrivesPage() {
   const [jobs, setJobs] = useState([]);
   const [gameMode, setGameMode] = useState(false);
   const [speedLimit, setSpeedLimit] = useState(null);
+  const [protectedSum, setProtectedSum] = useState(null);
   const [transfers, setTransfers] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [msg, setMsg] = useState("");
@@ -222,7 +341,7 @@ export function DrivesPage() {
   }, []);
   const loadJobs = useCallback(async () => {
     const [j, t, sg] = await Promise.all([api("/api/admin/offload").catch(() => null), api("/api/admin/drives/transfers").catch(() => null), api("/api/admin/offload/suggestions").catch(() => null)]);
-    if (j) { setJobs(j.jobs); setGameMode(j.gameMode); setSpeedLimit(j.speedLimit); }
+    if (j) { setJobs(j.jobs); setGameMode(j.gameMode); setSpeedLimit(j.speedLimit); setProtectedSum({ files: j.protectedFiles, bytes: j.protectedBytes }); }
     if (t) setTransfers(t.transfers);
     if (sg) setSuggestions(sg.suggestions);
   }, []);
@@ -268,6 +387,7 @@ export function DrivesPage() {
           </div>
         ))}
       </div>
+      <ConnectCard onChanged={loadInfo} />
       {small.length > 0 && <Note kind="warn">{small.map((a) => a.email ?? a.name).join(", ")} has Google's free 15 GB, not a 5 TB plan, so big uploads go to the larger account. If it should have more space, check its plan at one.google.com.</Note>}
       {gameMode && <Note>A game is running on this PC, so new uploads wait until it closes.</Note>}
       {msg && <Note kind="ok">{msg}</Note>}
@@ -321,7 +441,11 @@ export function DrivesPage() {
 
       {jobs.length > 0 && (
         <div style={{ display: "grid", gap: 12 }}>
-          <h3 style={{ fontSize: 16, fontWeight: 800 }}>Uploads</h3>
+          <div className="nxa-row nxa-wrap" style={{ justifyContent: "space-between" }}>
+            <h3 style={{ fontSize: 16, fontWeight: 800 }}>Uploads</h3>
+            {protectedSum?.files > 0 && <span className="nxa-pill ok"><Icon name="shield" size={12} /> {protectedSum.files.toLocaleString()} files ({gb(protectedSum.bytes)}) confirmed safe on Drive</span>}
+          </div>
+          <p className="nxa-faint" style={{ fontSize: 12, marginTop: -6 }}>Uploads remember where they are: pausing, closing the app, a restart or a power cut only means they carry on from the last finished file. A stuck upload is restarted, and a failed one tries again by itself.</p>
           {speedLimit && <p className="nxa-faint" style={{ fontSize: 12, marginTop: -6 }}>
             {speedLimit === "off" ? "Uploading at full speed (overnight)." : `Upload speed is capped at ${speedLimit}B/s right now so streaming and the site stay quick${gameMode ? " while you game" : "; it runs at full speed from 01:00 to 07:00"}.`}
           </p>}

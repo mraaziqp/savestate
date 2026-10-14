@@ -122,7 +122,8 @@ const before = shell;
     `NxWelcome=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Welcome}))),` +
     `NxGate=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.TabGate}))),` +
     `NxSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.EmulationTab}))),` +
-    `NxDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DrivesPage})));` +
+    `NxDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DrivesPage}))),` +
+    `NxMyDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MyDrives})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
@@ -161,6 +162,14 @@ shell = patch(shell, "cloud is admin-only in the menu", `brain:"manage_system",c
 shell = patch(shell, "cloud drives label", `{id:"cloud",icon:Xa,label:"Cloud Drives"`, `{id:"cloud",icon:Xa,label:"Cloud"`, `{id:"cloud",icon:Xa,label:"Cloud Drives"`);
 
 shell = patch(shell, "cloud drives title", `ql={cloud:"Cloud Drives",myfiles:"Files",`, `ql={myfiles:"Files",`, `ql={cloud:"Cloud Drives",myfiles:"Files",`);
+
+// My Drives: every member can connect and manage their own cloud drives, at
+// the top of what was "My Storage".
+shell = patch(shell, "my drives", `x==="files"&&(0,e.jsxs)("div",{className:"space-y-8",children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxMyDrives,{})}),(0,e.jsx)(ul,{}),`,
+  `x==="files"&&(0,e.jsxs)("div",{className:"space-y-8",children:[(0,e.jsx)(ul,{}),`,
+  `x==="files"&&(0,e.jsxs)("div",{className:"space-y-8",children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxMyDrives,{})}),(0,e.jsx)(ul,{}),`);
+shell = patch(shell, "my drives label", `{id:"files",icon:Bt,label:"My Drives"`, `{id:"files",icon:Bt,label:"My Storage"`, `{id:"files",icon:Bt,label:"My Drives"`);
+shell = patch(shell, "my drives title", `files:"My Drives",`, `files:"My Files",`, `files:"My Drives",`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"]`,
@@ -251,6 +260,26 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   const text = readFileSync(file, "utf8");
   const next = rebrand(text);
   if (next !== text) writeFileSync(file, next);
+}
+
+// 3d. The player forgot volume, mute and playback speed between videos and
+//     visits (speed was reset to 1x on every episode). They are kept now.
+{
+  const file = path.join(assets, find("MediaHub-"));
+  let hub = readFileSync(file, "utf8");
+  const before = hub;
+  const num = (key, dflt) => `(()=>{try{const v=parseFloat(localStorage.getItem("${key}"));return Number.isFinite(v)&&v>0?v:${dflt}}catch{return ${dflt}}})()`;
+  hub = patch(hub, "player remembers volume", `[Ke,qt]=(0,r.useState)(()=>${num("nexus_volume", 1)})`,
+    "[Ke,qt]=(0,r.useState)(1)", `[Ke,qt]=(0,r.useState)(()=>${num("nexus_volume", 1)})`);
+  hub = patch(hub, "player remembers mute", `[We,qe]=(0,r.useState)(()=>{try{return localStorage.getItem("nexus_muted")==="1"}catch{return!1}})`,
+    "[We,qe]=(0,r.useState)(!1)", `[We,qe]=(0,r.useState)(()=>{try{return localStorage.getItem("nexus_muted")==="1"}catch{return!1}})`);
+  hub = patch(hub, "player remembers speed", `[ge,ke]=(0,r.useState)(()=>${num("nexus_playback_rate", 1)})`,
+    "[ge,ke]=(0,r.useState)(1)", `[ge,ke]=(0,r.useState)(()=>${num("nexus_playback_rate", 1)})`);
+  hub = patch(hub, "speed kept between episodes", `Z(0),ke(${num("nexus_playback_rate", 1)}),`, "Z(0),ke(1),", `Z(0),ke(${num("nexus_playback_rate", 1)}),`);
+  hub = patch(hub, "player saves volume and speed", "nexus_playback_rate\",String(ge))",
+    "t&&(t.volume=Math.max(0,Math.min(1,Ke)),t.muted=We)},[Ke,We])",
+    't&&(t.volume=Math.max(0,Math.min(1,Ke)),t.muted=We);try{localStorage.setItem("nexus_volume",String(Ke));localStorage.setItem("nexus_muted",We?"1":"0");localStorage.setItem("nexus_playback_rate",String(ge))}catch{}},[Ke,We,ge])');
+  if (hub !== before) writeFileSync(file, hub);
 }
 
 // 4. index.html loads the boot script ahead of the app.

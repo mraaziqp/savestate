@@ -40,6 +40,20 @@
     } catch { /* offline: keep the last answer */ }
   }
 
+  // ── Harmless device refusals ────────────────────────────────────────────
+  // Phones and TVs that cannot lock screen rotation or keep the screen awake
+  // reject those calls; the player carries on fine without them, but each one
+  // surfaced as an unhandled error (100+ reports a month). Registered before
+  // the app's own reporter, so these stop here.
+  const BENIGN = /screen\.orientation\.lock|orientation\.lock\(\)|WakeLock|Wake Lock|exitFullscreen.*Document not active|ResizeObserver loop|The play\(\) request was interrupted/i;
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    if (BENIGN.test(String(r?.message ?? r ?? ""))) { e.preventDefault(); e.stopImmediatePropagation(); }
+  });
+  window.addEventListener("error", (e) => {
+    if (BENIGN.test(String(e.message ?? ""))) { e.preventDefault(); e.stopImmediatePropagation(); }
+  });
+
   // ── Session cookie ──────────────────────────────────────────────────────
   let mirrored = null;
   let lastSeen;

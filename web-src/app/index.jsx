@@ -11,3 +11,4 @@ export { PlansPage } from "./Plans.jsx";
 export { TabGate } from "./TabGate.jsx";
 export { SetupGuide as EmulationTab } from "./SetupGuide.jsx";
 export { DrivesPage } from "./Drives.jsx";
+export { MyDrives } from "./MyDrives.jsx";

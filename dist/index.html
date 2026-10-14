@@ -77,7 +77,8 @@
       #root { visibility: hidden; }
       #root.mounted { visibility: visible; }
 
-      @media screen and (min-width: 900px) and (hover: none), screen and (min-width: 1200px) {
+      /* TV overscan: only screens without a mouse (TVs, remotes). It used to apply to every display over 1200px wide, so desktop browsers got a black frame round the app. */
+      @media screen and (min-width: 900px) and (hover: none) {
         :root {
           --tv-pad-top: 14px;
           --tv-pad-bottom: 20px;
@@ -99,14 +100,14 @@
         border-radius: 4px;
       }
     </style>
-    <script type="module" crossorigin src="/assets/NexusBoot-r27.js"></script>
-    <script type="module" crossorigin src="/assets/index-CKnFRVZB-r27.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-CfSZB2vO-r27.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-icons-Btsoypng-r27.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-react-C_B4NnYc-r27.js">
-    <link rel="modulepreload" crossorigin href="/assets/vendor-motion-Cv7i68yK-r27.js">
-    <link rel="modulepreload" crossorigin href="/assets/proxy-BC7yw7QF-r27.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-1ZNanW1_-r27.css">
+    <script type="module" crossorigin src="/assets/NexusBoot-r31.js"></script>
+    <script type="module" crossorigin src="/assets/index-CKnFRVZB-r31.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/rolldown-runtime-CfSZB2vO-r31.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-icons-Btsoypng-r31.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-react-C_B4NnYc-r31.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-motion-Cv7i68yK-r31.js">
+    <link rel="modulepreload" crossorigin href="/assets/proxy-BC7yw7QF-r31.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-1ZNanW1_-r31.css">
   <link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
   <body>
     <div id="root"></div>

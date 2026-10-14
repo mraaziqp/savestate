@@ -27,6 +27,7 @@ import { createTiers } from "./server/tiers.ts";
 import { createGameMode } from "./server/game-mode.ts";
 import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
+import { createConnect } from "./server/connect.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -1615,7 +1616,40 @@ async function fetchAndSaveArt(gameId: string, title: string, platform: string):
     }
   }
 
+  // ── Last resort: closest title by words ───────────────────────────────────
+  // Library names rarely match No-Intro's exactly: "Call of Duty 2 Big Red One
+  // Collector's Edition" is "Call of Duty 2 - Big Red One (Europe)", "Cubivore"
+  // is "Cubivore - Survival of the Fittest (USA)". Scoring shared words finds
+  // the right cover for about three in four of the games the exact lookup
+  // missed (measured on this library, 2026-10-14). Disc numbers must agree.
+  const index = await getLibretroIndex(system, "Named_Boxarts");
+  if (index) {
+    const want = artWords(title);
+    const disc = /\bdisc\s*(\d)/i.exec(title)?.[1] ?? null;
+    let best: string | null = null, bestScore = 0;
+    for (const [normName, file] of index) {
+      const have = artWords(normName);
+      let shared = 0;
+      for (const w of want) if (have.has(w)) shared++;
+      let score = shared / Math.max(want.size, 1) - Math.max(0, have.size - shared) * 0.04;
+      const fileDisc = /\(disc (\d)\)/i.exec(file)?.[1] ?? null;
+      if (disc && fileDisc && disc !== fileDisc) score -= 0.5;
+      if (/\((usa|europe|world)/i.test(file)) score += 0.02;
+      if (/\((beta|proto|demo|sample|taikenban)/i.test(file)) score -= 0.05;
+      if (score > bestScore) { bestScore = score; best = file; }
+    }
+    if (best && bestScore >= 0.75) {
+      const found = await tryUrl(`https://thumbnails.libretro.com/${encodeURIComponent(system)}/Named_Boxarts/${encodeURIComponent(best)}`);
+      if (found) return found;
+    }
+  }
+
   return null;
+}
+
+const ART_STOP_WORDS = new Set(["the", "of", "a", "an", "and", "edition", "collector", "collectors", "s", "usa", "europe", "japan", "version", "vol", "volume", "disc", "hen", "v1", "01"]);
+function artWords(t: string): Set<string> {
+  return new Set(normaliseArtTitle(t.replace(/&/g, " and ")).split(" ").filter((w) => w && !ART_STOP_WORDS.has(w)));
 }
 
 /** Strip region/revision tags and punctuation so titles compare reliably. */
@@ -5487,7 +5521,8 @@ async function startServer() {
     "/api/auth/logout",         // clears the session cookie; must work with an expired token
     "/api/plans",               // pricing page; /api/plans/me and /request check the caller themselves
     "/api/payments/config",     // whether card payments are on, for the plans page
-    "/api/music/scan-progress",  // EventSource opens before the session cookie exists; counts only
+    "/api/music/scan-progress",
+    "/api/drives/oauth/callback", // Google sends the browser back here; checked by its signed state  // EventSource opens before the session cookie exists; counts only
     "/api/payments/payfast/notify", // PayFast's server calls this; checked by signature and with PayFast itself
     "/api/client/bootstrap-pack",
     "/api/client/android/",
@@ -5645,9 +5680,10 @@ async function startServer() {
   gameMode.register(app);
 
   // Google Drive accounts, local disks and upload-and-verify jobs (server/drives.ts).
-  createDrives({
+  const drives = createDrives({
     persistDir: PERSIST_DIR,
     log: (level, msg) => log(level, msg, "drives"),
+    callerOf: (req) => access.callerOf(req),
     gameModeActive: () => gameMode.active(),
     suggestions: async () => {
       const out: Array<{ label: string; source: string; kind: "roms" | "music"; dest: string }> = [];
@@ -5678,6 +5714,16 @@ async function startServer() {
       else void refreshMediaLibrary().catch(() => {});
       musicRootsCache = null;
     }, 120_000).unref?.(),
+  });
+  drives.register(app);
+
+  // Members and admins connect Google Drive / WebDAV accounts from the app (server/connect.ts).
+  createConnect({
+    persistDir: PERSIST_DIR, jwtSecret: JWT_SECRET,
+    publicUrl: () => (process.env.NEXUS_PUBLIC_URL ?? process.env.PUBLIC_BASE_URL ?? "https://savestate.co.za").trim().replace(/\/$/, ""),
+    rc: drives.rc, emailOf: drives.emailOf, callerOf: (req) => access.callerOf(req),
+    encrypt: encryptSecret, decrypt: decryptSecret,
+    log: (level, msg) => log(level, msg, "drives"),
   }).register(app);
 
   // Card / EFT payments for tiers (server/payfast.ts).
@@ -6341,6 +6387,8 @@ async function startServer() {
       const marked = games.map((g) => {
         const found = present.get(romBasename(g.relativePath ?? ""));
         const out = { ...g, syncStatus: found ? "synced" : "missing_media" };
+        // No stored art yet: the art route serves a generated cover and fetches the real one.
+        if (!String((out as any).boxArt ?? "").trim() && (out as any).id) (out as any).boxArt = `/api/art/${(out as any).id}`;
         // A bare "./Okami.iso" says nothing about its platform; the folder it
         // was found in (playstation2_essentials, PSP Games) does.
         if (found && (out.platform ?? "unknown") === "unknown") {
@@ -10146,7 +10194,11 @@ async function startServer() {
   // Sizes are MB per minute of runtime (the Arr apps' own unit): 1080p at
   // most 50 (an hour-long episode <= 3 GB, a two-hour film <= 6 GB), and they
   // lean towards 15 (~0.9 GB an hour), which is where good x265 encodes sit.
-  const ARR_POLICY_VERSION = 1;
+  const ARR_POLICY_VERSION = 2;
+  // Releases with fewer seeders than this are not grabbed. At the default of
+  // 1, Sonarr and Radarr happily picked a release one stranger was seeding,
+  // and the download sat at a few percent for days.
+  const ARR_MIN_SEEDERS = Number(process.env.NEXUS_MIN_SEEDERS ?? 5);
   const ARR_POLICY_FILE = path.join(PERSIST_DIR, "arr-policy.json");
   const ARR_POLICY_FORMATS: Array<{ name: string; score: number; regex: string }> = [
     // Subtitles burned into the picture cannot be turned off or changed.
@@ -10235,6 +10287,17 @@ async function startServer() {
       profilesChanged++;
     }
     done.push(`${profilesChanged} profiles`);
+
+    // 4. Torrent indexers: a minimum number of seeders.
+    let seeded = 0;
+    for (const ix of await call("GET", "/indexer") as any[]) {
+      if (ix.protocol !== "torrent") continue;
+      const field = (ix.fields ?? []).find((x: any) => x.name === "minimumSeeders");
+      if (!field || Number(field.value) >= ARR_MIN_SEEDERS) continue;
+      field.value = ARR_MIN_SEEDERS;
+      await call("PUT", `/indexer/${ix.id}?forceSave=true`, ix).then(() => seeded++).catch((e) => log("WARN", `${name} indexer ${ix.name}: ${e.message}`, "arr"));
+    }
+    done.push(`min ${ARR_MIN_SEEDERS} seeders on ${seeded} indexer(s)`);
     log("INFO", `Release policy v${ARR_POLICY_VERSION} applied to ${name}: ${done.join(", ")}`, "arr");
     return done;
   }
@@ -10256,6 +10319,25 @@ async function startServer() {
         log("WARN", `Release policy not applied to ${name}: ${e?.message ?? e}`, "arr");
       }
     }
+    // Prowlarr pushes its indexers into the apps, with its own "minimum
+    // seeders" from each app profile; without this a sync would undo step 4.
+    try {
+      const xml = await readFile(path.join(process.env.ProgramData ?? "C:\\ProgramData", "Prowlarr", "config.xml"), "utf8").catch(() => "");
+      const key = /<ApiKey>([^<]+)/.exec(xml)?.[1];
+      const port = /<Port>(\d+)/.exec(xml)?.[1] ?? "9696";
+      if (key && (force || state["prowlarr"] !== ARR_POLICY_VERSION)) {
+        const base = `http://localhost:${port}/api/v1`;
+        const hdr = { "X-Api-Key": key, "Content-Type": "application/json" };
+        let changed = 0;
+        for (const p of await fetch(`${base}/appprofile`, { headers: hdr, signal: AbortSignal.timeout(10_000) }).then((r) => r.json()) as any[]) {
+          if (Number(p.minimumSeeders) >= ARR_MIN_SEEDERS) continue;
+          await fetch(`${base}/appprofile/${p.id}`, { method: "PUT", headers: hdr, body: JSON.stringify({ ...p, minimumSeeders: ARR_MIN_SEEDERS }), signal: AbortSignal.timeout(10_000) });
+          changed++;
+        }
+        out.prowlarr = `min ${ARR_MIN_SEEDERS} seeders on ${changed} app profile(s)`;
+        state["prowlarr"] = ARR_POLICY_VERSION;
+      }
+    } catch (e: any) { out.prowlarr = { error: e?.message ?? String(e) }; }
     await writeFile(ARR_POLICY_FILE, JSON.stringify(state, null, 2)).catch(() => {});
     return out;
   }
@@ -10435,6 +10517,26 @@ async function startServer() {
     return res.json({ ok: true, radarrConnected, sonarrConnected, radarrUrl: next.radarrUrl, sonarrUrl: next.sonarrUrl });
   });
 
+  // Lookups go to Sonarr/Radarr's metadata service and take 1-3 s each; the
+  // same title is typically searched several times while someone types and
+  // browses, so answers are kept for ten minutes and shared while in flight.
+  const arrSearchCache = new Map<string, { at: number; body: Promise<any> }>();
+  app.get('/api/arr/search', async (req, res, next) => {
+    const key = `${String(req.query.type ?? 'movie')}|${String(req.query.q ?? '').trim().toLowerCase()}`;
+    const hit = arrSearchCache.get(key);
+    if (hit && Date.now() - hit.at < 10 * 60_000) {
+      const body = await hit.body.catch(() => null);
+      if (body) return res.json(body);
+    }
+    const sendJson = res.json.bind(res);
+    let resolveBody!: (v: any) => void;
+    const body = new Promise<any>((r) => { resolveBody = r; });
+    arrSearchCache.set(key, { at: Date.now(), body });
+    if (arrSearchCache.size > 300) arrSearchCache.delete(arrSearchCache.keys().next().value!);
+    res.json = ((b: any) => { if (res.statusCode === 200) resolveBody(b); else { arrSearchCache.delete(key); resolveBody(null); } return sendJson(b); }) as typeof res.json;
+    res.on('close', () => resolveBody(null));
+    next();
+  });
   app.get('/api/arr/search', async (req, res) => {
     const cfg = await loadArrConfig();
     if (!cfg) return res.status(404).json({ error: 'Not configured' });
@@ -13387,10 +13489,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     const torrents = await fetch(`${qbt.host}/api/v2/torrents/info`, {
       headers: { Cookie: qbt.cookie }, signal: AbortSignal.timeout(15_000),
-    }).then((r) => r.json() as Promise<{ hash: string; name: string; state: string; progress: number }[]>)
-      .catch(() => [] as { hash: string; name: string; state: string; progress: number }[]);
+    }).then((r) => r.json() as Promise<{ hash: string; name: string; state: string; progress: number; eta: number; dlspeed: number; added_on: number; num_seeds: number }[]>)
+      .catch(() => [] as { hash: string; name: string; state: string; progress: number; eta: number; dlspeed: number; added_on: number; num_seeds: number }[]);
 
-    const stalled = torrents.filter((t) => ["stalledDL", "error", "missingFiles", "metaDL"].includes(t.state));
+    // Also a download that is technically moving but would take days: one
+    // seeder at a few KB/s. After six hours it goes through the same steps,
+    // ending with the release blocklisted and a better-seeded one searched.
+    const crawling = (t: { state: string; progress: number; eta: number; dlspeed: number; added_on: number }) =>
+      (t.state === "downloading" || t.state === "forcedDL") && t.progress < 0.9 && Date.now() / 1000 - t.added_on > 6 * 3600
+      && (t.eta > 3 * 86400 || t.dlspeed < 20 * 1024);
+    const stalled = torrents.filter((t) => ["stalledDL", "error", "missingFiles", "metaDL"].includes(t.state) || crawling(t));
 
     // Forget entries that recovered, so a torrent that stalls again next month
     // starts from strike 1 rather than jumping straight to blocklisting.
@@ -19547,6 +19655,42 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return job;
   }
 
+  const artMetaCache = new Map<string, { title: string; platform: string }>();
+  const COVER_COLOURS: Record<string, [string, string, string]> = {
+    ps2: ["#0b1d4d", "#003791", "PlayStation 2"], ps1: ["#1b1f3b", "#003087", "PlayStation"], psp: ["#101a33", "#00439c", "PSP"],
+    ps3: ["#141414", "#3a3a3a", "PlayStation 3"], gamecube: ["#2a0d4d", "#6a0dad", "GameCube"], wii: ["#20262e", "#6b7c8f", "Wii"],
+    switch: ["#3a0b0b", "#e60012", "Nintendo Switch"], gba: ["#2b1a40", "#5b3f99", "Game Boy Advance"], nds: ["#202020", "#5a5a5a", "Nintendo DS"],
+    "3ds": ["#3a0b12", "#ce1126", "Nintendo 3DS"], snes: ["#2b2440", "#6b5fa8", "Super Nintendo"], nes: ["#3a0b0b", "#b3001b", "NES"],
+    n64: ["#0b2b1a", "#00843d", "Nintendo 64"], genesis: ["#0b1a3a", "#1a6b9b", "Mega Drive"], dreamcast: ["#3a1a0b", "#f05e23", "Dreamcast"],
+    neogeo: ["#3a300b", "#c9a400", "Neo Geo"], mame: ["#3a240b", "#f4a136", "Arcade"], xbox: ["#0b2b0b", "#107c10", "Xbox"],
+  };
+  function generatedCover(title: string, platform: string): string {
+    const [c1, c2, label] = COVER_COLOURS[(platform ?? "").toLowerCase()] ?? ["#121a2c", "#2f3f66", (platform || "Game").toUpperCase()];
+    const clean = String(title || "Unknown game").replace(/\s*\((?:usa|europe|japan|world|en|rev[^)]*)\)/gi, "").trim();
+    // Wrap to at most 5 lines of ~14 characters.
+    const lines: string[] = [];
+    for (const word of clean.split(/\s+/)) {
+      const last = lines[lines.length - 1];
+      if (last && (last + " " + word).length <= 14) lines[lines.length - 1] = last + " " + word;
+      else lines.push(word);
+    }
+    const shown = lines.slice(0, 5);
+    if (lines.length > 5) shown[4] = shown[4].replace(/.{0,2}$/, "…");
+    const esc = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const size = shown.some((l) => l.length > 11) ? 52 : 60;
+    const top = 400 - ((shown.length - 1) * size * 1.15) / 2;
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="${c2}"/><stop offset="100%" stop-color="${c1}"/></linearGradient>
+  <radialGradient id="r" cx="30%" cy="20%" r="80%"><stop offset="0%" stop-color="#ffffff" stop-opacity="0.18"/><stop offset="100%" stop-color="#ffffff" stop-opacity="0"/></radialGradient></defs>
+  <rect width="600" height="800" fill="url(#g)"/><rect width="600" height="800" fill="url(#r)"/>
+  <rect x="0" y="0" width="600" height="92" fill="#000" fill-opacity="0.35"/>
+  <text x="40" y="60" fill="#fff" fill-opacity="0.9" font-family="Segoe UI, Arial, sans-serif" font-size="30" font-weight="800" letter-spacing="2">${esc(label.toUpperCase())}</text>
+  ${shown.map((l, i) => `<text x="300" y="${Math.round(top + i * size * 1.15)}" text-anchor="middle" fill="#fff" font-family="Segoe UI, Arial, sans-serif" font-size="${size}" font-weight="900">${esc(l)}</text>`).join("\n  ")}
+  <rect x="40" y="720" width="120" height="6" rx="3" fill="#fff" fill-opacity="0.5"/>
+</svg>`;
+  }
+
   app.get("/api/art/:gameId", async (req, res) => {
     const id = req.params.gameId.replace(/[^a-zA-Z0-9_-]/g, "");
     await ensureArtDir();
@@ -19597,19 +19741,22 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         finally { artFetchInProgress.delete(id); }
       });
     }
-    const fallbackSvg = `<?xml version="1.0" encoding="UTF-8"?>
-  <svg xmlns="http://www.w3.org/2000/svg" width="600" height="800" viewBox="0 0 600 800">
-    <defs>
-      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#121a2c"/>
-        <stop offset="100%" stop-color="#0a0f1a"/>
-      </linearGradient>
-    </defs>
-    <rect width="600" height="800" rx="28" fill="url(#bg)"/>
-    <rect x="36" y="36" width="528" height="728" rx="22" fill="none" stroke="#2f3f66" stroke-opacity="0.55"/>
-    <text x="50%" y="48%" text-anchor="middle" fill="#7d93c8" font-family="Segoe UI, Arial, sans-serif" font-size="34" font-weight="700">No Box Art</text>
-    <text x="50%" y="54%" text-anchor="middle" fill="#5d709d" font-family="Segoe UI, Arial, sans-serif" font-size="18">ID: ${id}</text>
-  </svg>`;
+    // Until real art is found: a cover made from the title and the console's
+    // colours, so a shelf never shows "No Box Art" and a long ID.
+    const meta = artMetaCache.get(id) ?? await (async () => {
+      let m = { title: "", platform: "" };
+      if (dbConnected && pool) {
+        const r = await pool.query("SELECT title, platform FROM games WHERE id=$1", [id]).catch(() => null);
+        if (r?.rows[0]) m = { title: r.rows[0].title, platform: r.rows[0].platform };
+      } else {
+        const g = mem.games.find((g) => g.id === id);
+        if (g) m = { title: g.title, platform: g.platform };
+      }
+      artMetaCache.set(id, m);
+      if (artMetaCache.size > 5000) artMetaCache.clear();
+      return m;
+    })();
+    const fallbackSvg = generatedCover(meta.title, meta.platform);
     res.status(200);
     res.setHeader("Content-Type", "image/svg+xml; charset=utf-8");
     // Short cache — browser will retry and get real art after background fetch completes

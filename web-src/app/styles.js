@@ -156,7 +156,9 @@ select.nxa-input option{background:#15172a;color:#f4f5fb}
 .nxa-step{counter-increment:nxa;display:flex;gap:14px;align-items:flex-start}
 .nxa-step::before{content:counter(nxa);flex:none;width:28px;height:28px;border-radius:99px;display:grid;place-items:center;font-weight:900;font-size:13px;
   background:linear-gradient(135deg,var(--acc),var(--acc2));color:#03121a}
-.nxa-step b{display:block}
+.nxa-step>div>b{display:block}
+/* The app's base CSS makes every svg a block; icons inside text stay inline. */
+.nxa p svg,.nxa a svg,.nxa span svg,.nxa li svg{display:inline-block;vertical-align:-2px}
 .nxa-step p{font-size:13px;color:var(--dim);margin-top:2px}
 .nxa-sys{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
 .nxa-sys button{display:flex;flex-direction:column;gap:3px;align-items:flex-start;padding:11px 13px;border-radius:13px;border:1px solid var(--line);background:rgba(255,255,255,.03);text-align:left}

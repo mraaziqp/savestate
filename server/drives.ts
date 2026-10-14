@@ -22,7 +22,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync, createWriteStream } from "node:fs";
-import { readFile, writeFile, stat, unlink, readdir, rmdir, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, stat, unlink, readdir, rmdir, mkdir, rm, rename, copyFile } from "node:fs/promises";
 
 export type DrivesDeps = {
   persistDir: string;
@@ -31,6 +31,8 @@ export type DrivesDeps = {
   onUploaded?: (kind: OffloadKind) => void;
   /** No new jobs start while a game is running on the host. */
   gameModeActive?: () => boolean;
+  /** Who is calling (members' own drives are checked against it). */
+  callerOf?: (req: express.Request) => Promise<{ userId: string | null; admin: boolean }>;
   /** Folders on this PC worth moving to Drive (ROM and music folders), with where each should go. */
   suggestions?: () => Promise<Array<{ label: string; source: string; kind: OffloadKind; dest: string }>>;
 };
@@ -45,12 +47,21 @@ type OffloadJob = {
   lastError: string | null;
   verify: null | { at: number; matched: number; missing: number; differ: number; errors: number; matchedBytes: number; problems: string[] };
   deleted: null | { at: number; files: number; bytes: number; skipped: number };
+  /** Re-run every day so files added to the folder later get backed up too (copy only, never deletes). */
+  keepSynced?: boolean;
+  nextSyncAt?: number | null;
+  attempts?: number;
+  retryAt?: number | null;
+  lastProgressAt?: number | null;
 };
 
 const EXCLUDES = ["desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**", "*.partial", "*.!qB", "*.crdownload", "*.tmp"];
 const excludeArgs = () => EXCLUDES.flatMap((e) => ["--exclude", e]);
 const LOCAL_DRIVES = "CDEFGH".split("").map((d) => `${d}:`);
 const isLocalFs = (fs_: string) => /^[A-Za-z]:$/.test(fs_);
+/** A member's own connected drive: "u_<user id without dashes>_<n>". */
+export const isPersonalRemote = (name: string) => /^u_[0-9a-f]{32}_\d+$/.test(name);
+export const ownerOfRemote = (name: string) => (isPersonalRemote(name) ? name.split("_")[1] : null);
 const fsSpec = (fs_: string) => (isLocalFs(fs_) ? `${fs_}/` : `${fs_}:`);
 const joinRemote = (...parts: string[]) => parts.map((p) => String(p ?? "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")).filter(Boolean).join("/");
 // Paths come from the page; nothing may climb out of the root it names.
@@ -146,7 +157,7 @@ export function createDrives(deps: DrivesDeps) {
   async function accounts() {
     const { remotes = [] } = await rc<{ remotes: string[] }>("config/listremotes");
     const types = await rc<Record<string, any>>("config/dump").catch(() => ({}));
-    const drives = remotes.filter((r) => (types[r]?.type ?? "drive") === "drive");
+    const drives = remotes.filter((r) => !isPersonalRemote(r) && ["drive", "webdav", "onedrive", "dropbox"].includes(types[r]?.type ?? "drive"));
     return Promise.all(drives.map(async (name) => {
       const [about, email] = await Promise.all([rc("operations/about", { fs: `${name}:` }, 30_000).catch(() => null), emailOf(name)]);
       return { name, email, total: about?.total ?? null, used: about?.used ?? null, free: about?.free ?? null, trashed: about?.trashed ?? null };
@@ -154,24 +165,61 @@ export function createDrives(deps: DrivesDeps) {
   }
 
   // ── Jobs: persistence ─────────────────────────────────────────────────
+  // Written to a temp file and renamed into place, with the previous copy kept
+  // as .bak: a crash or power cut mid-write must not lose the record of which
+  // uploads are finished and verified.
+  let writing: Promise<void> = Promise.resolve();
+  const saveNow = () => (writing = writing.then(async () => {
+    const tmp = `${jobsFile}.tmp`;
+    await writeFile(tmp, JSON.stringify(jobs, null, 1));
+    if (existsSync(jobsFile)) await copyFile(jobsFile, `${jobsFile}.bak`).catch(() => {});
+    await rename(tmp, jobsFile);
+  }).catch((e) => deps.log("WARN", `Could not save the upload list: ${e?.message ?? e}`)));
   const save = () => {
     if (saveTimer) return;
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      writeFile(jobsFile, JSON.stringify(jobs, null, 1)).catch(() => {});
-    }, 1000);
+    saveTimer = setTimeout(() => { saveTimer = null; void saveNow(); }, 1000);
   };
-  const saveNow = () => writeFile(jobsFile, JSON.stringify(jobs, null, 1)).catch(() => {});
   const newStats = (): OffloadJob["stats"] => ({ bytes: 0, totalBytes: 0, transfers: 0, totalTransfers: 0, checks: 0, totalChecks: 0, errors: 0, speed: 0, eta: null, current: [] });
 
   // ── Jobs: running ─────────────────────────────────────────────────────
   // One upload at a time: they share the host's uplink, and one at full
   // speed finishes everything sooner than several fighting.
   function pump() {
+    const now = Date.now();
+    // Failed uploads try again by themselves: 5 min, 15 min, 1 h, then every 6 h.
+    for (const j of jobs) {
+      if (j.status === "failed" && j.retryAt && now >= j.retryAt) { j.status = "queued"; j.retryAt = null; save(); }
+      // Kept-up-to-date folders are copied again once a day for anything new.
+      if (j.keepSynced && j.nextSyncAt && now >= j.nextSyncAt && ["verified", "kept", "done"].includes(j.status) && existsSync(j.source)) {
+        j.status = "queued"; j.nextSyncAt = null; j.stats = newStats(); save();
+      }
+    }
+    // A copy that has moved no data for 30 minutes is stuck (a hung
+    // connection, a sleeping disk); restart it, and rclone skips what is done.
+    for (const j of jobs) {
+      if (j.status !== "copying") continue;
+      const proc = running.get(j.id);
+      if (proc && j.lastProgressAt && now - j.lastProgressAt > 30 * 60_000) {
+        deps.log("WARN", `Upload ${j.id} made no progress for 30 minutes; restarting it`);
+        j.lastError = "Stalled; restarted automatically";
+        j.status = "queued";
+        restarting.add(j.id);
+        proc.kill();
+      }
+    }
     if ([...jobs].some((j) => j.status === "copying" || j.status === "verifying" || j.status === "deleting")) return;
     if (deps.gameModeActive?.()) return;
     const next = jobs.find((j) => j.status === "queued");
     if (next) void runCopy(next);
+  }
+  const restarting = new Set<string>();
+  const RETRY_DELAYS = [5, 15, 60, 360].map((m) => m * 60_000);
+  function failed(job: OffloadJob, why: string) {
+    job.status = "failed";
+    job.lastError = why;
+    job.attempts = (job.attempts ?? 0) + 1;
+    job.retryAt = Date.now() + RETRY_DELAYS[Math.min(job.attempts - 1, RETRY_DELAYS.length - 1)];
+    deps.log("WARN", `Upload ${job.id} failed (attempt ${job.attempts}): ${why}; retrying ${new Date(job.retryAt).toLocaleTimeString()}`);
   }
   const pumpTimer = setInterval(pump, 15_000);
   pumpTimer.unref?.();
@@ -209,6 +257,7 @@ export function createDrives(deps: DrivesDeps) {
     try { entry = JSON.parse(line); } catch { return; }
     const s = entry?.stats;
     if (s) {
+      if ((Number(s.bytes) || 0) !== job.stats.bytes || (Number(s.checks) || 0) !== job.stats.checks) job.lastProgressAt = Date.now();
       job.stats = {
         bytes: Number(s.bytes) || 0, totalBytes: Number(s.totalBytes) || 0,
         transfers: Number(s.transfers) || 0, totalTransfers: Number(s.totalTransfers) || 0,
@@ -226,10 +275,11 @@ export function createDrives(deps: DrivesDeps) {
   async function runCopy(job: OffloadJob) {
     const bin = await findRclone();
     if (!bin) { job.status = "failed"; job.lastError = "rclone is not installed on the host"; return saveNow(); }
-    if (!existsSync(job.source)) { job.status = "failed"; job.lastError = `The folder ${job.source} is not there any more`; return saveNow(); }
+    if (!existsSync(job.source)) { failed(job, `The folder ${job.source} is not reachable (disk asleep or unplugged?)`); return saveNow(); }
     job.status = "copying";
     job.startedAt ??= Date.now();
-    job.lastError = null;
+    job.lastProgressAt = Date.now();
+    if (job.lastError !== "Stalled; restarted automatically") job.lastError = null;
     saveNow();
     deps.log("INFO", `Upload ${job.id}: ${job.source} -> ${job.remote}:${job.dest}`);
     const rcPort = 6100 + Math.floor(Math.random() * 800);
@@ -254,11 +304,10 @@ export function createDrives(deps: DrivesDeps) {
       running.delete(job.id);
       jobRc.delete(job.id);
       if (job.status === "paused") { saveNow(); return pump(); }
-      if (code === 0) { void runVerify(job); return; }
-      job.status = "failed";
-      job.lastError = job.lastError ?? `rclone stopped with code ${code}`;
+      if (restarting.delete(job.id)) { job.status = "queued"; saveNow(); return pump(); }
+      if (code === 0) { job.attempts = 0; void runVerify(job); return; }
+      failed(job, job.lastError ?? `rclone stopped with code ${code}`);
       saveNow();
-      deps.log("WARN", `Upload ${job.id} failed: ${job.lastError}`);
       pump();
     });
   }
@@ -291,10 +340,13 @@ export function createDrives(deps: DrivesDeps) {
       for (const l of lines) if (l[0] === "=") v.matchedBytes += (await stat(path.join(job.source, l.slice(2))).catch(() => null))?.size ?? 0;
       job.verify = v;
       job.status = v.missing || v.differ || v.errors ? "incomplete" : "verified";
+      job.lastError = null;
       job.finishedAt = Date.now();
       saveNow();
       deps.log("INFO", `Upload ${job.id} checked: ${v.matched} file(s) confirmed on Drive${v.missing + v.differ + v.errors ? `, ${v.missing + v.differ + v.errors} problem(s)` : ""}`);
       if (job.status === "verified") deps.onUploaded?.(job.kind);
+      if (job.status === "incomplete") failed(job, `${v.missing + v.differ + v.errors} file(s) not confirmed on Drive yet`);
+      if (job.keepSynced) job.nextSyncAt = Date.now() + 24 * 3600_000;
       pump();
     });
   }
@@ -334,7 +386,12 @@ export function createDrives(deps: DrivesDeps) {
 
   // Jobs interrupted by a restart pick up where they were.
   void (async () => {
-    try { jobs = JSON.parse(await readFile(jobsFile, "utf8")); } catch { jobs = []; }
+    try { jobs = JSON.parse(await readFile(jobsFile, "utf8")); }
+    catch {
+      try { jobs = JSON.parse(await readFile(`${jobsFile}.bak`, "utf8")); deps.log("WARN", "Upload list restored from its backup copy"); }
+      catch { jobs = []; }
+    }
+    for (const j of jobs) if (j.kind === "roms" && j.keepSynced === undefined) j.keepSynced = true;
     let resumed = 0;
     for (const j of jobs) {
       if (j.status === "copying" || j.status === "verifying") { j.status = "queued"; resumed++; }
@@ -372,127 +429,156 @@ export function createDrives(deps: DrivesDeps) {
       } catch (e) { fail(res, e); }
     });
 
-    app.get("/api/admin/drives/list", async (req, res) => {
-      try {
-        const fs_ = String(req.query.fs ?? "");
-        const dir = cleanRel(req.query.path);
-        const out = await rc<{ list: any[] }>("operations/list", { fs: fsSpec(fs_), remote: dir, opt: { noMimeType: true } }, 120_000);
-        const items = (out.list ?? []).map((x) => ({ name: x.Name, path: x.Path, size: x.IsDir ? null : x.Size, modified: x.ModTime, isDir: !!x.IsDir }))
-          .filter((x) => !(isLocalFs(fs_) && /^(\$RECYCLE\.BIN|System Volume Information|pagefile\.sys|hiberfil\.sys|swapfile\.sys|DumpStack\.log\.tmp)$/i.test(x.name)))
-          .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
-        res.json({ items });
-      } catch (e) { fail(res, e); }
-    });
+    // ── File manager routes, mounted once per audience ─────────────────────
+    // allow(req, fs) says whether the caller may touch that drive; every
+    // route below names its drive(s) in fs / fromFs / toFs, and the
+    // middleware checks them all before the route runs.
+    const transfers: Array<{ owner: string; id: number; label: string; startedAt: number }> = [];
+    const uploads = new Map<string, { owner: string; file: string; fs: string; dest: string; size: number; got: number }>();
+    const registerBrowse = (base: string, allow: (req: express.Request, fs: string) => Promise<boolean>, ownerOf: (req: express.Request) => Promise<string>) => {
+      app.use(base, async (req, res, next) => {
+        try {
+          const named = [req.query.fs, req.body?.fs, req.body?.fromFs, req.body?.toFs].filter((x) => x != null && x !== "").map(String);
+          for (const fsName of named) if (!(await allow(req, fsName))) return res.status(403).json({ error: "That drive isn't one of yours." });
+          const up = /^\/upload\/([a-f0-9]+)/.exec(req.path);
+          if (up && uploads.has(up[1]) && uploads.get(up[1])!.owner !== (await ownerOf(req))) return res.status(403).json({ error: "Not your upload." });
+          next();
+        } catch (e) { fail(res, e); }
+      });
 
-    app.post("/api/admin/drives/mkdir", async (req, res) => {
-      try { await rc("operations/mkdir", { fs: fsSpec(String(req.body?.fs)), remote: cleanRel(req.body?.path) }); res.json({ ok: true }); }
-      catch (e) { fail(res, e); }
-    });
-
-    app.post("/api/admin/drives/delete", async (req, res) => {
-      try {
-        const fs_ = String(req.body?.fs);
-        // Local deletes go through the job flow (verify first), never from here.
-        if (isLocalFs(fs_)) return res.status(400).json({ error: "Files on this PC are only deleted after an upload has verified them." });
-        const p = cleanRel(req.body?.path);
-        if (!p) return res.status(400).json({ error: "Refusing to delete the whole drive." });
-        // Google Drive keeps these in its trash for 30 days.
-        await rc(req.body?.isDir ? "operations/purge" : "operations/deletefile", { fs: fsSpec(fs_), remote: p }, 300_000);
-        res.json({ ok: true });
-      } catch (e) { fail(res, e); }
-    });
-
-    app.post("/api/admin/drives/rename", async (req, res) => {
-      try {
-        const fs_ = String(req.body?.fs);
-        if (isLocalFs(fs_)) return res.status(400).json({ error: "Rename files on this PC in Explorer." });
-        const from = cleanRel(req.body?.from), to = cleanRel(req.body?.to);
-        if (!from || !to) return res.status(400).json({ error: "Give a name." });
-        if (req.body?.isDir) await rc("sync/move", { srcFs: `${fsSpec(fs_)}${from}`, dstFs: `${fsSpec(fs_)}${to}`, deleteEmptySrcDirs: true }, 600_000);
-        else await rc("operations/movefile", { srcFs: fsSpec(fs_), srcRemote: from, dstFs: fsSpec(fs_), dstRemote: to });
-        res.json({ ok: true });
-      } catch (e) { fail(res, e); }
-    });
-
-    // Drive to Drive (or Drive to this PC): an rclone background job.
-    app.post("/api/admin/drives/transfer", async (req, res) => {
-      try {
-        const from = String(req.body?.fromFs), to = String(req.body?.toFs);
-        const src = cleanRel(req.body?.fromPath), dst = cleanRel(req.body?.toPath);
-        const move = !!req.body?.move;
-        if (isLocalFs(from)) return res.status(400).json({ error: "Use 'Upload & verify' to send files from this PC." });
-        const params = req.body?.isDir
-          ? { srcFs: `${fsSpec(from)}${src}`, dstFs: `${fsSpec(to)}${dst}`, _async: true, ...(move ? { deleteEmptySrcDirs: true } : {}) }
-          : { srcFs: fsSpec(from), srcRemote: src, dstFs: fsSpec(to), dstRemote: dst, _async: true };
-        const method = req.body?.isDir ? (move ? "sync/move" : "sync/copy") : (move ? "operations/movefile" : "operations/copyfile");
-        const out = await rc<{ jobid: number }>(method, params);
-        transfers.unshift({ id: out.jobid, label: `${move ? "Move" : "Copy"} ${path.posix.basename(src) || src} to ${to}${dst ? `:${dst}` : ""}`, startedAt: Date.now() });
-        transfers.splice(20);
-        res.json({ ok: true, jobid: out.jobid });
-      } catch (e) { fail(res, e); }
-    });
-    const transfers: Array<{ id: number; label: string; startedAt: number }> = [];
-    app.get("/api/admin/drives/transfers", async (_req, res) => {
-      const out = await Promise.all(transfers.map(async (t) => {
-        const [st, stats] = await Promise.all([
-          rc("job/status", { jobid: t.id }, 10_000).catch(() => null),
-          rc("core/stats", { group: `job/${t.id}` }, 10_000).catch(() => null),
-        ]);
-        return { ...t, finished: st?.finished ?? true, success: st?.success ?? false, error: st?.error || null,
-          bytes: stats?.bytes ?? 0, totalBytes: stats?.totalBytes ?? 0, speed: stats?.speed ?? 0 };
-      }));
-      res.json({ transfers: out });
-    });
-
-    app.get("/api/admin/drives/download", async (req, res) => {
-      try {
-        const fs_ = String(req.query.fs), p = cleanRel(req.query.path);
-        const bin = await findRclone();
-        if (!bin || !p) return res.status(404).end();
-        const name = path.posix.basename(p).replace(/[\r\n"]/g, "_");
-        res.setHeader("Content-Disposition", `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`);
-        res.setHeader("Content-Type", "application/octet-stream");
-        const proc = spawn(bin, ["cat", `${fsSpec(fs_)}${p}`], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
-        proc.stdout!.pipe(res);
-        res.on("close", () => { try { proc.kill(); } catch { /* done */ } });
-      } catch (e) { fail(res, e); }
-    });
-
-    // Browser uploads: 8 MB chunks (under Cloudflare's request limit) into a
-    // temp file, then one move onto Drive.
-    const uploads = new Map<string, { file: string; fs: string; dest: string; size: number; got: number }>();
-    app.post("/api/admin/drives/upload/init", async (req, res) => {
-      try {
-        const fs_ = String(req.body?.fs);
-        if (isLocalFs(fs_)) return res.status(400).json({ error: "Uploads go to a Google Drive." });
-        const name = String(req.body?.name ?? "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 200);
-        if (!name) return res.status(400).json({ error: "No file name" });
-        await mkdir(uploadDir, { recursive: true });
-        const id = crypto.randomBytes(12).toString("hex");
-        uploads.set(id, { file: path.join(uploadDir, id), fs: fs_, dest: joinRemote(cleanRel(req.body?.path), name), size: Number(req.body?.size) || 0, got: 0 });
-        res.json({ id });
-      } catch (e) { fail(res, e); }
-    });
-    app.put("/api/admin/drives/upload/:id", (req, res) => {
-      const u = uploads.get(req.params.id);
-      if (!u) return res.status(404).json({ error: "Upload not found; start again." });
-      const out = createWriteStream(u.file, { flags: "a" });
-      req.pipe(out);
-      out.on("finish", async () => { u.got = (await stat(u.file).catch(() => null))?.size ?? u.got; res.json({ ok: true, received: u.got }); });
-      out.on("error", (e) => fail(res, e));
-    });
-    app.post("/api/admin/drives/upload/:id/complete", async (req, res) => {
-      const u = uploads.get(req.params.id);
-      if (!u) return res.status(404).json({ error: "Upload not found; start again." });
-      try {
-        await rc("operations/movefile", { srcFs: `${uploadDir}${path.sep}`, srcRemote: path.basename(u.file), dstFs: fsSpec(u.fs), dstRemote: u.dest }, 6 * 3600_000);
-        uploads.delete(req.params.id);
-        res.json({ ok: true });
-      } catch (e) { await rm(u.file, { force: true }).catch(() => {}); uploads.delete(req.params.id); fail(res, e); }
-    });
+      app.get(`${base}/list`, async (req, res) => {
+        try {
+          const fs_ = String(req.query.fs ?? "");
+          const dir = cleanRel(req.query.path);
+          const out = await rc<{ list: any[] }>("operations/list", { fs: fsSpec(fs_), remote: dir, opt: { noMimeType: true } }, 120_000);
+          const items = (out.list ?? []).map((x) => ({ name: x.Name, path: x.Path, size: x.IsDir ? null : x.Size, modified: x.ModTime, isDir: !!x.IsDir }))
+            .filter((x) => !(isLocalFs(fs_) && /^(\$RECYCLE\.BIN|System Volume Information|pagefile\.sys|hiberfil\.sys|swapfile\.sys|DumpStack\.log\.tmp)$/i.test(x.name)))
+            .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+          res.json({ items });
+        } catch (e) { fail(res, e); }
+      });
+  
+      app.post(`${base}/mkdir`, async (req, res) => {
+        try { await rc("operations/mkdir", { fs: fsSpec(String(req.body?.fs)), remote: cleanRel(req.body?.path) }); res.json({ ok: true }); }
+        catch (e) { fail(res, e); }
+      });
+  
+      app.post(`${base}/delete`, async (req, res) => {
+        try {
+          const fs_ = String(req.body?.fs);
+          // Local deletes go through the job flow (verify first), never from here.
+          if (isLocalFs(fs_)) return res.status(400).json({ error: "Files on this PC are only deleted after an upload has verified them." });
+          const p = cleanRel(req.body?.path);
+          if (!p) return res.status(400).json({ error: "Refusing to delete the whole drive." });
+          // Google Drive keeps these in its trash for 30 days.
+          await rc(req.body?.isDir ? "operations/purge" : "operations/deletefile", { fs: fsSpec(fs_), remote: p }, 300_000);
+          res.json({ ok: true });
+        } catch (e) { fail(res, e); }
+      });
+  
+      app.post(`${base}/rename`, async (req, res) => {
+        try {
+          const fs_ = String(req.body?.fs);
+          if (isLocalFs(fs_)) return res.status(400).json({ error: "Rename files on this PC in Explorer." });
+          const from = cleanRel(req.body?.from), to = cleanRel(req.body?.to);
+          if (!from || !to) return res.status(400).json({ error: "Give a name." });
+          if (req.body?.isDir) await rc("sync/move", { srcFs: `${fsSpec(fs_)}${from}`, dstFs: `${fsSpec(fs_)}${to}`, deleteEmptySrcDirs: true }, 600_000);
+          else await rc("operations/movefile", { srcFs: fsSpec(fs_), srcRemote: from, dstFs: fsSpec(fs_), dstRemote: to });
+          res.json({ ok: true });
+        } catch (e) { fail(res, e); }
+      });
+  
+      // Drive to Drive (or Drive to this PC): an rclone background job.
+      app.post(`${base}/transfer`, async (req, res) => {
+        try {
+          const from = String(req.body?.fromFs), to = String(req.body?.toFs);
+          const src = cleanRel(req.body?.fromPath), dst = cleanRel(req.body?.toPath);
+          const move = !!req.body?.move;
+          if (isLocalFs(from)) return res.status(400).json({ error: "Use 'Upload & verify' to send files from this PC." });
+          const params = req.body?.isDir
+            ? { srcFs: `${fsSpec(from)}${src}`, dstFs: `${fsSpec(to)}${dst}`, _async: true, ...(move ? { deleteEmptySrcDirs: true } : {}) }
+            : { srcFs: fsSpec(from), srcRemote: src, dstFs: fsSpec(to), dstRemote: dst, _async: true };
+          const method = req.body?.isDir ? (move ? "sync/move" : "sync/copy") : (move ? "operations/movefile" : "operations/copyfile");
+          const out = await rc<{ jobid: number }>(method, params);
+          transfers.unshift({ owner: await ownerOf(req), id: out.jobid, label: `${move ? "Move" : "Copy"} ${path.posix.basename(src) || src} to ${to}${dst ? `:${dst}` : ""}`, startedAt: Date.now() });
+          transfers.splice(20);
+          res.json({ ok: true, jobid: out.jobid });
+        } catch (e) { fail(res, e); }
+      });
+      app.get(`${base}/transfers`, async (req, res) => {
+        const me = await ownerOf(req);
+        const out = await Promise.all(transfers.filter((t) => t.owner === me).map(async (t) => {
+          const [st, stats] = await Promise.all([
+            rc("job/status", { jobid: t.id }, 10_000).catch(() => null),
+            rc("core/stats", { group: `job/${t.id}` }, 10_000).catch(() => null),
+          ]);
+          return { ...t, finished: st?.finished ?? true, success: st?.success ?? false, error: st?.error || null,
+            bytes: stats?.bytes ?? 0, totalBytes: stats?.totalBytes ?? 0, speed: stats?.speed ?? 0 };
+        }));
+        res.json({ transfers: out });
+      });
+  
+      app.get(`${base}/download`, async (req, res) => {
+        try {
+          const fs_ = String(req.query.fs), p = cleanRel(req.query.path);
+          const bin = await findRclone();
+          if (!bin || !p) return res.status(404).end();
+          const name = path.posix.basename(p).replace(/[\r\n"]/g, "_");
+          res.setHeader("Content-Disposition", `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+          res.setHeader("Content-Type", "application/octet-stream");
+          const proc = spawn(bin, ["cat", `${fsSpec(fs_)}${p}`], { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+          proc.stdout!.pipe(res);
+          res.on("close", () => { try { proc.kill(); } catch { /* done */ } });
+        } catch (e) { fail(res, e); }
+      });
+  
+      // Browser uploads: 8 MB chunks (under Cloudflare's request limit) into a
+      // temp file, then one move onto Drive.
+      app.post(`${base}/upload/init`, async (req, res) => {
+        try {
+          const fs_ = String(req.body?.fs);
+          if (isLocalFs(fs_)) return res.status(400).json({ error: "Uploads go to a Google Drive." });
+          const name = String(req.body?.name ?? "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 200);
+          if (!name) return res.status(400).json({ error: "No file name" });
+          await mkdir(uploadDir, { recursive: true });
+          const id = crypto.randomBytes(12).toString("hex");
+          uploads.set(id, { owner: await ownerOf(req), file: path.join(uploadDir, id), fs: fs_, dest: joinRemote(cleanRel(req.body?.path), name), size: Number(req.body?.size) || 0, got: 0 });
+          res.json({ id });
+        } catch (e) { fail(res, e); }
+      });
+      app.put(`${base}/upload/:id`, (req, res) => {
+        const u = uploads.get(req.params.id);
+        if (!u) return res.status(404).json({ error: "Upload not found; start again." });
+        const out = createWriteStream(u.file, { flags: "a" });
+        req.pipe(out);
+        out.on("finish", async () => { u.got = (await stat(u.file).catch(() => null))?.size ?? u.got; res.json({ ok: true, received: u.got }); });
+        out.on("error", (e) => fail(res, e));
+      });
+      app.post(`${base}/upload/:id/complete`, async (req, res) => {
+        const u = uploads.get(req.params.id);
+        if (!u) return res.status(404).json({ error: "Upload not found; start again." });
+        try {
+          await rc("operations/movefile", { srcFs: `${uploadDir}${path.sep}`, srcRemote: path.basename(u.file), dstFs: fsSpec(u.fs), dstRemote: u.dest }, 6 * 3600_000);
+          uploads.delete(req.params.id);
+          res.json({ ok: true });
+        } catch (e) { await rm(u.file, { force: true }).catch(() => {}); uploads.delete(req.params.id); fail(res, e); }
+      });
+  
+      };
+    // Admins: the host's own drives (not members' personal ones) and the PC's disks.
+    registerBrowse("/api/admin/drives", async (_req, fsName) => isLocalFs(fsName) || !isPersonalRemote(fsName), async () => "admin");
+    // Members: only the drives they connected themselves (see connect.ts).
+    registerBrowse("/api/drives/my", async (req, fsName) => {
+      const caller = await deps.callerOf?.(req);
+      return !!caller?.userId && ownerOfRemote(fsName) === caller.userId.replace(/-/g, "");
+    }, async (req) => (await deps.callerOf?.(req))?.userId ?? "anon");
 
     // ── Upload & verify jobs ─────────────────────────────────────────────
-    app.get("/api/admin/offload", (_req, res) => { res.json({ jobs, gameMode: !!deps.gameModeActive?.(), speedLimit: desiredRate() }); });
+    app.get("/api/admin/offload", (_req, res) => {
+      const protectedFiles = jobs.reduce((n, j) => n + (j.verify && ["verified", "kept", "done"].includes(j.status) ? j.verify.matched : 0), 0);
+      const protectedBytes = jobs.reduce((n, j) => n + (j.verify && ["verified", "kept", "done"].includes(j.status) ? j.verify.matchedBytes : 0), 0);
+      res.json({ jobs, gameMode: !!deps.gameModeActive?.(), speedLimit: desiredRate(), protectedFiles, protectedBytes });
+    });
 
     app.get("/api/admin/offload/suggestions", async (_req, res) => {
       const list = (await deps.suggestions?.().catch(() => [])) ?? [];
@@ -523,7 +609,7 @@ export function createDrives(deps: DrivesDeps) {
         if (/^[A-Za-z]:\\?$/.test(source)) return res.status(400).json({ error: "Choose a folder, not a whole disk." });
         const remote = String(req.body?.remote ?? "");
         const { remotes = [] } = await rc<{ remotes: string[] }>("config/listremotes");
-        if (!remotes.includes(remote)) return res.status(400).json({ error: "Unknown Drive account." });
+        if (!remotes.includes(remote) || isPersonalRemote(remote)) return res.status(400).json({ error: "Unknown Drive account." });
         const dest = cleanRel(req.body?.dest);
         if (!dest) return res.status(400).json({ error: "Choose where on Drive it goes." });
         const kind = (["movies", "tv", "music", "roms", "files"].includes(req.body?.kind) ? req.body.kind : "files") as OffloadKind;
@@ -534,6 +620,8 @@ export function createDrives(deps: DrivesDeps) {
           id: `up_${Date.now().toString(36)}_${crypto.randomBytes(3).toString("hex")}`, label: String(req.body?.label ?? path.basename(source)).slice(0, 80),
           kind, source, remote, dest, status: "queued", createdAt: Date.now(), startedAt: null, finishedAt: null,
           stats: newStats(), lastError: null, verify: null, deleted: null,
+          // ROM folders are irreplaceable: keep them backed up as they grow.
+          keepSynced: req.body?.keepSynced ?? kind === "roms", nextSyncAt: null, attempts: 0, retryAt: null, lastProgressAt: null,
         };
         jobs.unshift(job);
         saveNow();
@@ -559,6 +647,11 @@ export function createDrives(deps: DrivesDeps) {
         if (job.status !== "verified") return res.status(400).json({ error: "Only an upload whose every file was confirmed on Drive can delete local copies." });
         if (req.body?.confirm !== job.id) return res.status(400).json({ error: "Confirmation missing." });
         void deleteVerified(job);
+      } else if (act === "sync-on" || act === "sync-off") {
+        job.keepSynced = act === "sync-on";
+        job.nextSyncAt = job.keepSynced && ["verified", "kept", "done"].includes(job.status) ? Date.now() + 24 * 3600_000 : null;
+      } else if (act === "sync-now") {
+        if (["verified", "kept", "done"].includes(job.status)) { job.status = "queued"; job.stats = newStats(); }
       } else if (act === "keep") {
         if (job.status === "verified" || job.status === "incomplete") job.status = "kept";
       } else if (act === "remove") {
@@ -571,5 +664,5 @@ export function createDrives(deps: DrivesDeps) {
     });
   }
 
-  return { register, findRclone, jobs: () => jobs };
+  return { register, findRclone, rc, emailOf, jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
 }
