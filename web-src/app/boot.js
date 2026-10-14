@@ -22,7 +22,17 @@
   // tidiness, not security: the server refuses those calls regardless.
   const ADMIN_FLAG = "nexus_is_admin";
   const style = document.createElement("style");
-  style.textContent = 'html:not([data-nx-admin="1"]) .nx-admin-only{display:none!important}';
+  style.textContent = 'html:not([data-nx-admin="1"]) .nx-admin-only{display:none!important}'
+    // Game details on phones and short landscape screens: one scrolling column (build.mjs 3f).
+    + '@media (max-width:767px),(max-height:560px){'
+    + '.nx-detail-wrap{padding:6px!important;align-items:stretch!important}'
+    + '.nx-detail{max-height:none!important;height:auto!important;max-width:none!important;flex-direction:column!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}'
+    + '.nx-detail-side{width:100%!important;padding:16px!important;overflow:visible!important;flex:none!important}'
+    + '.nx-detail-side img{max-height:38vh;width:auto;max-width:100%;margin:0 auto;object-fit:contain}'
+    + '.nx-detail-main{padding:16px!important;overflow:visible!important;flex:none!important}'
+    + '.nx-detail-main .overflow-y-auto{overflow:visible!important}'
+    + '.nx-detail-title{font-size:26px!important;line-height:1.15!important}'
+    + '}';
   document.head.appendChild(style);
   const showAdmin = (yes) => {
     if (yes) document.documentElement.dataset.nxAdmin = "1"; else delete document.documentElement.dataset.nxAdmin;

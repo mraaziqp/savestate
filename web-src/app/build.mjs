@@ -289,6 +289,28 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   if (hub !== before) writeFileSync(file, hub);
 }
 
+// 3f. The game details window was a fixed-height box with a 48px title: on a
+//     phone (and any short landscape screen) the Play button and details
+//     were cut off with nothing to scroll. Its parts are tagged here and the
+//     boot stylesheet turns it into one scrolling column on small screens.
+{
+  const file = path.join(assets, find("ExpandableDetail-"));
+  let d = readFileSync(file, "utf8");
+  const before = d;
+  const tag = (name, cls, add) => { d = patch(d, name, `"${add} ${cls}`, `"${cls}`, `"${add} ${cls}`); };
+  tag("game details on phones", "fixed inset-0 z-50 flex items-center justify-center p-4 md:p-12", "nx-detail-wrap");
+  tag("game details box", "w-full max-w-6xl h-full max-h-[85vh] rounded-3xl overflow-hidden relative flex flex-col md:flex-row", "nx-detail");
+  tag("game details side", "relative z-10 w-full md:w-[380px] p-8 flex flex-col glass-panel border-y-0 border-l-0 overflow-y-auto", "nx-detail-side");
+  tag("game details main", "relative z-10 flex-1 p-8 md:p-12 overflow-hidden flex flex-col", "nx-detail-main");
+  tag("game details title", "text-3xl md:text-5xl font-black leading-tight italic", "nx-detail-title");
+  // "Open Nexus at http://your-host:3000 ... HTTPS blocks local launcher
+  // connections" was shown on phones too, where there is no launcher at all.
+  d = d.replace(/if\((\w+)&&!(\w+)\(\)\)\{(\w+)\("missing"\),(\w+)\(!0\),(\w+)\(\{status:"missing-launcher",detail:"Open Nexus at http:\/\/your-host:3000 on your local network — HTTPS blocks local launcher connections\."\}\);return\}/,
+    (_, a, b, c, e, f) => `if(${a}&&!${b}()&&!/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)){${c}("missing"),${e}(!0),${f}({status:"missing-launcher",detail:"To start PC emulators from the website, install the SaveState desktop app (Get the App): browsers can't start programs on this computer."});return}`);
+  if (!d.includes("browsers can't start programs on this computer")) throw new Error('patch "launcher notice": anchor not found');
+  if (d !== before) writeFileSync(file, d);
+}
+
 // 3b. Movies & TV showed every member the host's own controls (media root
 //     picker, rescan, the metadata scraper), which only admins can use. They
 //     are tagged here and hidden for everyone else by the boot script's CSS.
