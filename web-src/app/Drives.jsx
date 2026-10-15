@@ -324,6 +324,10 @@ function ConnectCard({ onChanged }) {
   };
   if (!info) return null;
   const shared = info.accounts.filter((a) => a.sharedClient);
+  // Drives connected earlier (with rclone) work without the Google app; the
+  // app is only needed to add accounts from here and for members' own drives.
+  const drivesWorking = info.accounts.filter((a) => a.ok !== false);
+  const showSetup = setup || (!info.google && !drivesWorking.length);
   return (
     <div className="nxa-card">
       <div className="nxa-card-head"><div><h3>Connected accounts</h3>
@@ -336,9 +340,18 @@ function ConnectCard({ onChanged }) {
       {msg?.ok && <Note kind="ok">Connected: {msg.ok}</Note>}
       {msg?.error && <Note kind="bad">{msg.error}</Note>}
       {webdav && <WebdavForm purpose="host" onDone={() => { setWebdav(false); load(); onChanged(); setMsg({ ok: "WebDAV drive" }); }} />}
-      {(!info.google || setup) ? (
+      {drivesWorking.length > 0 && (
+        <Note kind="ok">Connected and working: {drivesWorking.map((a) => a.label).join(", ")}. Browse, upload and free up space with them below.</Note>
+      )}
+      {!info.google && !showSetup && (
+        <div className="nxa-row nxa-wrap" style={{ marginTop: 8, fontSize: 13 }}>
+          <span className="nxa-dim">Optional: set up your own Google app (about 5 minutes, free) so you can add more Google accounts with one button and members can connect their own Drives under My Drives. It also moves your drives off rclone's shared Google app, which Google is retiring during 2026.</span>
+          <button className="nxa-btn sm" onClick={() => setSetup(true)}><Icon name="key" /> Set up the Google app</button>
+        </div>
+      )}
+      {showSetup ? (
         <div style={{ marginTop: 12 }}>
-          <Note kind="warn">{info.google ? "Replacing the Google app." : "One-time setup: Google needs an app of yours before anyone can connect a Drive from SaveState. It takes about five minutes and is free."}</Note>
+          <Note kind={info.google ? "warn" : "info"}>{info.google ? "Replacing the Google app." : "Follow these steps once. Each link opens the right Google page."}</Note>
           <ol className="nxa-steps" style={{ marginTop: 12, paddingLeft: 0, listStyle: "none" }}>
             <li className="nxa-step"><div><b>Create a project</b><p>Open <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener noreferrer">Google Cloud: new project <Icon name="ext" size={11} /></a>, name it "SaveState" and create it.</p></div></li>
             <li className="nxa-step"><div><b>Turn on the Drive API</b><p><a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noopener noreferrer">Google Drive API <Icon name="ext" size={11} /></a> &gt; Enable.</p></div></li>
@@ -364,7 +377,7 @@ function ConnectCard({ onChanged }) {
           </ol>
           <p className="nxa-faint" style={{ fontSize: 12 }}>Members connect their own drives the same way under My Drives, with one button and no setup. Up to 100 accounts can connect before Google asks to review the app.</p>
         </div>
-      ) : <button className="nxa-link" style={{ marginTop: 6 }} onClick={() => setSetup(true)}>Change the Google app</button>}
+      ) : info.google ? <button className="nxa-link" style={{ marginTop: 6 }} onClick={() => setSetup(true)}>Change the Google app</button> : null}
       {shared.length > 0 && info.google && (
         <Note kind="warn">{shared.map((a) => a.label).join(" and ")} still sign{shared.length === 1 ? "s" : ""} in through rclone's shared Google app, which is being retired.{" "}
           {shared.map((a) => <button key={a.name} className="nxa-link" disabled={!!busy} onClick={() => google(a.name)}>Reconnect {a.label}</button>)} (sign in with the same account; nothing changes on the drive).</Note>

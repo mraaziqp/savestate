@@ -9,7 +9,7 @@
 // games is a separate, per-person switch on the Members tab: that library is
 // shared with people the host trusts, not sold.
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { useStyles, api, Icon, Note, money, PERIOD, when } from "./lib.jsx";
+import { useStyles, api, Icon, Note, money, PERIOD, when, goTab } from "./lib.jsx";
 
 const CATEGORIES = ["Media", "Games", "Cloud", "Extras"];
 const priceOf = (t) => (t.priceCents > 0 ? money(t.priceCents, t.currency) : "Free");
@@ -224,6 +224,55 @@ function KeyRow({ k, reload }) {
         </form>
       )}
       {msg && <div style={{ marginTop: 10 }}><Note kind={msg.kind}>{msg.text}</Note></div>}
+    </div>
+  );
+}
+
+// ── Admin: setup checklist ─────────────────────────────────────────────
+// Everything a host sets up once, checked live, each with where to go.
+function SetupChecklist({ data, onView }) {
+  const [s, setS] = useState(null);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const get = (u) => api(u).catch(() => null);
+      const [pay, keys, conn, dl, dom, hh] = await Promise.all([
+        get("/api/payments/config"), get("/api/admin/service-keys"), get("/api/admin/drives/connections"),
+        get("/api/admin/downloader"), get("/api/admin/service-keys/resend/domain"), get("/api/household"),
+      ]);
+      if (live) setS({ pay, keys, conn, dl, dom, hh });
+    })();
+    return () => { live = false; };
+  }, []);
+  if (!s) return <p className="nxa-dim"><Icon name="spinner" /> Checking your setup…</p>;
+  const key = (env) => s.keys?.keys?.find((k) => k.env === env);
+  const priced = (data?.tiers ?? []).filter((t) => t.priceCents > 0 && t.isPublic);
+  const drives = (s.conn?.accounts ?? []).filter((a) => a.ok !== false);
+  const dlBad = (s.dl?.apps ?? []).filter((a) => !a.connected || a.problems.some((p) => p.level === "bad"));
+  const items = [
+    { done: !!s.pay?.payfast && !!key("PAYFAST_PASSPHRASE")?.set, title: "Card payments (PayFast)", how: "Merchant ID and key in .env, passphrase under Service keys; then \"Check PayFast connection\" under Payments & requests.", go: () => onView("keys") },
+    { done: priced.length > 0, title: "Prices for your paid tiers", how: priced.length ? `${priced.map((t) => t.name).join(", ")} on sale.` : "Tiers > Edit a tier: set a price, tick \"Shown on the plans page\", Save. Then Paid features: choose what each tier unlocks.", go: () => onView("tiers") },
+    { done: !!key("RESEND_API_KEY")?.set, title: "Password-reset emails (Resend key)", how: "Service keys > Resend: paste the key from resend.com.", go: () => onView("keys") },
+    { done: s.dom?.domain?.status === "verified", title: "Email domain verified", how: "Service keys > Email domain: add the DNS records shown there in Cloudflare, then Check now. Until then resets only reach your own address.", go: () => onView("keys") },
+    { done: drives.length > 0, title: "Google Drive storage", how: drives.length ? `Working: ${drives.map((a) => a.label).join(", ")}.` : "Cloud Drives > Connect a Google account.", go: () => goTab("cloud") },
+    { done: !!s.conn?.google, optional: true, title: "Your own Google app (lets members connect their Drives)", how: "Cloud Drives > Set up the Google app: about five minutes, with a link for every step.", go: () => goTab("cloud") },
+    { done: dlBad.length === 0 && (s.dl?.apps?.length ?? 0) > 0, title: "Downloader (qBittorrent, Prowlarr, Sonarr, Radarr)", how: dlBad.length ? `Needs attention: ${dlBad.map((a) => a.label).join(", ")}. Downloads > Downloader setup.` : "All four connected and healthy.", go: () => goTab("torrent") },
+    { done: !!s.hh?.parentPin, optional: true, title: "Parent PIN (if children use profiles)", how: "Profiles > Parent PIN.", go: () => goTab("household") },
+  ];
+  const left = items.filter((i) => !i.done && !i.optional).length;
+  return (
+    <div className="nxa-card">
+      <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="check" /> Setup checklist {left ? <span className="nxa-pill warn">{left} to do</span> : <span className="nxa-pill ok">All done</span>}</h3>
+        <p className="nxa-sub" style={{ margin: 0 }}>Everything SaveState needs from you once, checked live. Press an item to go where it is set.</p></div></div>
+      <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
+        {items.map((i) => (
+          <button key={i.title} className="nxa-file" style={{ textAlign: "left", cursor: "pointer", alignItems: "center", width: "100%" }} onClick={i.go}>
+            <span className={`nxa-pill ${i.done ? "ok" : i.optional ? "" : "warn"}`} style={{ minWidth: 74, justifyContent: "center" }}>{i.done ? "Done" : i.optional ? "Optional" : "To do"}</span>
+            <div className="nxa-grow"><b>{i.title}</b><small style={{ wordBreak: "normal" }}>{i.how}</small></div>
+            <Icon name="arrow" size={14} />
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -707,7 +756,7 @@ export function PlansPage() {
   if ((plans.loading && !plans.data) || (me.loading && !me.data)) return <div className="nxa nxa-page"><p className="nxa-dim"><Icon name="spinner" /> Loading plans…</p></div>;
   if (!plans.data) return <div className="nxa nxa-page"><Note kind="bad">{plans.error ?? "Could not load the plans."} <button className="nxa-link" onClick={plans.reload}>Try again</button></Note></div>;
 
-  const tabs = [["plans", "Plans", "star"], ["tiers", "Tiers", "edit"], ["features", "Paid features", "lock"], ["members", "Members", "users"], ["requests", "Payments & requests", "mail"], ["keys", "Service keys", "key"], ["host", "Host PC", "chip"]];
+  const tabs = [["setup", "Setup checklist", "check"], ["plans", "Plans", "star"], ["tiers", "Tiers", "edit"], ["features", "Paid features", "lock"], ["members", "Members", "users"], ["requests", "Payments & requests", "mail"], ["keys", "Service keys", "key"], ["host", "Host PC", "chip"]];
   return (
     <div className="nxa nxa-page">
       {isAdmin && (
@@ -726,7 +775,8 @@ export function PlansPage() {
         </>
       ) : !admin.data ? (
         admin.error ? <Note kind="bad">{admin.error} <button className="nxa-link" onClick={admin.reload}>Try again</button></Note> : <p className="nxa-dim"><Icon name="spinner" /> Loading…</p>
-      ) : view === "tiers" ? <TiersAdmin data={admin.data} reload={reloadAll} />
+      ) : view === "setup" ? <SetupChecklist data={admin.data} onView={setView} />
+        : view === "tiers" ? <TiersAdmin data={admin.data} reload={reloadAll} />
         : view === "features" ? <FeaturesAdmin data={admin.data} reload={reloadAll} />
         : view === "members" ? <MembersAdmin data={admin.data} reload={admin.reload} />
         : view === "requests" ? <RequestsAdmin data={admin.data} resets={resets.data ?? []} reload={admin.reload} reloadResets={resets.reload} />
