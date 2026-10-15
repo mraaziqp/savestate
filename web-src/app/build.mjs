@@ -204,6 +204,40 @@ shell = patch(shell, "page titles", `ql={ai:"SaveState AI",`,
 shell = patch(shell, "page title names", `media:"Movies & TV",`, `media:"Movies",`, `media:"Movies & TV",`);
 shell = patch(shell, "ebooks title", `codex:"eBooks",`, `codex:"Codex",`, `codex:"eBooks",`);
 
+// Music: the player lives inside the Music page, and the tab area unmounts a
+// page when you leave it, so the song stopped on every tab change (and the
+// keyless wrapper tried first did not survive it). The page is now mounted
+// once at the app's root (NxMusicHost) and its DOM is moved into a slot on
+// the Music tab, or into a hidden holder elsewhere, where only its fixed bar
+// shows. Moving DOM never remounts React, so the audio keeps going.
+// Each piece is checked on its own: the welcome block above is rebuilt on
+// every run and drops the injected functions.
+{
+  const lazyName = /,(\w+)=\(0,s\.lazy\)\(\(\)=>\w+\(\(\)=>import\("\.\/MusicHub-/.exec(shell)?.[1];
+  if (!lazyName) throw new Error('patch "music keeps playing": MusicHub import not found');
+  if (!shell.includes("ref:NxMusicSlotRef")) {
+    const m = /x==="music"&&\(0,e\.jsx\)\(\w+,\{\}\)/.exec(shell)
+      ?? /\(x==="music"&&\(window\.__nxMusic=!0\),window\.__nxMusic\)&&\(0,e\.jsx\)\("div",\{className:x==="music"\?"":"nx-music-away",children:\(0,e\.jsx\)\(\w+,\{\}\)\}\)/.exec(shell);
+    if (!m) throw new Error('patch "music slot": anchor not found');
+    shell = shell.replace(m[0], () => 'x==="music"&&(0,e.jsx)("div",{ref:NxMusicSlotRef})');
+  }
+  if (!shell.includes("function NxMusicHost(")) {
+    if (!shell.includes("function NxRoot(){")) throw new Error('patch "music host": NxRoot not found');
+    shell = shell.replace("function NxRoot(){", () =>
+      'function NxMusicSlotRef(t){window.__nxMusicSlot=t;window.dispatchEvent(new Event("nx:music-slot"))}'
+      + 'function NxMusicHost(){const[on,setOn]=(0,s.useState)(!1),home=(0,s.useRef)(null),box=(0,s.useRef)(null);'
+      + '(0,s.useEffect)(()=>{const place=()=>{const slot=window.__nxMusicSlot,b=box.current;if(!b||!home.current)return;'
+      + 'if(slot){setOn(!0);if(b.parentNode!==slot)slot.appendChild(b);b.classList.remove("nx-music-away")}'
+      + 'else{if(b.parentNode!==home.current)home.current.appendChild(b);b.classList.add("nx-music-away")}};'
+      + 'place();window.addEventListener("nx:music-slot",place);return()=>{window.removeEventListener("nx:music-slot",place);const b=box.current;if(b&&home.current&&b.parentNode!==home.current)home.current.appendChild(b)}},[on]);'
+      + `return (0,e.jsx)("div",{ref:home,children:(0,e.jsx)("div",{ref:box,className:"nx-music-away",children:on&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(${lazyName},{})})})})}`
+      + 'function NxRoot(){');
+  }
+  shell = patch(shell, "music host at the root", "(0,e.jsx)(NxMusicHost,{})",
+    "(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})})",
+    "(0,e.jsx)(Yl,{}),(0,e.jsx)(NxMusicHost,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})})");
+}
+
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
   `"cloud","phonebackup","matchmaker"]`, `"cloud","phonebackup","matchmaker","music","multiplayer","remoteplay","ai"]`);
@@ -312,6 +346,37 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
     (_, a, b, c, e, f) => `if(${a}&&!${b}()&&!/Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)){${c}("missing"),${e}(!0),${f}({status:"missing-launcher",detail:"To start PC emulators from the website, install the SaveState desktop app (Get the App): browsers can't start programs on this computer."});return}`);
   if (!d.includes("browsers can't start programs on this computer")) throw new Error('patch "launcher notice": anchor not found');
   if (d !== before) writeFileSync(file, d);
+}
+
+// 3g. Music: a track that failed (a Drive file still being fetched, a dropped
+//     connection) left the player "playing" silence; play() rejections were
+//     swallowed. Errors are retried twice from the same point, then the track
+//     is skipped with a notice; 15 s of buffering counts as an error.
+{
+  const file = path.join(assets, find("MusicHub-"));
+  let mh = readFileSync(file, "utf8");
+  const before = mh;
+  mh = patch(mh, "music keeps playing", "__nxBase",
+    'o.current.addEventListener("ended",()=>Ne.current()))',
+    'o.current.addEventListener("ended",()=>Ne.current()),'
+    + 'o.current.addEventListener("error",()=>{const a=o.current;if(!a||!a.__nxBase)return;a.__nxTries=(a.__nxTries||0)+1;const at=a.currentTime||0;'
+    + 'if(a.__nxTries<=2){setTimeout(()=>{a.src=a.__nxBase+"&r="+Date.now();a.addEventListener("loadedmetadata",()=>{if(at>1)a.currentTime=at},{once:!0});a.play().catch(()=>{})},1500*a.__nxTries)}'
+    + 'else{try{window.__nxNotice&&window.__nxNotice("music-skip","That track wouldn\'t play, so it was skipped.")}catch{}a.__nxBase="";Ne.current()}}),'
+    + 'o.current.addEventListener("waiting",()=>{const a=o.current;clearTimeout(a.__nxStall);a.__nxStall=setTimeout(()=>{if(a&&!a.paused&&a.readyState<3)a.dispatchEvent(new Event("error"))},15e3)}),'
+    + 'o.current.addEventListener("playing",()=>{clearTimeout(o.current.__nxStall);o.current.__nxTries=0}))');
+  mh = patch(mh, "music remembers its source", "o.current.__nxBase=o.current.src",
+    ',o.current.play().catch(()=>{}),N(!0),Be(t,!0),zt())',
+    ',o.current.__nxBase=o.current.src,o.current.__nxTries=0,o.current.play().catch(r=>{r&&r.name==="NotAllowedError"&&N(!1)}),N(!0),Be(t,!0),zt())');
+  mh = patch(mh, "music bar tag", '"nx-music-bar fixed bottom-0 left-0 right-0',
+    '"fixed bottom-0 left-0 right-0 bg-[#0a0a14]/95 border-t border-white/10 backdrop-blur-2xl z-50',
+    '"nx-music-bar fixed bottom-0 left-0 right-0 bg-[#0a0a14]/95 border-t border-white/10 backdrop-blur-2xl z-50');
+  mh = patch(mh, "music admin purge", '"nx-admin-only flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-amber-500/40',
+    '"flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-amber-500/40',
+    '"nx-admin-only flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-amber-500/40');
+  mh = patch(mh, "music admin scan", '"nx-admin-only flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-cyan-500/40',
+    '"flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-cyan-500/40',
+    '"nx-admin-only flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-cyan-500/40');
+  if (mh !== before) writeFileSync(file, mh);
 }
 
 // 3b. Movies & TV showed every member the host's own controls (media root

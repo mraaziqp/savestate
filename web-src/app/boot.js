@@ -32,7 +32,11 @@
     + '.nx-detail-main{padding:16px!important;overflow:visible!important;flex:none!important}'
     + '.nx-detail-main .overflow-y-auto{overflow:visible!important}'
     + '.nx-detail-title{font-size:26px!important;line-height:1.15!important}'
-    + '}';
+    + '}'
+    // Music away from its tab: the page collapses, its fixed bar stays (build.mjs).
+    + '.nx-music-away{height:0;overflow:hidden}'
+    // Phones: the music bar sits above the bottom navigation instead of over it.
+    + '@media (max-width:1023px){.nx-music-bar{bottom:calc(60px + env(safe-area-inset-bottom,0px))!important}}';
   document.head.appendChild(style);
   const showAdmin = (yes) => {
     if (yes) document.documentElement.dataset.nxAdmin = "1"; else delete document.documentElement.dataset.nxAdmin;
@@ -160,6 +164,9 @@
     document.body.appendChild(box);
     setTimeout(() => box.remove(), 12_000);
   }
+
+  // Other parts of the app (the music player) show notices the same way.
+  window.__nxNotice = (id, text) => notice(id, text);
 
   // ── Refusals ────────────────────────────────────────────────────────────
   // Wraps whatever fetch is current when the app starts calling it; the app's
