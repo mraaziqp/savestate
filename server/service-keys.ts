@@ -133,6 +133,31 @@ export function createServiceKeys(deps: {
       res.json({ ok: true, check, restartNeeded: !k.live });
     });
 
+    // Resend only emails other people once the sending domain is verified: the
+    // records to add at the DNS host, and a "check now".
+    const resend = (p: string, init?: RequestInit) => fetch(`https://api.resend.com/${p}`, {
+      ...init, headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY ?? ""}`, "Content-Type": "application/json" }, signal: AbortSignal.timeout(15000),
+    }).then((r) => r.json());
+    app.get("/api/admin/service-keys/resend/domain", async (req, res) => {
+      if (!(await admin(req, res))) return;
+      if (!process.env.RESEND_API_KEY) return res.json({ domain: null });
+      try {
+        const list: any = await resend("domains");
+        const want = (process.env.RESEND_FROM ?? "noreply@savestate.co.za").replace(/^.*@/, "").replace(/>.*$/, "").trim();
+        let d = (list.data ?? []).find((x: any) => x.name === want);
+        if (!d) d = await resend("domains", { method: "POST", body: JSON.stringify({ name: want }) });
+        const full: any = await resend(`domains/${d.id}`);
+        res.json({ domain: { id: full.id, name: full.name, status: full.status, records: (full.records ?? []).map((r: any) => ({ type: r.type, name: r.name, value: r.value, priority: r.priority ?? null, status: r.status })) } });
+      } catch (e: any) { res.status(502).json({ error: `Resend didn't answer: ${e?.message ?? e}` }); }
+    });
+    app.post("/api/admin/service-keys/resend/verify", async (req, res) => {
+      if (!(await admin(req, res))) return;
+      const id = String(req.body?.id ?? "");
+      if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: "Bad id." });
+      try { await resend(`domains/${id}/verify`, { method: "POST" }); res.json({ ok: true }); }
+      catch (e: any) { res.status(502).json({ error: `Resend didn't answer: ${e?.message ?? e}` }); }
+    });
+
     app.post("/api/admin/service-keys/:env/test", async (req, res) => {
       if (!(await admin(req, res))) return;
       const k = SERVICE_KEYS.find((x) => x.env === req.params.env);

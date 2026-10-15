@@ -5727,12 +5727,89 @@ async function startServer() {
   });
   gameMode.register(app);
 
+  // ── Is anyone using the site? (uploads run flat out when nobody is) ─────
+  // Watching, listening, playing or opening the app counts; a background tab
+  // polling for status does not. Long single-request streams count while open.
+  let siteActiveAt = 0, openStreams = 0;
+  const STREAM_PATHS = /^\/api\/(media\/(stream|file|hls\/)|music\/stream|stream\/(feed|hls\/|gdrive\/|media\/)|emulator\/(native-core|bios\/serve)|roms\/)/;
+  const siteBusy = () => openStreams > 0 || Date.now() - siteActiveAt < 3 * 60_000;
+  app.use((req, res, next) => {
+    const page = req.method === "GET" && !req.path.startsWith("/api/") && !req.path.startsWith("/assets/") && (req.path === "/" || req.path.endsWith(".html"))
+      // Every app load (and return to the tab) asks this; background polling does not.
+      || req.path === "/api/plans/me";
+    const stream = STREAM_PATHS.test(req.path);
+    if (page || stream) {
+      const wasIdle = !siteBusy();
+      siteActiveAt = Date.now();
+      if (wasIdle) { try { drives.applyRate(); } catch { /* not ready yet */ } }
+      if (stream && /^\/api\/(media\/(stream|file)|music\/stream|stream\/feed)/.test(req.path)) {
+        openStreams++;
+        res.once("close", () => { openStreams = Math.max(0, openStreams - 1); siteActiveAt = Date.now(); });
+      }
+    }
+    next();
+  });
+
+  // Video folders on this PC that are not in the Drive library yet: offered
+  // under Cloud Drives > Upload & verify so the PC can be cleared. Found once
+  // in the background (and every 6 h), not on every page load.
+  let mediaFolders: Array<{ label: string; source: string; kind: "movies" | "files"; dest: string; bytes: number }> = [];
+  const SKIP_DIR = /^(\$RECYCLE\.BIN|System Volume Information|Windows|Program Files.*|ProgramData|SteamLibrary|Steam|steamapps|SaveState|NexusEmu.*|ollama|wsl|AppData|node_modules|\.git|Epic Games|GOG Games|XboxGames|EmulationStation|RetroArch.*|asetto|BeamNG.*|Forex)$/i;
+  async function findMediaFolders() {
+    const VIDEO = /\.(mkv|mp4|m4v|avi|mov|wmv|webm|ts|m2ts)$/i;
+    const out: typeof mediaFolders = [];
+    const libRoots = [path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT).toLowerCase()];
+    // Films and shows have release-style names (S01E02, 1080p, a year);
+    // phone clips and screen recordings do not, and must not land in the
+    // library every invited member can browse.
+    const releaseLike = (n: string) => !/^\d{4}[-_.]\d{2}[-_.]\d{2}|^(VID|IMG|PXL|MVIMG|WhatsApp|Screen|Recording|Snapchat|signal-)|^\d{8}_\d{6}/i.test(n) && /\bs\d{1,2}\s?e\d{1,3}\b|\b\d{1,2}x\d{2}\b|\b(2160|1080|720|480)p\b|\b(19[3-9]\d|20[0-3]\d)\b|bluray|web-?dl|webrip|hdtv|x26[45]|hevc|season/i.test(n);
+    async function videoBytes(dir: string, depth: number, budget: { n: number }, tally: { files: number; release: number }): Promise<number> {
+      if (depth > 4 || budget.n <= 0) return 0;
+      let total = 0;
+      for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [] as any[])) {
+        if (--budget.n <= 0) break;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) { if (!SKIP_DIR.test(e.name)) total += await videoBytes(full, depth + 1, budget, tally); }
+        else if (VIDEO.test(e.name)) {
+          total += (await stat(full).catch(() => null))?.size ?? 0;
+          tally.files++;
+          if (releaseLike(e.name) || releaseLike(path.basename(dir))) tally.release++;
+        }
+      }
+      return total;
+    }
+    const candidates: string[] = [];
+    for (const d of "CDEFGH") {
+      const root = `${d}:\\`;
+      if (!existsSync(root)) continue;
+      const top = d === "C" ? [path.join(os.homedir(), "Videos"), path.join(os.homedir(), "Downloads")]
+        : (await readdir(root, { withFileTypes: true }).catch(() => [] as any[])).filter((e: any) => e.isDirectory() && !SKIP_DIR.test(e.name)).map((e: any) => path.join(root, e.name));
+      candidates.push(...top);
+    }
+    for (const dir of candidates) {
+      if (libRoots.some((r) => dir.toLowerCase().startsWith(r))) continue;
+      const tally = { files: 0, release: 0 };
+      const bytes = await videoBytes(dir, 0, { n: 40000 }, tally);
+      if (bytes < 3 * 1024 ** 3) continue;
+      const drive = dir.slice(0, 1).toUpperCase();
+      const library = tally.files > 0 && tally.release / tally.files >= 0.5;
+      out.push(library
+        ? { label: `Films & shows: ${dir} (${(bytes / 1024 ** 3).toFixed(0)} GB)`, source: dir, kind: "movies", dest: `NexusArchive/From this PC/${path.basename(dir)} (${drive})`, bytes }
+        : { label: `Personal videos: ${dir} (${(bytes / 1024 ** 3).toFixed(0)} GB)`, source: dir, kind: "files", dest: `Personal/From this PC/${path.basename(dir)} (${drive})`, bytes });
+    }
+    mediaFolders = out.sort((a, b) => b.bytes - a.bytes);
+    log("INFO", `Found ${out.length} video folder(s) on this PC to offer for upload`, "drives");
+  }
+  setTimeout(() => void findMediaFolders().catch(() => {}), 90_000).unref?.();
+  setInterval(() => void findMediaFolders().catch(() => {}), 6 * 3600_000).unref?.();
+
   // Google Drive accounts, local disks and upload-and-verify jobs (server/drives.ts).
   const drives = createDrives({
     persistDir: PERSIST_DIR,
     log: (level, msg) => log(level, msg, "drives"),
     callerOf: (req) => access.callerOf(req),
     gameModeActive: () => gameMode.active(),
+    siteBusy: () => siteBusy(),
     suggestions: async () => {
       const out: Array<{ label: string; source: string; kind: "roms" | "music"; dest: string }> = [];
       const vc = await getVaultConfig().catch(() => null);
@@ -5751,6 +5828,7 @@ async function startServer() {
         if (vaultRoot && r.toLowerCase().startsWith(vaultRoot)) continue;
         out.push({ label: `ROMs: ${r}`, source: r, kind: "roms", dest: `NexusArchive/roms/${romDest(r)}` });
       }
+      for (const m of mediaFolders) out.push({ label: m.label, source: m.source, kind: m.kind, dest: m.dest });
       for (const r of musicRoots()) {
         if (/^[A-Za-z]:\\Music$/i.test(r)) out.push({ label: `Music: ${r}`, source: r, kind: "music", dest: `NexusArchive/music/${r.slice(0, 1).toUpperCase()}` });
       }

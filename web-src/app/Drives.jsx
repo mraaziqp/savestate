@@ -144,6 +144,57 @@ export function Pane({ side, sources, state, setState, other, onChanged, onOfflo
   );
 }
 
+// Clearing the PC, in one place: what is safe to delete now, and the video
+// folders that are not on Drive yet (found on the host's disks).
+function FreeSpace({ local, jobs, suggestions, remote, onAction, startOffload }) {
+  const [busy, setBusy] = useState(false);
+  const ready = jobs.filter((j) => j.status === "verified" && (j.verify?.matched ?? 0) > 0);
+  const readyBytes = ready.reduce((n, j) => n + (j.verify?.matchedBytes ?? 0), 0);
+  const videos = suggestions.filter((x) => /^(Films & shows|Personal videos): /.test(x.label) && !x.status);
+  const roms = suggestions.filter((x) => x.kind === "roms" && !x.status);
+  const pending = jobs.filter((j) => ["queued", "copying", "verifying", "paused", "failed", "incomplete"].includes(j.status));
+  const pendingBytes = pending.reduce((n, j) => n + Math.max(0, (j.stats.totalBytes || 0) - (j.stats.bytes || 0)), 0);
+  async function freeAll() {
+    if (!window.confirm(`Every file in these ${ready.length} folder(s) is confirmed on Google Drive with matching checksums:\n\n${ready.map((j) => `• ${j.source} (${gb(j.verify.matchedBytes)})`).join("\n")}\n\nDelete them from this PC to free ${gb(readyBytes)}? The copies on Drive stay.`)) return;
+    setBusy(true);
+    for (const j of ready) await onAction(j, "delete-local", { confirm: j.id });
+    setBusy(false);
+  }
+  const upload = (x, autoFree) => {
+    if (autoFree && !window.confirm(`Upload ${x.source} to Google Drive, check every file, then delete each confirmed file from this PC?\n\nNothing is deleted until its copy on Drive matches exactly.`)) return;
+    startOffload({ source: x.source, remote, dest: x.dest, kind: x.kind, label: x.label.replace(/ \([^)]*\)$/, ""), autoFree });
+  };
+  return (
+    <div className="nxa-card">
+      <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="shield" /> Free up space on this PC</h3>
+        <p className="nxa-sub">Folders go to Google Drive, every file is checked against Drive, and only then is it removed from this PC. Everything keeps playing in SaveState from Drive.</p></div></div>
+      <div className="nxa-row nxa-wrap" style={{ gap: 8, marginBottom: 10 }}>
+        {local.map((l) => <span key={l.name} className={`nxa-pill ${l.free < 50 * 1024 ** 3 ? "warn" : ""}`}>{l.name} {gb(l.free)} free</span>)}
+      </div>
+      {ready.length > 0 ? (
+        <div className="nxa-row nxa-wrap" style={{ marginBottom: 12 }}>
+          <button className="nxa-btn primary" disabled={busy} onClick={freeAll}>{busy ? <Icon name="spinner" /> : <Icon name="trash" />} Free {gb(readyBytes)} now</button>
+          <span className="nxa-faint" style={{ fontSize: 12 }}>{ready.length} folder(s) already confirmed on Drive: {ready.map((j) => j.source).join(" · ")}</span>
+        </div>
+      ) : <p className="nxa-faint" style={{ fontSize: 12 }}>Nothing is waiting to be freed{pending.length ? `; ${pending.length} upload(s) still going (${gb(pendingBytes)} to go)` : ""}.</p>}
+      {videos.length > 0 && <>
+        <p className="nxa-label" style={{ marginTop: 8 }}>VIDEO FOLDERS NOT ON DRIVE YET (BIGGEST FIRST)</p>
+        <div style={{ display: "grid", gap: 6 }}>
+          {videos.map((x) => (
+            <div key={x.source} className="nxa-file" style={{ alignItems: "center" }}>
+              <Icon name="film" />
+              <div className="nxa-grow"><b>{x.label}</b><small>{x.dest.startsWith("NexusArchive/") ? `to ${x.dest}; appears in Movies & TV once uploaded` : `to ${x.dest} on your Drive; private, not shown to anyone in SaveState`}</small></div>
+              <button className="nxa-btn sm primary" onClick={() => upload(x, true)}>Upload & free</button>
+              <button className="nxa-btn sm" onClick={() => upload(x, false)}>Upload only</button>
+            </div>
+          ))}
+        </div>
+      </>}
+      {roms.length > 0 && <p className="nxa-faint" style={{ fontSize: 12, marginTop: 10 }}>{roms.length} ROM folder(s) aren't backed up yet; see "Keep a copy of everything on Drive" below.</p>}
+    </div>
+  );
+}
+
 function JobCard({ job, onAction }) {
   const [cls, label] = STATUS[job.status] ?? ["", job.status];
   const s = job.stats;
@@ -197,6 +248,15 @@ function JobCard({ job, onAction }) {
           ? <>Kept backed up: new files in this folder go to Drive every day{job.nextSyncAt ? ` (next ${new Date(job.nextSyncAt).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })})` : ""}</>
           : "Back up once"}</span>
         {["verified", "kept", "done"].includes(job.status) && <button className="nxa-link" onClick={() => onAction(job, "sync-now")}>Check for new files now</button>}
+      </div>
+      <div className="nxa-row nxa-wrap" style={{ marginTop: 6, fontSize: 12 }}>
+        <button className={`nxa-switch ${job.autoFree ? "on" : ""}`} role="switch" aria-checked={!!job.autoFree} aria-label="Free this PC automatically"
+          onClick={() => {
+            if (job.autoFree) return onAction(job, "autofree-off");
+            if (!window.confirm(`Delete files in ${job.source} from this PC automatically, each time they are confirmed on Google Drive with matching checksums?${job.status === "verified" ? `\n\n${gb(job.verify?.matchedBytes)} already confirmed will be freed now.` : ""}\n\nThe copies on Drive stay; files that change before the check are left alone.`)) return;
+            onAction(job, "autofree-on", { confirm: job.id });
+          }} />
+        <span className="nxa-dim">{job.autoFree ? "Frees this PC automatically once files are confirmed on Drive" : "Asks before deleting anything from this PC"}</span>
       </div>
     </div>
   );
@@ -367,12 +427,12 @@ export function DrivesPage() {
     setMsg(""); setError("");
     try {
       await api("/api/admin/offload", { method: "POST", body: { kind: "files", ...body } });
-      setMsg(`Upload of "${body.label ?? body.source}" queued. It carries on after pauses and restarts, and asks before deleting anything from this PC.`);
+      setMsg(`Upload of "${body.label ?? body.source}" queued. It carries on after pauses and restarts${body.autoFree ? ", and frees this PC as each file is confirmed on Drive" : ", and asks before deleting anything from this PC"}.`);
       loadJobs();
     } catch (e) { setError(e.message); }
   };
   const onAction = async (job, action, body = {}) => {
-    try { await api(`/api/admin/offload/${job.id}/${action}`, { method: "POST", body }); loadJobs(); if (action === "delete-local") loadInfo(); }
+    try { await api(`/api/admin/offload/${job.id}/${action}`, { method: "POST", body }); loadJobs(); if (action === "delete-local" || action === "autofree-on") setTimeout(loadInfo, 4000); }
     catch (e) { setError(e.message); }
   };
   const backupRoms = async () => {
@@ -402,6 +462,8 @@ export function DrivesPage() {
       {gameMode && <Note>A game is running on this PC, so new uploads wait until it closes.</Note>}
       {msg && <Note kind="ok">{msg}</Note>}
       {error && <Note kind="bad">{error}</Note>}
+
+      <FreeSpace local={info.local} jobs={jobs} suggestions={suggestions} remote={form.remote} onAction={onAction} startOffload={startOffload} />
 
       <div className="nxa-card">
         <div className="nxa-card-head"><div><h3>Move a folder from this PC to Google Drive</h3>
@@ -457,7 +519,7 @@ export function DrivesPage() {
           </div>
           <p className="nxa-faint" style={{ fontSize: 12, marginTop: -6 }}>Uploads remember where they are: pausing, closing the app, a restart or a power cut only means they carry on from the last finished file. A stuck upload is restarted, and a failed one tries again by itself.</p>
           {speedLimit && <p className="nxa-faint" style={{ fontSize: 12, marginTop: -6 }}>
-            {speedLimit === "off" ? "Uploading at full speed (overnight)." : `Upload speed is capped at ${speedLimit}B/s right now so streaming and the site stay quick${gameMode ? " while you game" : "; it runs at full speed from 01:00 to 07:00"}.`}
+            {speedLimit === "off" ? "Uploading at full speed: nobody is watching or browsing right now (and from 01:00 to 07:00). The moment someone starts, it slows down so the site stays quick." : `Upload speed is held at ${speedLimit}B/s while ${gameMode ? "you game" : "someone is using SaveState"}, so streaming stays smooth. It goes back to full speed a few minutes after they stop.`}
           </p>}
           {jobs.map((j) => <JobCard key={j.id} job={j} onAction={onAction} />)}
         </div>

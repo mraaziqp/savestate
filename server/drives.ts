@@ -31,6 +31,8 @@ export type DrivesDeps = {
   onUploaded?: (kind: OffloadKind) => void;
   /** No new jobs start while a game is running on the host. */
   gameModeActive?: () => boolean;
+  /** Someone is watching, listening or browsing right now (uploads hold back). */
+  siteBusy?: () => boolean;
   /** Who is calling (members' own drives are checked against it). */
   callerOf?: (req: express.Request) => Promise<{ userId: string | null; admin: boolean }>;
   /** Folders on this PC worth moving to Drive (ROM and music folders), with where each should go. */
@@ -49,6 +51,8 @@ type OffloadJob = {
   deleted: null | { at: number; files: number; bytes: number; skipped: number };
   /** Re-run every day so files added to the folder later get backed up too (copy only, never deletes). */
   keepSynced?: boolean;
+  /** Delete the confirmed files from this PC as soon as the check passes (the owner's choice per job). */
+  autoFree?: boolean;
   nextSyncAt?: number | null;
   attempts?: number;
   retryAt?: number | null;
@@ -235,12 +239,27 @@ export function createDrives(deps: DrivesDeps) {
   //   NEXUS_UPLOAD_FULL_HOURS     hours at full speed (default 1-7)
   //   NEXUS_UPLOAD_BWLIMIT_GAMING cap while gaming (default 64k)
   const jobRc = new Map<string, { url: string; auth: string; rate: string }>();
+  //   Idle boost (2026-10-15): the cap is only needed while someone is using
+  //   the site. At 650k a 500 GB backlog took months; with nobody watching or
+  //   browsing, uploads run flat out (NEXUS_UPLOAD_BWLIMIT_IDLE, default off)
+  //   and drop back to the cap within seconds of someone arriving.
   function desiredRate(): string {
     if (deps.gameModeActive?.()) return process.env.NEXUS_UPLOAD_BWLIMIT_GAMING?.trim() || "64k";
     const [from, to] = (process.env.NEXUS_UPLOAD_FULL_HOURS?.trim() || "1-7").split("-").map(Number);
     const h = new Date().getHours();
     const full = from <= to ? h >= from && h < to : h >= from || h < to;
-    return full ? "off" : process.env.NEXUS_UPLOAD_BWLIMIT?.trim() || "650k";
+    if (full) return "off";
+    if (deps.siteBusy && !deps.siteBusy()) return process.env.NEXUS_UPLOAD_BWLIMIT_IDLE?.trim() || "off";
+    return process.env.NEXUS_UPLOAD_BWLIMIT?.trim() || "650k";
+  }
+  /** Apply the current limit to every running upload now (someone just arrived). */
+  function applyRate() {
+    const rate = desiredRate();
+    for (const [id, c] of jobRc) {
+      if (c.rate === rate) continue;
+      fetch(`${c.url}/core/bwlimit`, { method: "POST", headers: { Authorization: c.auth, "Content-Type": "application/json" }, body: JSON.stringify({ rate }) })
+        .then((r) => { if (r.ok) { c.rate = rate; deps.log("INFO", `Upload ${id}: speed limit now ${rate}`); } }).catch(() => {});
+    }
   }
   const bwTimer = setInterval(() => {
     const rate = desiredRate();
@@ -345,6 +364,11 @@ export function createDrives(deps: DrivesDeps) {
       saveNow();
       deps.log("INFO", `Upload ${job.id} checked: ${v.matched} file(s) confirmed on Drive${v.missing + v.differ + v.errors ? `, ${v.missing + v.differ + v.errors} problem(s)` : ""}`);
       if (job.status === "verified") deps.onUploaded?.(job.kind);
+      // The owner asked for this folder to be cleared once it is safely on Drive.
+      if (job.status === "verified" && job.autoFree && (job.verify?.matched ?? 0) > 0) {
+        deps.log("INFO", `Upload ${job.id}: verified, freeing this PC as asked`);
+        await deleteVerified(job).catch((e) => deps.log("WARN", `Upload ${job.id}: freeing space failed: ${e?.message ?? e}`));
+      }
       if (job.status === "incomplete") failed(job, `${v.missing + v.differ + v.errors} file(s) not confirmed on Drive yet`);
       if (job.keepSynced) job.nextSyncAt = Date.now() + 24 * 3600_000;
       pump();
@@ -621,7 +645,7 @@ export function createDrives(deps: DrivesDeps) {
           kind, source, remote, dest, status: "queued", createdAt: Date.now(), startedAt: null, finishedAt: null,
           stats: newStats(), lastError: null, verify: null, deleted: null,
           // ROM folders are irreplaceable: keep them backed up as they grow.
-          keepSynced: req.body?.keepSynced ?? kind === "roms", nextSyncAt: null, attempts: 0, retryAt: null, lastProgressAt: null,
+          keepSynced: req.body?.keepSynced ?? kind === "roms", autoFree: req.body?.autoFree === true, nextSyncAt: null, attempts: 0, retryAt: null, lastProgressAt: null,
         };
         jobs.unshift(job);
         saveNow();
@@ -647,6 +671,12 @@ export function createDrives(deps: DrivesDeps) {
         if (job.status !== "verified") return res.status(400).json({ error: "Only an upload whose every file was confirmed on Drive can delete local copies." });
         if (req.body?.confirm !== job.id) return res.status(400).json({ error: "Confirmation missing." });
         void deleteVerified(job);
+      } else if (act === "autofree-on" || act === "autofree-off") {
+        // On: this folder empties itself onto Drive. Needs the same confirmation
+        // as deleting by hand, and frees what is already verified straight away.
+        if (act === "autofree-on" && req.body?.confirm !== job.id) return res.status(400).json({ error: "Confirmation missing." });
+        job.autoFree = act === "autofree-on";
+        if (job.autoFree && job.status === "verified" && (job.verify?.matched ?? 0) > 0) void deleteVerified(job);
       } else if (act === "sync-on" || act === "sync-off") {
         job.keepSynced = act === "sync-on";
         job.nextSyncAt = job.keepSynced && ["verified", "kept", "done"].includes(job.status) ? Date.now() + 24 * 3600_000 : null;
@@ -664,5 +694,5 @@ export function createDrives(deps: DrivesDeps) {
     });
   }
 
-  return { register, findRclone, rc, emailOf, jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
+  return { register, findRclone, rc, emailOf, applyRate, jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
 }

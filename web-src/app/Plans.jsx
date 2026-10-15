@@ -228,13 +228,49 @@ function KeyRow({ k, reload }) {
   );
 }
 
+// Resend sends to anyone only once the domain's DNS records are in place.
+function ResendDomain() {
+  const d = useLoad(() => api("/api/admin/service-keys/resend/domain"), []);
+  const [msg, setMsg] = useState("");
+  const dom = d.data?.domain;
+  if (!dom) return d.error ? <Note kind="bad">{d.error}</Note> : null;
+  const verified = dom.status === "verified";
+  async function verify() {
+    setMsg("");
+    try { await api("/api/admin/service-keys/resend/verify", { method: "POST", body: { id: dom.id } }); setMsg("Resend is checking the records; this can take a few minutes after you add them."); setTimeout(d.reload, 8000); }
+    catch (e) { setMsg(e.message); }
+  }
+  return (
+    <div className="nxa-card" style={{ padding: 16 }}>
+      <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>Email domain {dom.name} {verified ? <span className="nxa-pill ok">Verified</span> : <span className="nxa-pill warn">{dom.status === "pending" ? "Checking" : "Not verified"}</span>}</h3>
+      {verified ? <p className="nxa-sub" style={{ margin: 0 }}>Password-reset emails go to every member.</p> : <>
+        <p className="nxa-sub">Until this is verified, reset emails only reach your own address. Add these records at your DNS host (savestate.co.za uses Cloudflare: <a href="https://dash.cloudflare.com/?to=/:account/:zone/dns/records" target="_blank" rel="noreferrer">DNS &gt; Records <Icon name="ext" size={11} /></a> &gt; Add record; for each, set Proxy status to <b>DNS only</b>), then press Check now.</p>
+        <div style={{ overflowX: "auto" }}>
+          <table className="nxa-table" style={{ fontSize: 12.5 }}><thead><tr><th>Type</th><th>Name</th><th>Value</th><th>Priority</th><th /></tr></thead><tbody>
+            {dom.records.map((r) => (
+              <tr key={r.type + r.name}>
+                <td><b>{r.type}</b></td><td className="nxa-code">{r.name}</td>
+                <td><span className="nxa-code" style={{ wordBreak: "break-all" }}>{r.value.length > 60 ? `${r.value.slice(0, 60)}…` : r.value}</span></td>
+                <td>{r.priority ?? ""}</td>
+                <td><button className="nxa-btn sm" onClick={() => navigator.clipboard?.writeText(r.value)}><Icon name="copy" size={12} /> Copy value</button>{r.status === "verified" && <span className="nxa-pill ok" style={{ marginLeft: 6 }}>OK</span>}</td>
+              </tr>
+            ))}
+          </tbody></table>
+        </div>
+        <div className="nxa-row" style={{ marginTop: 10 }}><button className="nxa-btn sm primary" onClick={verify}><Icon name="refresh" /> Check now</button></div>
+      </>}
+      {msg && <Note>{msg}</Note>}
+    </div>
+  );
+}
+
 function KeysAdmin() {
   const keys = useLoad(() => api("/api/admin/service-keys"), []);
   if (!keys.data) return keys.error ? <Note kind="bad">{keys.error}</Note> : <p className="nxa-dim"><Icon name="spinner" /> Loading…</p>;
   return (
     <>
       <Note>Keys for outside services, stored encrypted on the host. A key saved here is used instead of the same one in .env.</Note>
-      {keys.data.keys.map((k) => <KeyRow key={k.env} k={k} reload={keys.reload} />)}
+      {keys.data.keys.map((k) => <React.Fragment key={k.env}><KeyRow k={k} reload={keys.reload} />{k.env === "RESEND_API_KEY" && k.set && <ResendDomain />}</React.Fragment>)}
     </>
   );
 }
