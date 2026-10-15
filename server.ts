@@ -11,7 +11,7 @@ import dns from "dns";
 import { exec, execFile, spawn } from "child_process";
 import { promisify } from "util";
 import { readdir, stat, readFile, writeFile, statfs, mkdir, rename as renameFile, access as fsAccess, unlink, rm, copyFile, open as fsOpen } from "fs/promises";
-import { createReadStream, createWriteStream, existsSync, readFileSync, readdirSync, statSync } from "fs";
+import { createReadStream, createWriteStream, existsSync, readFileSync, readdirSync, statSync, realpathSync } from "fs";
 import { pipeline } from "stream/promises";
 import crypto from "crypto";
 import { gunzipSync } from "zlib";
@@ -1279,7 +1279,8 @@ async function romFileIndex(roots: string[]): Promise<RomIndex> {
           else if (e.isFile() && !names.has(e.name.toLowerCase())) names.set(e.name.toLowerCase(), path.join(dir, e.name));
         }
       };
-      for (const r of roots) await walk(r, 0);
+      // Local disks first: the first copy of a name found is the one used.
+      for (const r of [...roots].sort((a, b) => Number(isCloudPath(a)) - Number(isCloudPath(b)))) await walk(r, 0);
       romIndex = { key, at: Date.now(), names };
       return names;
     })().finally(() => { romIndexBuilding = null; });
@@ -1295,7 +1296,34 @@ async function romFileIndex(roots: string[]): Promise<RomIndex> {
 }
 const romBasename = (rel: string) => path.basename(String(rel ?? "").replace(/\\/g, "/")).toLowerCase();
 
+/**
+ * True for paths on Google Drive for Desktop (directly, or through a junction
+ * such as the library folder). A ROM there is fetched from the internet before
+ * it can start, so a copy on a local disk is always preferred.
+ */
+const cloudRootCache = new Map<string, boolean>();
+function isCloudPath(p: string): boolean {
+  const drive = (process.env.NEXUS_CLOUD_DRIVE ?? "I:").toUpperCase();
+  const top = path.resolve(p).split(path.sep).slice(0, 4).join(path.sep);
+  if (!cloudRootCache.has(top)) {
+    let real = top;
+    try { real = realpathSync.native(top); } catch { /* not there */ }
+    cloudRootCache.set(top, real.toUpperCase().startsWith(drive));
+  }
+  return path.resolve(p).toUpperCase().startsWith(drive) || cloudRootCache.get(top)!;
+}
+
 async function resolveRomPath(configRoot: string, game: Record<string, any>, extraRoots: string[] = []): Promise<{ absolutePath: string | null; relativePath: string | null }> {
+  const found = await resolveRomPathAnywhere(configRoot, game, extraRoots);
+  // Found on Drive: use the same file on a local disk when there is one.
+  if (found.absolutePath && isCloudPath(found.absolutePath)) {
+    const local = romIndex?.names.get(path.basename(found.absolutePath).toLowerCase());
+    if (local && !isCloudPath(local) && await fsAccess(local).then(() => true, () => false)) return { absolutePath: local, relativePath: found.relativePath };
+  }
+  return found;
+}
+
+async function resolveRomPathAnywhere(configRoot: string, game: Record<string, any>, extraRoots: string[] = []): Promise<{ absolutePath: string | null; relativePath: string | null }> {
   const rawRel = String(game.relative_path ?? game.relativePath ?? "").trim();
   const cleanRel = rawRel.replace(/\\/g, "/").replace(/^\.\//, "");
 
@@ -2826,7 +2854,9 @@ function rowToGame(row: Record<string, any>) {
   const resolvedCore = storedCore && storedCore === expectedCore ? storedCore : expectedCore;
   return {
     id: row.id,
-    title: row.title,
+    // Switch dumps carry the title ID and version numbers in the name
+    // ("Luigis Mansion 2 HD 010048701995E000 1 0 0 0 17 0 1").
+    title: String(row.title ?? "").replace(/\s+[0-9A-F]{16}(?:\s+\d+)*\s*$/i, "").trim() || row.title,
     platform,
     coreId: resolvedCore,
     boxArt: row.box_art ?? "",
@@ -2866,13 +2896,30 @@ function normalizeTitleKey(input?: string): string {
 }
 
 function gameIdentityKey(game: ReturnType<typeof rowToGame>): string {
+  // The same ROM file name on the same platform is the same game, wherever it
+  // sits: the copy backed up to Drive (./PS2/Okami.iso under the library) and
+  // the original on this PC (./Okami.iso) were listed twice (2026-10-15).
+  const file = romBasename(game.relativePath ?? "");
+  // An arcade set (mslug.zip) is the same game whether it was scanned from the
+  // Neo Geo, MAME or an unsorted folder; Metal Slug was listed three times.
+  if (file.endsWith(".zip") && ARCADE_PLATFORM_KEYS.has(canonicalPlatformKey(game.platform))) return `file:arcade:${file}`;
+  if (file) return `file:${canonicalPlatformKey(game.platform)}:${file}`;
   const relKey = normalizeRelativePathKey(game.relativePath);
   if (relKey) return `rel:${relKey}`;
   return `title:${canonicalPlatformKey(game.platform)}:${normalizeTitleKey(game.title)}`;
 }
 
+const ARCADE_PLATFORM_KEYS = new Set(["neogeo", "mame", "arcade", "fbneo", "cps1", "cps2", "cps3", "unknown", ""]);
+
 function gameQualityScore(game: ReturnType<typeof rowToGame>): number {
   let score = 0;
+  // Among copies of one game: a known console beats "unknown", Neo Geo beats
+  // the generic MAME entry, and a real title beats the bare file name.
+  const platform = canonicalPlatformKey(game.platform);
+  if (platform !== "unknown") score += 3;
+  if (platform === "neogeo") score += 1;
+  const stem = romBasename(game.relativePath ?? "").replace(/\.[^.]+$/, "");
+  if (stem && String(game.title ?? "").toLowerCase().trim() !== stem) score += 2;
   if (String(game.boxArt ?? "").trim()) score += 30;
   if (String(game.heroImage ?? "").trim()) score += 6;
   if (String(game.metadata?.description ?? "").trim()) score += 4;
@@ -8035,7 +8082,9 @@ async function startServer() {
         await launchStandaloneEmulatorAndRespond(res, req, standalone.label, exe, standalone.buildArgs(romPath), game, game_id);
         return;
       }
-      return res.status(422).json({
+      // Without standalone Dolphin, GameCube and Wii still run on RetroArch's
+      // Dolphin core: carry on to the RetroArch launch below.
+      if (!(await standaloneFallsBackToRetroArch(standalonePlatform))) return res.status(422).json({
         success: false,
         romFoundOnHost: true,
         error: `${game.platform}: ${standalone.label} not found on this host. ${standalone.installHint}`,
@@ -8235,9 +8284,14 @@ async function startServer() {
     if (!game) game = mem.games.find((g) => g.id === game_id) as any ?? null;
     if (!game) return res.status(404).json({ ok: false, checks: [], error: 'Game not found' });
 
-    const platform = (game.platform ?? '').toLowerCase();
+    // The platform the library shows and the launch uses: inferred from the
+    // record, then from the folder the file is in. 71 PS2 games stored as
+    // "unknown" were checked against an "Auto-Detect" RetroArch core and
+    // reported unplayable.
+    let platform = inferPlatformFromRecord(game.platform, game.relative_path ?? game.relativePath, game.title, game.core_id ?? game.coreId).toLowerCase();
     const resolvedRom = await resolveRomPath(config.root_path, game, getExtraRoots(config));
     const romPath = resolvedRom.absolutePath;
+    if (platform === 'unknown' && romPath) platform = inferPlatformFromRecord('unknown', romPath, game.title).toLowerCase();
 
     const checks: { name: string; ok: boolean; detail: string }[] = [];
 
@@ -8259,8 +8313,13 @@ async function startServer() {
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'gamecube' || platform === 'wii') {
       emuPath = await detectDolphinPath();
+      coreDetail = 'Not required (standalone emulator)';
+      if (!emuPath && await standaloneFallsBackToRetroArch(platform)) {
+        emuPath = await detectRetroArchPath();
+        coreDetail = 'Dolphin core installed';
+      }
       checks.push({ name: 'Emulator (Dolphin)', ok: !!emuPath, detail: emuPath ? emuPath : 'Dolphin not found — install it or set DOLPHIN_PATH' });
-      coreOk = true; coreDetail = 'Not required (standalone emulator)';
+      coreOk = true;
     } else if (platform === 'xbox') {
       emuPath = await detectXemuPath();
       checks.push({ name: 'Emulator (xemu)', ok: !!emuPath, detail: emuPath ? emuPath : 'xemu not found — install it or set XEMU_PATH' });
@@ -8301,7 +8360,7 @@ async function startServer() {
 
     // 4. BIOS (PS2 only)
     if (platform === 'ps2') {
-      const biosResult = await findPs2BiosDir();
+      const biosResult = await findPs2BiosForLaunch(emuPath);
       let biosOk = false;
       let biosDetail = '';
       if (biosResult) {
@@ -14503,6 +14562,44 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }
 
   // Resolve the PS2 BIOS directory, trying all case variants the snap/system may use.
+  // Where the emulator that will run a PS2 game reads its BIOS. Standalone
+  // PCSX2 uses the bios folder beside a portable install or
+  // Documents\PCSX2\bios, not RetroArch's system folder; looking only there
+  // failed the launch check for every PS2 game (146) on a host whose PCSX2
+  // had its BIOS (2026-10-15). A PS2 BIOS is 4 MB, which keeps a PS1 BIOS in
+  // a shared folder from counting. Used for the launch check only, so what
+  // "clone host setup" exports is unchanged.
+  // GameCube and Wii launch on standalone Dolphin when it is installed, and
+  // otherwise on RetroArch's Dolphin core; on this host only the core existed
+  // and all 125 GameCube games failed with "Dolphin not found" (2026-10-15).
+  async function standaloneFallsBackToRetroArch(platform: string): Promise<boolean> {
+    if (platform !== 'gamecube' && platform !== 'wii') return false;
+    if (!(await detectRetroArchPath().catch(() => null))) return false;
+    const coresDir = await getCoresDir().catch(() => null);
+    if (!coresDir) return false;
+    const ext = process.platform === 'win32' ? '.dll' : '.so';
+    try { await fsAccess(path.join(coresDir, `${PLATFORM_CORES[platform].coreId}_libretro${ext}`)); return true; } catch { return false; }
+  }
+
+  async function findPs2BiosForLaunch(emulatorPath: string | null): Promise<{ dir: string; file: string | null } | null> {
+    const dirs: string[] = [];
+    if (emulatorPath && !/libretro/i.test(emulatorPath)) dirs.push(path.join(path.dirname(emulatorPath), 'bios'));
+    dirs.push(path.join(os.homedir(), 'Documents', 'PCSX2', 'bios'));
+    const retro = await findPs2BiosDir().catch(() => null);
+    if (retro?.dir) dirs.push(retro.dir);
+    let firstFound: { dir: string; file: string | null } | null = null;
+    for (const dir of dirs) {
+      try {
+        for (const f of await readdir(dir)) {
+          if (!/\.bin$/i.test(f)) continue;
+          if ((await stat(path.join(dir, f))).size >= 2 * 1024 * 1024) return { dir, file: f };
+        }
+        firstFound ??= { dir, file: null };
+      } catch { /* not there */ }
+    }
+    return firstFound;
+  }
+
   async function findPs2BiosDirNow(): Promise<{ dir: string; file: string | null } | null> {
     const coresDir = await getCoresDir().catch(() => null);
     if (!coresDir) return null;
@@ -24212,14 +24309,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ":: Check for Node.js — install silently via winget if missing",
       `where node >nul 2>&1`,
       "if errorlevel 1 (",
-      "  echo [Nexus] Node.js not found. Installing silently via winget...",
+      "  echo [SaveState] Node.js not found. Installing silently via winget...",
       `  where winget >nul 2>&1`,
       "  if not errorlevel 1 (",
       `    winget install -e --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements --silent >nul 2>&1`,
       `    for /f "tokens=*" %%i in ('where /r "%ProgramFiles%\\nodejs" node.exe 2^>nul') do set "NODE_EXE=%%i"`,
       `    if "!NODE_EXE!"=="node.exe" for /f "tokens=*" %%i in ('where /r "%ProgramFiles(x86)%\\nodejs" node.exe 2^>nul') do set "NODE_EXE=%%i"`,
       "  ) else (",
-      "    echo [Nexus] winget not available. Install Node.js LTS from https://nodejs.org/ then re-run.",
+      "    echo [SaveState] winget not available. Install Node.js LTS from https://nodejs.org/ then re-run.",
       "    pause",
       "    exit /b 1",
       "  )",
@@ -24234,16 +24331,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ":: Verify Node.js is now available",
       `"%NODE_EXE%" --version >nul 2>&1`,
       "if errorlevel 1 (",
-      "  echo [Nexus] Node.js not accessible. Download and install it from https://nodejs.org/ then retry.",
+      "  echo [SaveState] Node.js not accessible. Download and install it from https://nodejs.org/ then retry.",
       "  pause",
       "  exit /b 1",
       ")",
       "",
       ":: Download client-launcher.cjs from the NexusEmu host",
-      "echo [Nexus] Downloading client launcher from %BASE_URL%...",
+      "echo [SaveState] Downloading the SaveState game launcher from %BASE_URL%...",
       `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Invoke-WebRequest -Uri '%BASE_URL%/api/client-launcher/cjs' -OutFile '%LAUNCHER_CJS%' -UseBasicParsing"`,
       "if errorlevel 1 (",
-      "  echo [Nexus] Download failed. Make sure you can reach %BASE_URL% and retry.",
+      "  echo [SaveState] Download failed. Check the internet connection and run this again.",
       "  pause",
       "  exit /b 1",
       ")",
@@ -24268,18 +24365,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       `echo WshShell.Run Chr(34) ^& nodeExe ^& Chr(34) ^& " " ^& Chr(34) ^& WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") ^& "\\NexusEmuClient\\client-launcher.cjs" ^& Chr(34), 0, False>> "%RUNNER_VBS%"`,
       "",
       ":: Register Task Scheduler autostart (wscript.exe runner — fully windowless)",
-      "echo [Nexus] Registering autostart via Task Scheduler...",
+      "echo [SaveState] Registering autostart via Task Scheduler...",
       `schtasks /delete /tn "%TASK_NAME%" /f >nul 2>&1`,
       `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$u = [Environment]::UserDomainName + '\\' + [Environment]::UserName; $xml = '<?xml version=''1.0'' encoding=''UTF-16''?><Task version=''1.2'' xmlns=''http://schemas.microsoft.com/windows/2004/02/mit/task''><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>' + $u + '</UserId></LogonTrigger></Triggers><Principals><Principal id=''Author''><UserId>' + $u + '</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT2M</Interval><Count>999</Count></RestartOnFailure><Enabled>true</Enabled></Settings><Actions><Exec><Command>wscript.exe</Command><Arguments>' + [System.Environment]::GetEnvironmentVariable('LOCALAPPDATA') + '\\\\NexusEmuClient\\\\nexus-runner.vbs</Arguments></Exec></Actions></Task>'; $p=Join-Path $env:TEMP 'nexus-task.xml'; [System.IO.File]::WriteAllText($p,$xml,[System.Text.Encoding]::Unicode); schtasks /create /tn 'NexusEmuClientLauncher' /xml $p /f; Remove-Item $p -Force"`,
       "",
       ":: Register nexusemu:// protocol handler",
-      "echo [Nexus] Registering nexusemu:// protocol handler...",
+      "echo [SaveState] Registering nexusemu:// protocol handler...",
       `reg add "HKCU\\Software\\Classes\\nexusemu" /ve /d "URL:NexusEmu Client Launcher" /f >nul 2>&1`,
       `reg add "HKCU\\Software\\Classes\\nexusemu" /v "URL Protocol" /d "" /f >nul 2>&1`,
       `reg add "HKCU\\Software\\Classes\\nexusemu\\shell\\open\\command" /ve /d "wscript.exe \\\"%CLIENT_DIR%\\nexus-runner.vbs\\"" /f >nul 2>&1`,
       "",
       ":: Launch the Node.js client launcher right now (via VBS — zero flashing)",
-      "echo [Nexus] Starting NexusEmu client launcher...",
+      "echo [SaveState] Starting the SaveState game launcher...",
       `wscript.exe "%RUNNER_VBS%"`,
       "",
       ":: Wait up to 20 seconds for health check to confirm it started",
@@ -24294,21 +24391,27 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ")",
       "",
       ":launcher_ready",
+      "",
+      ":: The SaveState app: a Desktop and Start menu shortcut that opens the site",
+      ":: in its own window (Edge app mode, part of Windows) with the SaveState icon.",
+      "echo [SaveState] Adding the SaveState shortcut to the Desktop and Start menu...",
+      `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "try{Invoke-WebRequest -Uri '%BASE_URL%/favicon.ico' -OutFile '%CLIENT_DIR%\\savestate.ico' -UseBasicParsing}catch{}; $edge=@((Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft\\Edge\\Application\\msedge.exe'),(Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Microsoft\\Edge\\Application\\msedge.exe')) | Where-Object { Test-Path $_ } | Select-Object -First 1; if($edge){$w=New-Object -ComObject WScript.Shell; foreach($d in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))){$l=$w.CreateShortcut((Join-Path $d 'SaveState.lnk')); $l.TargetPath=$edge; $l.Arguments='--app=%BASE_URL%'; $l.WorkingDirectory=(Split-Path $edge); $l.Description='SaveState'; if(Test-Path '%CLIENT_DIR%\\savestate.ico'){$l.IconLocation='%CLIENT_DIR%\\savestate.ico'}; $l.Save()}; Start-Process $edge '--app=%BASE_URL%'}"`,
+      "",
       `if "%LAUNCH_OK%"=="1" (`,
       "  echo.",
-      "  echo [Nexus] SUCCESS! Client launcher is running.",
-      "  echo         It auto-starts silently at every Windows login.",
-      "  echo         Return to NexusEmu in your browser — you can close this window.",
+      "  echo [SaveState] All set. Games can now start on this PC from SaveState.",
+      "  echo         The launcher starts by itself at every Windows login.",
+      "  echo         Open SaveState from the Desktop or Start menu. You can close this window.",
       ") else (",
       "  echo.",
-      "  echo [Nexus] Launcher started but health check timed out. Task Scheduler will keep it running.",
+      "  echo [SaveState] Launcher started but health check timed out. Task Scheduler will keep it running.",
       "  echo         If games still show launcher not running, wait 10 seconds then refresh.",
       ")",
       "echo.",
       "timeout /t 5 >nul",
     ].join("\r\n");
 
-    res.setHeader("Content-Disposition", 'attachment; filename="nexus-client-installer.cmd"');
+    res.setHeader("Content-Disposition", 'attachment; filename="SaveState-Setup.cmd"');
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.send(installer);
@@ -24729,6 +24832,78 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return null;
   }
 
+  // ── Book tidy ────────────────────────────────────────────────────────────
+  // Uploads were titled from their file name ("1778931884315 p7n9pw", author
+  // "Unknown") and the same EPUB uploaded four times became four books. The
+  // title, author and description are read from the EPUB itself, and exact
+  // copies (same content hash) are set aside in books/duplicates (not
+  // deleted). Runs once after start and after every upload.
+  const codexHashCache = new Map<string, string>();
+  async function codexFileHash(file: string): Promise<string> {
+    const st = await stat(file);
+    const k = `${file}|${st.size}|${st.mtimeMs}`;
+    if (!codexHashCache.has(k)) codexHashCache.set(k, crypto.createHash("sha1").update(await readFile(file)).digest("hex"));
+    return codexHashCache.get(k)!;
+  }
+  async function readEpubMeta(file: string): Promise<{ title?: string; author?: string; description?: string; subjects?: string[] }> {
+    try {
+      const AdmZip = (await import("adm-zip")).default;
+      const zip = new AdmZip(file);
+      const container = zip.readAsText("META-INF/container.xml");
+      const opfPath = /full-path="([^"]+)"/.exec(container)?.[1];
+      if (!opfPath) return {};
+      const opf = zip.readAsText(opfPath);
+      const tag = (t: string) => new RegExp(`<dc:${t}[^>]*>([\\s\\S]*?)</dc:${t}>`, "i").exec(opf)?.[1]?.replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").trim();
+      const subjects = [...opf.matchAll(/<dc:subject[^>]*>([^<]+)<\/dc:subject>/gi)].map((m) => m[1].trim()).filter(Boolean).slice(0, 4);
+      return { title: tag("title"), author: tag("creator"), description: tag("description")?.slice(0, 1200), subjects };
+    } catch { return {}; }
+  }
+  const looksUnnamed = (b: CodexBook) => /^\d{10,}[\s_-]+[a-z0-9]{4,8}$/i.test(b.title.trim()) || !b.author || b.author === "Unknown";
+  let codexTidying: Promise<void> | null = null;
+  async function tidyCodexBooks(): Promise<void> {
+    if (codexTidying) return codexTidying;
+    codexTidying = (async () => {
+      const books = await loadCodexMeta();
+      let named = 0, dupes = 0;
+      const seen = new Map<string, CodexBook>();
+      const keep: CodexBook[] = [];
+      const ordered = [...books].sort((a, b) => Number(looksUnnamed(a)) - Number(looksUnnamed(b)) || String(a.addedAt).localeCompare(String(b.addedAt)));
+      for (const b of ordered) {
+        const file = await resolveCodexFilePath(b);
+        if (!file) { keep.push(b); continue; }
+        const hash = await codexFileHash(file).catch(() => "");
+        if (hash && seen.has(hash)) {
+          const dir = path.join(CODEX_DIR, "duplicates");
+          await mkdir(dir, { recursive: true });
+          await renameFile(file, path.join(dir, path.basename(file))).catch(() => {});
+          dupes++;
+          continue;
+        }
+        if (hash) seen.set(hash, b);
+        if (b.format === "epub" && looksUnnamed(b)) {
+          const m = await readEpubMeta(file);
+          if (m.title && m.title.length > 1) {
+            b.title = m.title.slice(0, 200);
+            if (m.author) b.author = m.author.slice(0, 120);
+            if (m.description && !b.description) b.description = m.description;
+            if (m.subjects?.length && !b.genres?.length) b.genres = m.subjects;
+            if (!b.coverUrl) b.coverUrl = await lookupBookCover(b.title, b.author).catch(() => null);
+            named++;
+          }
+        }
+        keep.push(b);
+      }
+      if (named || dupes) {
+        keep.sort((a, b) => String(b.addedAt).localeCompare(String(a.addedAt)));
+        await saveCodexMeta(keep);
+        log("INFO", `Books tidied: ${named} title(s) read from the files, ${dupes} duplicate(s) set aside`, "codex");
+        receipt({ kind: "library", title: "Books tidied", detail: `${named} title(s) and author(s) read from the books themselves; ${dupes} exact duplicate(s) moved to books/duplicates` });
+      }
+    })().finally(() => { codexTidying = null; });
+    return codexTidying;
+  }
+  setTimeout(() => void tidyCodexBooks().catch(() => {}), 45_000).unref?.();
+
   app.get('/api/codex/books', async (_req, res) => {
     await autoScanCodexBooks().catch(() => {});
     const [books, progress] = await Promise.all([loadCodexMeta(), loadCodexProgress()]);
@@ -24750,6 +24925,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!body || !Buffer.isBuffer(body) || body.length === 0)
       return res.status(400).json({ error: 'No file content received' });
     await mkdir(CODEX_DIR, { recursive: true });
+    // The same file again: hand back the book already in the library.
+    {
+      const hash = crypto.createHash("sha1").update(body).digest("hex");
+      for (const b of await loadCodexMeta()) {
+        const fp = await resolveCodexFilePath(b);
+        if (fp && (await stat(fp).catch(() => null))?.size === body.length && (await codexFileHash(fp).catch(() => "")) === hash) {
+          return res.json({ ok: true, duplicate: true, book: b, message: `"${b.title}" is already in your library.` });
+        }
+      }
+    }
     const id = crypto.randomUUID();
     const dest = path.join(CODEX_DIR, `${id}${ext}`);
     await writeFile(dest, body);

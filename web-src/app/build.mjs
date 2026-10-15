@@ -138,6 +138,26 @@ const before = shell;
 }
 
 // Upgrade / request-access screens over a tab that is not available.
+// The "Update available — Install Update" prompt is for installed apps (the
+// Android app, the old desktop app). A browser always runs the current site,
+// and it was offered the Windows installer as an "update" once that
+// installer's version passed the site's.
+shell = patch(shell, "update prompt only in installed apps", "const M=async()=>{try{if(!_n()&&!window.__TAURI_INTERNALS__",
+  "const M=async()=>{try{const U=await En();",
+  "const M=async()=>{try{if(!_n()&&!window.__TAURI_INTERNALS__&&!window.__TAURI__&&!/electron/i.test(navigator.userAgent))return;const U=await En();");
+// Remote Bridge drives the host (watcher, network); a member opening it by
+// URL got two 403s and "Failed to load". Admins only, like Host Health.
+shell = patch(shell, "remote bridge is admin-only", 'x==="handheld"&&Pe("manage_system")&&',
+  'x==="handheld"&&(0,e.jsx)(rl,{})', 'x==="handheld"&&Pe("manage_system")&&(0,e.jsx)(rl,{})');
+// Picking a game in quick search, or asking the assistant to launch one,
+// started it on the host's PC for everyone. On a client (any browser not on
+// the host's own address) it opens the game's page, where "How do you want
+// to play?" offers what works on that device.
+shell = patch(shell, "quick search opens the game on clients", "async u=>{if(Ft()){ce(u);return}ce(null);try{",
+  "qn=(0,s.useCallback)(async u=>{ce(null);try{", "qn=(0,s.useCallback)(async u=>{if(Ft()){ce(u);return}ce(null);try{");
+shell = patch(shell, "assistant opens the game on clients", 'if(Ft()){try{const g=await fetch("/api/games"',
+  'if(J&&J!=="retroarch"&&ne){S("pcgames");return}if(U)try{',
+  'if(J&&J!=="retroarch"&&ne){S("pcgames");return}if(Ft()){try{const g=await fetch("/api/games",{headers:{Authorization:`Bearer ${localStorage.getItem("nexus_token")??""}`},signal:le}).then(r=>r.json()),a=Array.isArray(g)?g:g.games??[],f=a.find(x=>x.id===U)||(q?a.find(x=>String(x.title).toLowerCase()===String(q).toLowerCase()):null);S("library");f&&ce(f)}catch{}return}if(U)try{');
 shell = patch(shell, "tab gate", "(0,e.jsx)(NxGate,{tab:x})",
   `className:"relative flex-1 flex flex-col gap-8",children:[x==="library"&&`,
   `className:"relative flex-1 flex flex-col gap-8",children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGate,{tab:x})}),x==="library"&&`);
@@ -412,6 +432,150 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   if (mh !== before) writeFileSync(file, mh);
 }
 
+// 3i. eBooks: the shelf stayed on a spinner until a cover lookup finished
+//     (about 7 s), though the books had arrived in one; the lookup also ran
+//     again on every focus and every 5 minutes. Books show at once and covers
+//     are looked up once per visit. Cards are tagged for the book look in
+//     the boot stylesheet (spine, page edges, lift on hover).
+{
+  const file = path.join(assets, find("CodexLibrary-"));
+  let cx = readFileSync(file, "utf8");
+  const before = cx;
+  cx = patch(cx, "books show at once", "window.__nxCodexEnriched",
+    "if(i(J(t)),t.some(c=>!c.coverUrl)&&",
+    "if(i(J(t)),r(!1),!window.__nxCodexEnriched&&(window.__nxCodexEnriched=1)&&t.some(c=>!c.coverUrl)&&");
+  cx = patch(cx, "book card look", '"nx-book relative overflow-hidden rounded-xl shadow-2xl aspect-[2/3]"',
+    '"relative overflow-hidden rounded-xl shadow-2xl aspect-[2/3]"',
+    '"nx-book relative overflow-hidden rounded-xl shadow-2xl aspect-[2/3]"');
+  if (cx !== before) writeFileSync(file, cx);
+}
+
+// 3j. Big Picture (Console Vault): opened filtered to the first console
+//     alphabetically (3DS, 2 games), showed template text ("an iconic
+//     Nintendo experience...") as every game's description, had only a faint
+//     blur behind the hero, and let the page underneath show through at the
+//     bottom. It opens on all games, shows the real description (or none),
+//     the game's art as the backdrop with a large cover, above everything.
+{
+  const file = path.join(assets, find("ConsoleHub-"));
+  let ch = readFileSync(file, "utf8");
+  const before = ch;
+  ch = patch(ch, "big picture starts on all", "/*nx-all*/", "c[0]&&j(c[0]),", "/*nx-all*/");
+  ch = patch(ch, "big picture starts on all (2)", "/*nx-all2*/", "b[0]&&j(b[0]),", "/*nx-all2*/");
+  ch = patch(ch, "big picture real description", 'const q=i?(i.metadata?.description||i.description||""):""',
+    'const q=i?vt(i):""', 'const q=i?(i.metadata?.description||i.description||""):""');
+  ch = patch(ch, "big picture hides empty description", 'children:i.title}),q&&(0,e.jsx)("p",{className:"text-xs md:text-sm text-white/60 line-clamp-3',
+    'children:i.title}),(0,e.jsx)("p",{className:"text-xs md:text-sm text-white/60 line-clamp-3',
+    'children:i.title}),q&&(0,e.jsx)("p",{className:"text-xs md:text-sm text-white/60 line-clamp-3');
+  ch = patch(ch, "big picture above the page", '"nx-bp fixed inset-0 z-50 flex flex-col bg-[#05050a]',
+    '"fixed inset-0 z-50 flex flex-col bg-[#05050a]', '"nx-bp fixed inset-0 z-50 flex flex-col bg-[#05050a]');
+  ch = patch(ch, "big picture art", '"nx-bp-cover"',
+    'className:"absolute inset-0 w-full h-full object-cover pointer-events-none filter blur-3xl scale-125"},i.id):null}),',
+    'className:"absolute inset-0 w-full h-full object-cover pointer-events-none filter blur-3xl scale-125"},i.id):null}),i?.boxArt?(0,e.jsx)("img",{src:i.boxArt,alt:"",className:"nx-bp-cover"},i.id+"-cover"):null,');
+  ch = patch(ch, "big picture stronger backdrop", "/*nx-bp-bg*/animate:{opacity:.45}", "animate:{opacity:.22}", "/*nx-bp-bg*/animate:{opacity:.45}");
+  // The first game was only picked when the console filter changed, which
+  // forcing the first console used to do; now it follows the list itself.
+  ch = patch(ch, "big picture picks the first game", "||m(C[0])},[F,z,C])", "||m(C[0])},[F,z])", "||m(C[0])},[F,z,C])");
+  // Big Picture treated every browser that wasn't the Android app as the
+  // host, so a member's Play started the emulator on the host's PC
+  // (2026-10-15). It now uses the app's own client test: any browser not on
+  // the host's own address is a client and plays on its own device.
+  ch = patch(ch, "big picture knows clients", "O as nxClientMode,",
+    "j as pt,", "j as pt,O as nxClientMode,");
+  ch = patch(ch, "big picture plays on the client", "R=(0,s.useMemo)(()=>!(pt()||nxClientMode()),[])",
+    'R=(0,s.useMemo)(()=>!(pt()||(typeof localStorage<"u"?localStorage.getItem("nexus_setup_role"):null)==="client"),[])',
+    "R=(0,s.useMemo)(()=>!(pt()||nxClientMode()),[])");
+  // A member pressing Play on a PS2 or GameCube game without the desktop
+  // launcher had the whole disc image downloaded into the browser, which
+  // then can't run it. Say what to do instead, before downloading anything.
+  const touch = find("touchLayouts-");
+  ch = patch(ch, "big picture knows browser systems", "nxCanBrowser}from",
+    'import{t as bt}from"./EmulatorPlayer-', `import{s as nxCanBrowser}from"./${touch}";import{t as bt}from"./EmulatorPlayer-`);
+  ch = patch(ch, "big picture heavy games need the app", "!nxCanBrowser(d.platform)",
+    "onLaunch:async t=>{const d=l.find(n=>n.id===t);d&&(R?",
+    "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!R&&!re.has(d.id)&&!nxCanBrowser(d.platform)&&!await _())throw new Error(`${String(d.platform).toUpperCase()} can't run in a browser. On a PC, install the SaveState desktop app once (Get the App); on a phone, open the game in Games and choose Stream from the host PC.`);d&&(R?");
+  if (ch !== before) writeFileSync(file, ch);
+}
+
+// 3k. Game details on a member's PC. In a browser on https the panel declared
+//     "desktop app missing" without asking the launcher (Chrome and Edge can
+//     reach 127.0.0.1 from https), so the one-click launcher never counted.
+//     Without it, "Play on this PC" was still marked Recommended for a GBA
+//     game that plays right here, the working option sat second, and members
+//     were shown the host's emulator-core status with an "Install Core & Play"
+//     button for the host. Now the launcher is asked; when it isn't there,
+//     "Play in this browser" comes first and is recommended for systems a
+//     browser can run; host-only core controls are hidden from members; and
+//     the cover shrinks on short screens so the choices are on screen.
+{
+  const file = path.join(assets, find("ExpandableDetail-"));
+  let gd = readFileSync(file, "utf8");
+  const before = gd;
+  const BROWSER_FIRST = "!f&&y&&ue&&be(t.platform)";
+  gd = patch(gd, "game details asks the launcher", "if(!1&&bs&&!Rt()",
+    "if(bs&&!Rt()", "if(!1&&bs&&!Rt()");
+  gd = patch(gd, "game details explains a missing launcher", "Ready to play in this browser.",
+    'detail:"Client launcher not running on this machine."',
+    'detail:be(t.platform)?"Ready to play in this browser. For full speed and offline play, install the SaveState desktop app once (Get the App).":"Full-speed play on this PC needs the SaveState desktop app (Get the App, a one-time install). Until then, stream it from the host."');
+  gd = patch(gd, "game details hides host core status", '!f&&!y&&K&&K!=="unknown"&&', '!f&&K&&K!=="unknown"&&', '!f&&!y&&K&&K!=="unknown"&&');
+  gd = patch(gd, "game details hides host core install", '!f&&!y&&K==="missing"&&!P&&', '!f&&K==="missing"&&!P&&', '!f&&!y&&K==="missing"&&!P&&');
+  gd = patch(gd, "game details play options order", '"nx-playopts rounded-2xl',
+    '"rounded-2xl border border-white/10 bg-white/[0.03] p-3 space-y-2",children:[(0,e.jsx)("p",{className:"text-[10px] font-black uppercase tracking-widest text-nexus-muted px-0.5",children:"How do you want to play?"})',
+    '"nx-playopts rounded-2xl border border-white/10 bg-white/[0.03] p-3 space-y-2",children:[(0,e.jsx)("p",{className:"text-[10px] font-black uppercase tracking-widest text-nexus-muted px-0.5",children:"How do you want to play?"})');
+  gd = patch(gd, "game details recommends what works (PC)", `&&!(${BROWSER_FIRST})&&(0,e.jsx)("span",{className:"text-[8.5px]`,
+    '!(f&&!be(t.platform))&&(0,e.jsx)("span",{className:"text-[8.5px]',
+    `!(f&&!be(t.platform))&&!(${BROWSER_FIRST})&&(0,e.jsx)("span",{className:"text-[8.5px]`);
+  gd = patch(gd, "game details recommends what works (browser)", "nx-first ",
+    'className:"w-full text-left px-3 py-2.5 rounded-xl border border-blue-500/25',
+    `className:(${BROWSER_FIRST}?"nx-first ":"")+"w-full text-left px-3 py-2.5 rounded-xl border border-blue-500/25`);
+  gd = patch(gd, "game details browser badge", '"Play in this browser",',
+    '(0,e.jsx)("span",{className:"block text-[12px] font-bold text-blue-200",children:"Play in this browser"})',
+    `(0,e.jsxs)("span",{className:"block text-[12px] font-bold text-blue-200",children:["Play in this browser",${BROWSER_FIRST}&&(0,e.jsx)("span",{className:"ml-2 text-[8.5px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-400/25 text-blue-100",children:"Recommended"})]})`);
+  gd = patch(gd, "game details cover fits", '"nx-detail-cover w-full aspect-[3/4]',
+    '"w-full aspect-[3/4] object-cover rounded-2xl shadow-2xl mb-8 border border-white/10"',
+    '"nx-detail-cover w-full aspect-[3/4] object-cover rounded-2xl shadow-2xl mb-8 border border-white/10"');
+  // On a PC, "stream from the host" read "the only way to play PSP on a phone".
+  gd = patch(gd, "game details stream wording on a PC", 'children:be(t.platform)||!f?"Runs on the host',
+    'children:be(t.platform)?"Runs on the host', 'children:be(t.platform)||!f?"Runs on the host');
+  if (gd !== before) writeFileSync(file, gd);
+}
+
+// 3l. In-browser play never started (GBA: "loaded but isn't running", no
+//     frames). EmulatorJS fetches EJS_biosUrl as one file, and it was given
+//     the BIOS folder with no file name, which 404s; EmulatorJS stops with
+//     "Network Error" before it requests the ROM. Only systems that need a
+//     BIOS ask for one, by name, and only when the host has it. The cloud
+//     save is likewise loaded only when there is one.
+{
+  const file = path.join(assets, find("EmulatorPlayer-"));
+  let ep = readFileSync(file, "utf8");
+  const before = ep;
+  ep = patch(ep, "browser play bios by name", "const nxBios=",
+    'let d=`${a}/api/emulator/bios/serve/${t?`?token=${encodeURIComponent(t)}`:""}`;',
+    'const nxBios={psx:"scph5501.bin",segaCD:"bios_CD_U.bin",neogeo:"neogeo.zip",arcade:"neogeo.zip",fbneo:"neogeo.zip"}[b],nxOk=async u=>{try{return(await fetch(u,{method:"HEAD"})).ok}catch{return!1}};let d=nxBios?`${a}/api/emulator/bios/serve/${nxBios}${t?`?token=${encodeURIComponent(t)}`:""}`:"";d&&!await nxOk(d)&&(d="");');
+  ep = patch(ep, "browser play bios only when set", "d&&(window.EJS_biosUrl=d),",
+    "window.EJS_biosUrl=d,", "d&&(window.EJS_biosUrl=d),");
+  // Neo Geo and Sega CD can't start without theirs: say so instead of a black screen.
+  ep = patch(ep, "browser play names a missing bios", "/*nx-need-bios*/",
+    "d&&(window.EJS_biosUrl=d),",
+    '/*nx-need-bios*/if(!d&&nxBios&&/neogeo|neo geo|segacd|sega cd/i.test(String(r.platform))){J(!1),Q(!0),g(`${String(r.platform).toUpperCase()} games need the system BIOS (${nxBios}) to run in a browser, and this server doesn\'t have it yet. Stream it from the host instead, or ask the host to add it under Emulation Setup → BIOS.`);return}d&&(window.EJS_biosUrl=d),');
+  ep = patch(ep, "browser play cloud save only when saved", "nxState=",
+    'window.EJS_loadStateURL=`${a}/api/emulator/savestates/${encodeURIComponent(r.id)}/cloud?token=${encodeURIComponent(t)}`;',
+    'window.EJS_loadStateURL=void 0;const nxState=`${a}/api/emulator/savestates/${encodeURIComponent(r.id)}/cloud?token=${encodeURIComponent(t)}`;await nxOk(nxState)&&(window.EJS_loadStateURL=nxState);');
+  if (ep !== before) writeFileSync(file, ep);
+}
+// Neo Geo and arcade sets were mapped to fbalpha2012, which the EmulatorJS
+// CDN no longer publishes, so the player refused them; FBNeo plays them.
+{
+  const file = path.join(assets, find("touchLayouts-"));
+  let tl = readFileSync(file, "utf8");
+  const before = tl;
+  tl = patch(tl, "arcade plays on fbneo", 'arcade:"fbneo",mame:"mame2003",neogeo:"fbneo"',
+    'arcade:"fbalpha2012",mame:"mame2003",neogeo:"fbalpha2012","neo geo":"fbalpha2012"',
+    'arcade:"fbneo",mame:"mame2003",neogeo:"fbneo","neo geo":"fbneo"');
+  if (tl !== before) writeFileSync(file, tl);
+}
+
 // 3b. Movies & TV showed every member the host's own controls (media root
 //     picker, rescan, the metadata scraper), which only admins can use. They
 //     are tagged here and hidden for everyone else by the boot script's CSS.
@@ -479,6 +643,17 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   if (at < 0) throw new Error("index.html: no module script to load the boot script ahead of");
   html = html.slice(0, at) + tag + "\n    " + html.slice(at);
   writeFileSync(file, html);
+}
+
+// 5. Every chunk must still parse. A patch that lands mid-expression (a
+//    `const` after a comma) broke the whole site once (2026-10-15); stop here
+//    instead of publishing it.
+for (const f of readdirSync(assets).filter((n) => n.endsWith(".js"))) {
+  try {
+    esbuild.transformSync(readFileSync(path.join(assets, f), "utf8"), { format: "esm", loader: "js", logLevel: "silent" });
+  } catch (err) {
+    throw new Error(`${f} no longer parses: ${String(err?.errors?.[0]?.text ?? err?.message ?? err)}`);
+  }
 }
 
 const kb = (f) => (readFileSync(path.join(assets, f)).length / 1024).toFixed(1);

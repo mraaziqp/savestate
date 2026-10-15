@@ -40,9 +40,11 @@ matches by checksum, and only when the owner asks (or switched on
 
 **Open items.** Prices for the tiers (Plans > Tiers). Resend: the
 `rsend` CNAME in Cloudflare must be "DNS only" (grey cloud); the other
-records are in. The desktop installer (Tauri) cannot be rebuilt until its
-source (`I:\NexussEmu\src-tauri`, gone from the Drive) is found; 1.0.41
-stays on the download page. Back up `.env` and the Android signing key
+records are in. The old Tauri desktop app cannot be rebuilt (its source,
+`I:\NexussEmu\src-tauri`, is gone); Windows now gets `SaveState-Setup`
+(see App downloads). No Neo Geo BIOS (`neogeo.zip`) is on this PC, so Neo
+Geo can't play in a browser (the player says so); RPCS3
+(1 PS3 entry) and Ryujinx (2 Switch games) are not installed. Back up `.env` and the Android signing key
 (`%APPDATA%\NexusEmuHost\android-release.keystore`) somewhere off this PC:
 without the key, installed Android apps can never be updated.
 
@@ -312,9 +314,27 @@ The watchdog starts the server and tunnel at normal priority (a scheduled
 task would otherwise run them below normal), and restarts Google Drive when
 the library path has been missing for 30 seconds.
 
+## Games: how a member plays
+
+On a member's device the game page's "How do you want to play?" puts first
+what works there: the desktop launcher if it answers on 127.0.0.1:17373
+(Chrome/Edge ask once to allow local access), otherwise "Play in this
+browser" for systems a browser can run (GBA, NES, SNES, Neo Geo with its
+BIOS, ...), otherwise "Stream from the host PC". Big Picture (menu: Play
+Offline) follows the same rule: it downloads the game to the device and plays
+it there, and for PS2/GameCube without the launcher it says to install the
+app instead of downloading a disc image the browser can't run. Only a
+browser on the host's own address launches games on this PC.
+
+Launch check (`/api/games/launch/check/:id`): PS2 looks for its BIOS beside
+standalone PCSX2 (`E:\PCSX2\bios`), in `Documents\PCSX2\bios` and in
+RetroArch's folder; GameCube/Wii use standalone Dolphin, or RetroArch's
+Dolphin core when that is all there is. 300 of 303 games pass.
+
 ## Changing the frontend
 
-Only the compiled bundle in `dist/` survives (see `.gitignore`). New screens
+`build.mjs` ends by parsing every chunk; a patch that breaks one stops the
+build instead of the site. Only the compiled bundle in `dist/` survives (see `.gitignore`). New screens
 are written as source under `web-src/` and wired into the bundle:
 
 ```bash
@@ -444,9 +464,9 @@ Gemini and TMDB keys, entered in the app, stored encrypted in
 ## App builds
 
 Android: `scripts/windows/build-apk.ps1` (version from package.json, so
-1.0.60 is versionCode 1000060). The desktop installer (Tauri) was built from
-`I:\NexussEmu`, which is no longer on the Drive; `releases/updates` keeps the
-last installer (1.0.41) until its source is found.
+1.0.62 is versionCode 1000062). Windows: `SaveState-Setup-<version>.exe` is
+the one-click installer (`/api/client-launcher/windows-installer`) wrapped
+by IExpress (built into Windows); see App downloads.
 
 ## Box art
 
@@ -463,9 +483,16 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
   so it only needs rebuilding when the Android shell changes. Signing key:
   `NEXUS_APK_KEYSTORE` (in the host data folder) and its password in `.env`.
   **Back the keystore up**: Android refuses an update signed with another key.
-- **Windows**: with no packaged desktop build in `releases\updates`, the
-  download hands out the one-click client installer
-  (`/api/client-launcher/windows-installer`).
+- **Windows**: `releases\updates\SaveState-Setup-<version>.exe` (the newest
+  `.exe` there is what `/api/downloads/desktop` serves). It runs the one-click
+  installer: Node.js via winget if missing, the game launcher
+  (`client-launcher.cjs`, autostart at login, `nexusemu://`), and a SaveState
+  shortcut on the Desktop and Start menu (Edge app window). To rebuild: save
+  `/api/client-launcher/windows-installer` as `SaveState-Setup.cmd` in an
+  empty folder and run `iexpress /N /Q savestate.sed` with an SED whose
+  `AppLaunched` is `cmd.exe /c SaveState-Setup.cmd`. PCs that already have the
+  launcher get a new one by running the installer again (the launcher does
+  not update itself).
 
 ## Failover
 

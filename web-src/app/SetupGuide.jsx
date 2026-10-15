@@ -116,7 +116,9 @@ export function SetupGuide({ isAdmin = false }) {
         )}
         <div className="nxa-steps" style={{ marginTop: 18 }}>
           <div className="nxa-step"><div><b>Choose where you'll play</b>
-            <p>Older consoles and handhelds run right here in the browser. Bigger systems run in the desktop or Android app, which installs RetroArch and the right cores for you. A few (PS2, PS3, GameCube, Wii, Xbox, Switch) use their own emulator: install it from the link on the system's card.</p></div></div>
+            <p>Older consoles and handhelds run right here in the browser. Bigger systems run in the desktop or Android app, which installs RetroArch and the right cores for you. A few (PS2, PS3, GameCube, Wii, Xbox, Switch) use their own emulator: install it from the link on the system's card.</p>
+            <p>On Windows, install SaveState once: it sets up the game launcher (it starts by itself at login, so Play just works, and games you download stay on this PC) and adds SaveState to the Desktop and Start menu.</p>
+            <a className="nxa-btn sm" style={{ marginTop: 8 }} href="/api/downloads/desktop?platform=windows" download><Icon name="down" size={14} /> Get SaveState for Windows</a></div></div>
           <div className="nxa-step"><div><b>Add your games</b>
             <p>Keep one folder per system (for example <span className="nxa-code">PS1</span>, <span className="nxa-code">SNES</span>, <span className="nxa-code">GBA</span>) inside one games folder. Then open Games, choose Library Setup and pick that folder. Each system's card lists the file types that work.</p>
             <button className="nxa-btn sm" style={{ marginTop: 8 }} onClick={() => goTab("library")}><Icon name="game" size={14} /> Open Games</button></div></div>

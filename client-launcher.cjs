@@ -2723,6 +2723,9 @@ function corsHeaders(origin) {
     'Access-Control-Allow-Origin': origin || '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    // Chrome and Edge ask before an https page may call 127.0.0.1 (Private
+    // Network Access); without this answer the site can't see the launcher.
+    'Access-Control-Allow-Private-Network': 'true',
     'Vary': 'Origin',
   };
 }
@@ -2758,7 +2761,7 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 4,
+    version: 5,
     native: true,
     embedded: 'electron',
     canPickFolder: true,

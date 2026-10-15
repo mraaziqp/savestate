@@ -40,6 +40,20 @@
     // A grid with no columns set sizes its one column to the widest content
     // (Remote Bridge: 430px on a 390px phone); let it shrink to the screen.
     + '@media (max-width:639px){main .grid:not([class*=" grid-cols-"]):not([class^="grid-cols-"]){grid-template-columns:minmax(0,1fr)}}'
+    // Big Picture: fills the screen (a parent's spacing gave it a bottom margin), and the selected game's cover large beside its title.
+    + '.nx-bp{margin:0!important}'
+    // Game details: the option that works on this device first; the cover leaves room for it.
+    + '.nx-playopts{display:flex;flex-direction:column;gap:.5rem}.nx-playopts>*{margin:0!important}.nx-playopts>p{order:-2}.nx-playopts>.nx-first{order:-1;border-width:2px}'
+    + '@media (min-width:768px) and (max-height:900px){.nx-detail-cover{max-height:40vh;width:auto!important;margin:0 auto 1rem!important;display:block}}'
+    + '.nx-bp-cover{position:absolute;right:6vw;top:13vh;height:50vh;aspect-ratio:3/4;object-fit:cover;border-radius:18px;box-shadow:0 30px 90px rgba(0,0,0,.75),0 0 0 1px rgba(255,255,255,.08);z-index:1;pointer-events:none;animation:nxbpIn .45s ease}'
+    + '@keyframes nxbpIn{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}'
+    + '@media (max-width:1100px),(max-height:620px){.nx-bp-cover{display:none}}'
+    // eBooks: covers look like books (spine shading, page edges) and lift on hover.
+    + '.nx-book{border-radius:4px 10px 10px 4px!important;transition:transform .25s ease,box-shadow .25s ease;box-shadow:0 10px 28px rgba(0,0,0,.55),0 2px 0 rgba(255,255,255,.04)!important}'
+    + '.nx-book::before{content:"";position:absolute;inset:0 auto 0 0;width:9%;max-width:16px;z-index:3;pointer-events:none;background:linear-gradient(90deg,rgba(0,0,0,.55),rgba(255,255,255,.14) 45%,rgba(0,0,0,.25) 70%,transparent)}'
+    + '.nx-book::after{content:"";position:absolute;inset:3% -1px 3% auto;width:4px;z-index:3;pointer-events:none;background:repeating-linear-gradient(180deg,rgba(255,255,255,.55) 0 1px,rgba(220,214,200,.35) 1px 2px);border-radius:0 3px 3px 0;opacity:.55}'
+    + '.group:hover .nx-book,.nx-book:hover{transform:translateY(-6px) rotate(-.8deg);box-shadow:0 22px 44px rgba(0,0,0,.65),0 0 0 1px rgba(245,158,11,.25)!important}'
+    + '@media (prefers-reduced-motion:reduce){.group:hover .nx-book,.nx-book:hover{transform:none}}'
     // Music away from its tab: the page collapses, its fixed bar stays (build.mjs).
     + '.nx-music-away{height:0;overflow:hidden}'
     // Phones: the music bar sits above the bottom navigation instead of over it.
