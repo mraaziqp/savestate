@@ -287,6 +287,16 @@ shell = patch(shell, "first-visit update notice", "__nxHadSW",
   shell = shell.replace(mArr[0], `pn=[${sorted.join(",")}],fn=[`);
 }
 
+// The shell carries the app version in four places (the version shown in
+// App Info, the update check, and the build id whose change makes browsers
+// clear old caches once). It is stamped from package.json on every build.
+{
+  const version = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
+  const current = /function \w+\(\)\{return"(\d+\.\d+\.\d+)"\}async function/.exec(shell)?.[1];
+  if (!current) throw new Error('patch "app version": anchor not found');
+  if (current !== version) shell = shell.split(`"${current}"`).join(`"${version}"`);
+}
+
 if (shell !== before) writeFileSync(path.join(assets, shellFile), shell);
 
 // 3. The music player: stream URLs carry the token, for clients (the desktop
