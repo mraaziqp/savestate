@@ -65,6 +65,17 @@ const REQUIRED_BIOS: Record<string, { anyOf: string[]; required: boolean; label:
   gba:    { anyOf: ["gba_bios.bin"],                                                 required: false, label: "Game Boy Advance" },
 };
 
+// Database TLS: the certificate is checked (it used to be accepted blindly,
+// which let anyone on the path read or change the traffic). The URL's
+// sslmode is dropped because these settings govern; leaving it made the
+// driver warn on every start about sslmode changing meaning in pg 9.
+const DB_SSL = { rejectUnauthorized: true };
+function dbConnectionString(): string {
+  return String(process.env.DATABASE_URL ?? "")
+    .replace(/([?&])sslmode=[^&]*(&|$)/, (_m, a: string, b: string) => (b ? a : ""))
+    .replace(/[?&]$/, "");
+}
+
 const SECRET_ENC_PREFIX = "enc:v1:";
 let _secretKey: Buffer | null = null;
 
@@ -3931,8 +3942,8 @@ async function startServer() {
   let schemaApplied = false;
   if (process.env.DATABASE_URL) {
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false, checkServerIdentity: () => undefined },
+      connectionString: dbConnectionString(),
+      ssl: DB_SSL,
       // Opening a connection to Neon from here is 5-6 round trips at ~150 ms
       // each. With idle connections closed after 10 s, every burst of
       // requests (any page load) paid about a second per request to open new
@@ -5843,7 +5854,7 @@ async function startServer() {
     gameModeActive: () => gameMode.active(),
     siteBusy: () => siteBusy(),
     suggestions: async () => {
-      const out: Array<{ label: string; source: string; kind: "roms" | "music"; dest: string }> = [];
+      const out: Array<{ label: string; source: string; kind: "roms" | "music" | "movies" | "files"; dest: string }> = [];
       const vc = await getVaultConfig().catch(() => null);
       const romDest = (p: string) => {
         const n = p.toLowerCase();
@@ -12293,7 +12304,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       await pool.query("CREATE INDEX IF NOT EXISTS idx_daemon_logs_created ON daemon_logs (created_at DESC)").catch(() => {});
       return `no compaction needed (${mb(bytes)})`;
     }
-    const client = new pg.Client({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false, checkServerIdentity: () => undefined } });
+    const client = new pg.Client({ connectionString: dbConnectionString(), ssl: DB_SSL });
     client.on("error", () => {});
     try {
       await client.connect();
@@ -28627,7 +28638,6 @@ Format as JSON:
     hostKey: string;
   };
   const coopSessions = new Map<string, CoopSession>();
-  const HOST_SECRET = process.env.NEXUS_HOST_SHARE_SECRET ?? process.env.ACCESS_PIN ?? "";
 
   // ── Virtual gamepad bridge (real split-screen input, not just keyboard) ──
   // A remote co-op player's browser already captures full analog Gamepad

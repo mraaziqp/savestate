@@ -379,6 +379,18 @@ continues from any device; Chrome remembers the folder, elsewhere the folder
 is picked again and finished files are skipped. Chunks are kept in
 `tmp/uploads/` and cleared after 14 days untouched.
 
+## Activity log and receipts
+
+System & Tools > Activity log (`server/receipts.ts`, `ActivityLog.jsx`):
+admins see what is running now with progress bars (Drive uploads, torrents,
+media uploads, deep search; each module registers an `addLiveSource`) and
+every receipt; members see their own receipts. A receipt is written with
+`receipt({ kind, title, detail, ... })` from anywhere once `initReceipts` has
+run (table `activity_receipts`): uploads confirmed on Drive, space freed,
+media folders uploaded, Sonarr/Radarr downloads (webhook), deep-search
+grabs, payments, plan/access changes, profiles, service keys. Receipts can
+be filtered, searched, exported as CSV and printed one by one.
+
 ## Service keys
 
 Plans > Service keys (`server/service-keys.ts`): Resend, PayFast passphrase,

@@ -36,7 +36,15 @@
     // Music away from its tab: the page collapses, its fixed bar stays (build.mjs).
     + '.nx-music-away{height:0;overflow:hidden}'
     // Phones: the music bar sits above the bottom navigation instead of over it.
-    + '@media (max-width:1023px){.nx-music-bar{bottom:calc(60px + env(safe-area-inset-bottom,0px))!important}}';
+    + '@media (max-width:1023px){.nx-music-bar{bottom:calc(60px + env(safe-area-inset-bottom,0px))!important}}'
+    // Phones: the title had 22px because shuffle, repeat and like stayed; they
+    // hide below 640px (the lock-screen controls remain). A slim seek bar.
+    + '@media (max-width:639px){.nx-music-bar .flex-shrink-0>button:first-child,.nx-music-bar .flex-shrink-0>button:last-child,.nx-music-bar .flex-1.min-w-0>button{display:none!important}}'
+    // Touch rules give inputs a 44px minimum height (kept, for fingers); the
+    // track is drawn as a centred 4px line inside it.
+    + '.nx-music-bar input[type=range]{-webkit-appearance:none;appearance:none;background:linear-gradient(rgba(255,255,255,.16),rgba(255,255,255,.16)) center/100% 4px no-repeat!important;border-radius:0}'
+    + '.nx-music-bar input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
+    + '.nx-music-bar input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}';
   document.head.appendChild(style);
   const showAdmin = (yes) => {
     if (yes) document.documentElement.dataset.nxAdmin = "1"; else delete document.documentElement.dataset.nxAdmin;

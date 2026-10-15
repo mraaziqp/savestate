@@ -56,7 +56,10 @@ async function write(r: Receipt) {
 /** Record a receipt. Never throws; queued until the database is ready. */
 export function receipt(r: Receipt): void {
   if (!q) { if (pending.length < 500) pending.push(r); return; }
-  void (ready ?? Promise.resolve(false)).then((ok) => (ok ? write(r) : pending.length < 500 && pending.push(r))).catch(() => {});
+  void (ready ?? Promise.resolve(false)).then(async (ok) => {
+    if (ok) await write(r);
+    else if (pending.length < 500) pending.push(r);
+  }).catch(() => {});
 }
 
 /** Something long-running reports its progress here (called on every refresh). */

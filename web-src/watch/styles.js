@@ -9,7 +9,9 @@ export const CSS = `
 .nxw button{font:inherit;color:inherit;cursor:pointer}
 .nxw button:disabled{cursor:default;opacity:.55}
 .nxw :focus-visible{outline:3px solid var(--acc);outline-offset:2px;border-radius:12px}
-.nxw-page{padding:4px 0 48px;max-width:1800px;margin:0 auto}
+/* width:100%: auto margins in the app's flex column stop it stretching, so it
+   grew to its widest row (1800px on a phone) and the page scrolled sideways. */
+.nxw-page{padding:4px 0 48px;max-width:1800px;margin:0 auto;width:100%;min-width:0}
 .nxw-muted{color:var(--dim);font-size:13px;margin:4px 0 0}
 .nxw-dim{color:var(--faint)}
 .nxw-center{text-align:center;padding:24px}
