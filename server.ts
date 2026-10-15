@@ -2405,7 +2405,24 @@ function titleFromFolderPath(relPath: string): string | null {
   return null;
 }
 
+/**
+ * detectSeriesMetaRaw plus two corrections seen in the library (2026-10-15):
+ * bloopers, sketches and featurettes filed among a season's episodes are
+ * Specials (season 0), and a file sitting straight in a folder called
+ * "tv-shows" got a show named "Tv Shows".
+ */
 function detectSeriesMeta(nameNoExt: string, relPath: string): { isSeries: boolean; title: string | null; season: number | null; episode: number | null } {
+  const m = detectSeriesMetaRaw(nameNoExt, relPath);
+  if (!m.isSeries) return m;
+  if (m.title && /^(tv[\s._-]*shows?|tv|series|shows?|season[\s._-]*\d*|downloads?|videos?|media|unknown(\s*series)?)$/i.test(m.title.trim())) m.title = "Unsorted episodes";
+  // A real episode always carries a number; one without (a talk-show clip,
+  // a blooper reel kept in "Season 3") goes to Specials instead of sitting
+  // unordered among the season's episodes.
+  if (m.episode == null) m.season = 0;
+  return m;
+}
+
+function detectSeriesMetaRaw(nameNoExt: string, relPath: string): { isSeries: boolean; title: string | null; season: number | null; episode: number | null } {
   const cleaned = cleanTitleFromName(nameNoExt);
   const relSegments = relPath.split(/[\\/]/).filter(Boolean);
   let seasonFromPath: number | null = null;
@@ -2444,7 +2461,7 @@ function detectSeriesMeta(nameNoExt: string, relPath: string): { isSeries: boole
   }
 
   // Pattern 2: ShowTitle.1x01
-  const xPattern = cleaned.match(/^(.*?)[s._-]+(\d{1,2})x(\d{1,4})\b/i);
+  const xPattern = cleaned.match(/^(.*?)(?:^|[\s._-]+)s?(\d{1,2})x(\d{1,4})\b/i);
   if (xPattern) {
     const rawTitle = xPattern[1] || "";
     const fromName = normalizeSeriesTitle(rawTitle) || null;
@@ -2691,7 +2708,9 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
       const derivedTitle = titleFromFolderPath(dir + "/placeholder") ||
       (dir !== "." ? folderToTitle(dir.split("/").pop()!) : null);
     if (derivedTitle) {
-      const normalized = normalizeSeriesTitle(derivedTitle) || "Unknown Series";
+      let normalized = normalizeSeriesTitle(derivedTitle) || "Unknown Series";
+      // A container folder ("tv-shows", "Downloads") is not the show's name.
+      if (/^(tv[\s._-]*shows?|tv|series|shows?|downloads?|videos?|media)$/i.test(normalized.trim())) normalized = "Unsorted episodes";
       for (const item of group) item.seriesTitle = normalized;
     } else if (group.length > 1) {
       // No folder title — strip SxxExx prefix then try longest common prefix of episode titles
@@ -5730,7 +5749,7 @@ async function startServer() {
   // ── Is anyone using the site? (uploads run flat out when nobody is) ─────
   // Watching, listening, playing or opening the app counts; a background tab
   // polling for status does not. Long single-request streams count while open.
-  let siteActiveAt = 0, openStreams = 0;
+  let siteActiveAt = 0, openStreams = 0, lastActivity = "";
   const STREAM_PATHS = /^\/api\/(media\/(stream|file|hls\/)|music\/stream|stream\/(feed|hls\/|gdrive\/|media\/)|emulator\/(native-core|bios\/serve)|roms\/)/;
   const siteBusy = () => openStreams > 0 || Date.now() - siteActiveAt < 3 * 60_000;
   app.use((req, res, next) => {
@@ -5738,9 +5757,13 @@ async function startServer() {
       // Every app load (and return to the tab) asks this; background polling does not.
       || req.path === "/api/plans/me";
     const stream = STREAM_PATHS.test(req.path);
-    if (page || stream) {
+    // People use browsers (the apps' web views say Mozilla too); the watchdog's
+    // health probe ("node") loading / every few seconds kept uploads capped.
+    const person = /Mozilla/i.test(String(req.headers["user-agent"] ?? ""));
+    if ((page || stream) && person) {
       const wasIdle = !siteBusy();
       siteActiveAt = Date.now();
+      lastActivity = `${req.method} ${req.path.slice(0, 80)} ${String(req.headers["user-agent"] ?? "").slice(0, 60)}`;
       if (wasIdle) { try { drives.applyRate(); } catch { /* not ready yet */ } }
       if (stream && /^\/api\/(media\/(stream|file)|music\/stream|stream\/feed)/.test(req.path)) {
         openStreams++;
@@ -5748,6 +5771,11 @@ async function startServer() {
       }
     }
     next();
+  });
+
+  app.get("/api/admin/site-activity", async (req, res) => {
+    if (!(await access.callerOf(req)).admin) return res.status(403).json({ error: "admin_only" });
+    res.json({ busy: siteBusy(), openStreams, lastActivity, idleSeconds: Math.round((Date.now() - siteActiveAt) / 1000) });
   });
 
   // Video folders on this PC that are not in the Drive library yet: offered

@@ -303,7 +303,21 @@ Uploads share the internet uplink with the site and streams, and a full
 uplink makes everything slow, so they are capped: `NEXUS_UPLOAD_BWLIMIT`
 (default 650k) by day, full speed during `NEXUS_UPLOAD_FULL_HOURS` (default
 1-7), `NEXUS_UPLOAD_BWLIMIT_GAMING` (64k) while game mode is on. One upload
-runs at a time.
+runs at a time. The daytime cap only applies while someone is using the
+site: a browser (or the apps) opening SaveState or streaming. With nobody
+there for 3 minutes uploads run at `NEXUS_UPLOAD_BWLIMIT_IDLE` (default off,
+measured 7-24 MB/s) and drop back the moment someone arrives. Health probes
+(non-browser user agents) don't count. `GET /api/admin/site-activity` shows
+what last counted.
+
+Cloud Drives > Free up space on this PC: every disk's free space, "Free X GB
+now" for folders already confirmed on Drive, and the video folders on the
+host's disks that aren't on Drive (found in the background every 6 hours,
+biggest first). Folders of release-named films and shows go to
+`NexusArchive/From this PC/...` and appear in Movies & TV; phone clips,
+recordings and other personal video go to `Personal/From this PC/...`,
+which SaveState never shows to members. "Upload & free" turns on a job's
+auto-free: each file is deleted from the PC once its copy on Drive matches.
 
 Failed uploads retry after 5 min, 15 min, 1 h and 6 h; an upload that moves
 no bytes for 30 min is restarted. "Keep synced" (on by default for ROMs)
