@@ -2,6 +2,50 @@
 
 How this app is served, and how to move it to another machine.
 
+## Handover (October 2026)
+
+Where things stand, for whoever picks this up next.
+
+**Day to day.** Everything runs from this PC: the server (`dist/server.mjs`,
+restarted by the scheduled task "SaveState Host" / `scripts/windows/run-host.ps1`),
+the Cloudflare tunnel, Google Drive for Desktop (`I:`), rclone, and the
+downloader apps (qBittorrent :8100, Prowlarr :9696, Sonarr :8989,
+Radarr :7878). Plans > Setup checklist shows what is configured;
+System & Tools > Activity log shows what is running and a receipt for
+everything that finished; Downloads > Downloader setup says why downloads
+stall; Host Health runs the self-checks.
+
+**Changing code.** Server: edit `server.ts` / `server/*.ts`, then
+`node_modules/.bin/esbuild server.ts --bundle --platform=node --target=node22 --format=esm --packages=external --outfile=dist/server.mjs`
+and kill the node process on :3000 (the watchdog restarts it). Frontend:
+edit `web-src/app` (or `web-src/watch` for Discover / What to Watch), run
+`node web-src/app/build.mjs` (and `node web-src/watch/build.mjs`), then
+`node scripts/rev-dist.mjs rN` with the next revision number so browsers
+fetch the new files. The compiled chunks are patched by `build.mjs`; each
+patch says why. Checks: `node scripts/test-accounts-plans.mjs`,
+`AUDIT_ADMIN_ID=<an admin's id> node scripts/audit-routes.cjs`.
+
+**Modules added in this round** (each file starts with what it does):
+`server/access.ts` (who may call what), `tiers.ts` (plans), `payfast.ts`,
+`household.ts` (profiles), `drives.ts` + `connect.ts` (Drive accounts,
+upload & verify, free space), `upload-batches.ts` (media folder uploads),
+`downloader.ts` (setup, health, deep search), `service-keys.ts`,
+`receipts.ts` (activity log), `game-mode.ts`.
+
+**Decisions.** `mraaziqp` is the master (ultra) admin. The host's own media,
+games and BIOS files are shared only by an admin's per-person grant, never
+by a paid tier. Local files are deleted only after their copy on Drive
+matches by checksum, and only when the owner asks (or switched on
+"free automatically" for that folder).
+
+**Open items.** Prices for the tiers (Plans > Tiers). Resend: the
+`rsend` CNAME in Cloudflare must be "DNS only" (grey cloud); the other
+records are in. The desktop installer (Tauri) cannot be rebuilt until its
+source (`I:\NexussEmu\src-tauri`, gone from the Drive) is found; 1.0.41
+stays on the download page. Back up `.env` and the Android signing key
+(`%APPDATA%\NexusEmuHost\android-release.keystore`) somewhere off this PC:
+without the key, installed Android apps can never be updated.
+
 ## What a "host" actually is
 
 The domain does not point at an IP address. `savestate.co.za` is proxied by
