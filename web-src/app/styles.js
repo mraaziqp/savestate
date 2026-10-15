@@ -195,5 +195,6 @@ select.nxa-input option{background:#15172a;color:#f4f5fb}
 .nxa-who-dot.on{border-color:#fff}
 .nxa-who-card{border-left:4px solid var(--pc,var(--acc))}
 @media (max-width:767px){.nxa-who-chip{bottom:76px;right:10px}}
+@media (max-width:640px){.nxa-row{flex-wrap:wrap}}
 @media (max-width:640px){.nxa-kv{grid-template-columns:1fr;gap:2px 0}.nxa-kv dd{margin-bottom:8px}.nxa-card{padding:16px}}
 `;

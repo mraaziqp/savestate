@@ -8,7 +8,7 @@ const KINDS = [["", "Everything"], ["upload", "Uploads"], ["freed", "Space freed
   ["payment", "Payments"], ["plan", "Plans & access"], ["profile", "Profiles"], ["key", "Keys"], ["library", "Library"], ["system", "System"]];
 const ICON = { upload: "cloud", freed: "trash", download: "down", search: "bolt", payment: "star", plan: "users", profile: "user", key: "key", library: "film", system: "chip", account: "user" };
 const size = (n) => (n == null ? "" : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1024 ** 2))} MB`);
-const eta = (s) => (!s || s <= 0 ? "" : s > 86400 ? `${Math.round(s / 86400)} d` : s > 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
+const eta = (s) => (!s || s <= 0 || s > 30 * 86400 ? "" : s > 86400 ? `${Math.round(s / 86400)} d` : s > 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
 const when = (d) => new Date(d).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 
 function Live() {
@@ -30,10 +30,10 @@ function Live() {
       {items?.length === 0 && <p className="nxa-faint" style={{ fontSize: 13 }}>Nothing running right now.</p>}
       <div style={{ display: "grid", gap: 10 }}>
         {items?.map((i, n) => (
-          <div key={n} className="nxa-file" style={{ display: "block" }}>
-            <div className="nxa-row" style={{ justifyContent: "space-between", gap: 8 }}>
+          <div key={n} className="nxa-file" style={{ display: "block", minWidth: 0 }}>
+            <div className="nxa-row nxa-wrap" style={{ justifyContent: "space-between", gap: 4 }}>
               <b style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><Icon name={ICON[i.kind] ?? "info"} size={14} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.title}</span></b>
-              <span className="nxa-faint" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed ? ` · ${size(i.speed)}/s` : ""}{i.eta ? ` · ${eta(i.eta)} left` : ""}</span>
+              <span className="nxa-faint" style={{ fontSize: 12 }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed ? ` · ${size(i.speed)}/s` : ""}{i.eta ? ` · ${eta(i.eta)} left` : ""}</span>
             </div>
             {i.progress != null && <div className="nxa-progress" style={{ marginTop: 6 }} role="progressbar" aria-valuenow={Math.round(i.progress * 100)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${Math.min(100, i.progress * 100)}%` }} /></div>}
             <small>{i.detail}</small>

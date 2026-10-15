@@ -33,6 +33,13 @@
     + '.nx-detail-main .overflow-y-auto{overflow:visible!important}'
     + '.nx-detail-title{font-size:26px!important;line-height:1.15!important}'
     + '}'
+    // Phones: flex items in the content area may shrink below their content
+    // (long BIOS paths, status lines pushed pages 20-130px wider than the
+    // screen), and words too long for the line break instead of overflowing.
+    + 'main{overflow-wrap:break-word}main .flex-1{min-width:0}'
+    // A grid with no columns set sizes its one column to the widest content
+    // (Remote Bridge: 430px on a 390px phone); let it shrink to the screen.
+    + '@media (max-width:639px){main .grid:not([class*=" grid-cols-"]):not([class^="grid-cols-"]){grid-template-columns:minmax(0,1fr)}}'
     // Music away from its tab: the page collapses, its fixed bar stays (build.mjs).
     + '.nx-music-away{height:0;overflow:hidden}'
     // Phones: the music bar sits above the bottom navigation instead of over it.

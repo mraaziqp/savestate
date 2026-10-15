@@ -227,7 +227,7 @@ function JobCard({ job, onAction }) {
         <div style={{ marginTop: 10 }}>
           <SpaceBar used={s.bytes} total={s.totalBytes || 1} />
           <div className="nxa-faint" style={{ fontSize: 12, marginTop: 6 }}>
-            {gb(s.bytes)} of {gb(s.totalBytes)} · {s.transfers}/{s.totalTransfers} files · {gb(s.speed)}/s{s.eta != null ? ` · about ${Math.ceil(s.eta / 60)} min left` : ""}{s.errors ? ` · ${s.errors} retrying` : ""}
+            {gb(s.bytes)} of {gb(s.totalBytes)} · {s.transfers}/{s.totalTransfers} files · {gb(s.speed)}/s{s.eta != null && s.eta < 30 * 86400 ? ` · about ${s.eta > 5400 ? `${Math.round(s.eta / 3600)} h` : `${Math.ceil(s.eta / 60)} min`} left` : ""}{s.errors ? ` · ${s.errors} retrying` : ""}
             {s.current?.length > 0 && <div style={{ marginTop: 3 }}>{s.current.join(" · ")}</div>}
           </div>
         </div>
