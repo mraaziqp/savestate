@@ -32,6 +32,7 @@ import { createHousehold } from "./server/household.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
+import { initReceipts, receipt, addLiveSource } from "./server/receipts.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -5689,6 +5690,9 @@ async function startServer() {
   app.use(access.guard);
   tiers.register(app);
 
+  // Receipts for everything that finishes, and live progress (server/receipts.ts).
+  initReceipts({ query: dbRows, dbUp: () => !!pool && dbConnected, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "activity") }).register(app);
+
   // Household profiles: PINs, age ratings, sections, screen time (server/household.ts).
   const household = createHousehold({
     persistDir: PERSIST_DIR, jwtSecret: JWT_SECRET, tmdbKey: TMDB_KEY_MEDIA,
@@ -10596,6 +10600,7 @@ async function startServer() {
       `Arr ${eventType}: ${title || "(untitled)"}${importedPath ? ` -> ${path.basename(importedPath)}` : ""}`,
       "arr");
     scheduleArrIngest(importedPath, eventType);
+    if (eventType === "Download" || /FileImported$/.test(eventType)) receipt({ kind: "download", title: `Downloaded: ${title || path.basename(importedPath || "") || "a release"}`, detail: `${isSeries ? "Sonarr" : "Radarr"} added it to the library${importedPath ? ` (${path.basename(importedPath)})` : ""}` });
     res.json({ ok: true, queuedScan: true, title, path: importedPath });
   });
 

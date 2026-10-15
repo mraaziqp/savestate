@@ -19,6 +19,7 @@ import type express from "express";
 import path from "node:path";
 import { readFile, writeFile } from "node:fs/promises";
 import type { Caller } from "./access.ts";
+import { receipt } from "./receipts.ts";
 
 export type FeatureDef = {
   key: string; label: string; category: "Media" | "Games" | "Cloud" | "Extras";
@@ -473,6 +474,7 @@ export function createTiers(deps: TiersDeps) {
       if (!r.length) return res.status(404).json({ error: "No such user." });
       deps.invalidateUser(req.params.id);
       deps.log("INFO", `${admin.username ?? "admin"} updated ${r[0].username}: ${sets.map((s) => s.split("=")[0]).join(", ")}`);
+      receipt({ kind: "plan", userId: String(r[0].id), actor: admin.username, title: `${r[0].username}: ${sets.map((s) => s.split("=")[0].replace(/_/g, " ")).join(", ")} changed`, detail: `Plan ${r[0].user_tier ?? "default"}${r[0].tier_expires_at ? ` until ${new Date(r[0].tier_expires_at).toLocaleDateString()}` : ""} · library ${r[0].media_access ? "on" : "off"} · uploads ${r[0].can_upload_media ? "on" : "off"}` });
       res.json({ ok: true, user: r[0] });
     });
 

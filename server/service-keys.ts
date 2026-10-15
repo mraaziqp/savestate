@@ -11,6 +11,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { writeFile, rename } from "node:fs/promises";
 import path from "node:path";
 import type { Caller } from "./access.ts";
+import { receipt } from "./receipts.ts";
 
 type KeyDef = {
   env: string; label: string; purpose: string; getUrl: string; where: string;
@@ -128,6 +129,7 @@ export function createServiceKeys(deps: {
       await write(saved);
       deps.onChange(k.env);
       deps.log("INFO", `Service key ${value ? "saved" : "removed"}: ${k.env}`);
+      receipt({ kind: "key", title: `${k.label}: key ${value ? "saved" : "removed"}`, detail: value ? `Ends in …${value.slice(-4)}` : "Falls back to .env" });
       let check: string | null = null;
       if (value && k.test) check = await k.test(value).catch((e) => `Saved, but the test failed: ${e?.message ?? e}`);
       res.json({ ok: true, check, restartNeeded: !k.live });

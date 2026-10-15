@@ -126,6 +126,7 @@ const before = shell;
     `NxMyDrives=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MyDrives}))),` +
     `NxHousehold=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Household}))),` +
     `NxDownloader=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DownloaderSetup}))),` +
+    `NxActivity=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ActivityLog}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -198,7 +199,7 @@ shell = patch(shell, "downloader setup", `x==="torrent"&&(0,e.jsxs)(e.Fragment,{
 
 // Page titles: tabs missing from the title map showed their raw id
 // ("Ai", "Phonebackup", "Become-host").
-shell = patch(shell, "page titles", `ql={ai:"SaveState AI",`,
+shell = patch(shell, "page titles", `ai:"SaveState AI",phonebackup`,
   `ql={household:"Profiles",`,
   `ql={ai:"SaveState AI",phonebackup:"Phone Backup",remoteplay:"Remote Play","become-host":"Become a Host",party:"Watch Party",gallery:"Photos",photos:"Photo Booklet",matchmaker:"What to Watch",library:"Games",multiplayer:"Multiplayer",emulation:"Emulation Setup",storage:"Storage",activity:"Activity",settings:"Settings",controller:"Controller",logs:"Logs",profile:"Profile",plans:"Plans & Pricing",music:"Music",household:"Profiles",`);
 shell = patch(shell, "page title names", `media:"Movies & TV",`, `media:"Movies",`, `media:"Movies & TV",`);
@@ -238,10 +239,18 @@ shell = patch(shell, "ebooks title", `codex:"eBooks",`, `codex:"Codex",`, `codex
     "(0,e.jsx)(Yl,{}),(0,e.jsx)(NxMusicHost,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})})");
 }
 
+// Activity log: live progress and receipts (ActivityLog.jsx), for everyone.
+shell = patch(shell, "activity log tab", `x==="receipts"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxActivity,{})}),x==="household"&&`,
+  `x==="household"&&`, `x==="receipts"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxActivity,{})}),x==="household"&&`);
+shell = patch(shell, "activity log menu", `{id:"receipts",icon:xs,label:"Activity log"`,
+  `{id:"household",icon:us,label:"Profiles"`, `{id:"receipts",icon:xs,label:"Activity log",color:"#22d3ee",glow:"rgba(34,211,238,0.25)"},{id:"household",icon:us,label:"Profiles"`);
+shell = patch(shell, "activity log title", `receipts:"Activity log",`, `ql={ai:"SaveState AI",`, `ql={receipts:"Activity log",ai:"SaveState AI",`);
+shell = patch(shell, "activity log is known", `"household","receipts"]`, `"household"]`, `"household","receipts"]`);
+
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
   `"cloud","phonebackup","matchmaker"]`, `"cloud","phonebackup","matchmaker","music","multiplayer","remoteplay","ai"]`);
-shell = patch(shell, "profiles tab is known", `"remoteplay","ai","household"]`, `"remoteplay","ai"]`, `"remoteplay","ai","household"]`);
+shell = patch(shell, "profiles tab is known", `"remoteplay","ai","household"`, `"remoteplay","ai"]`, `"remoteplay","ai","household"]`);
 
 // Media first: everyone lands on Movies & TV (client mode used to open Games),
 // and the menu leads with watching, then listening and reading.
@@ -271,7 +280,7 @@ shell = patch(shell, "first-visit update notice", "__nxHadSW",
   if (!mArr) throw new Error('patch "menu order": media menu not found');
   const items = mArr[1].split(/,(?=\{id:")/);
   const idOf = (s) => /^\{id:"([\w-]+)"/.exec(s)?.[1];
-  const order = ["media", "matchmaker", "discover", "music", "codex", "party", "torrent", "gallery", "photos", "myfiles", "files", "cloud", "phonebackup", "hosts", "friends", "household", "plans"];
+  const order = ["media", "matchmaker", "discover", "music", "codex", "party", "torrent", "gallery", "photos", "myfiles", "files", "cloud", "phonebackup", "hosts", "friends", "household", "receipts", "plans"];
   const rank = (s) => { const i = order.indexOf(idOf(s)); return i < 0 ? order.length : i; };
   const sorted = [...items].sort((a, b) => rank(a) - rank(b));
   if (sorted.length !== items.length) throw new Error('patch "menu order": lost an item');
@@ -376,6 +385,20 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   mh = patch(mh, "music admin scan", '"nx-admin-only flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-cyan-500/40',
     '"flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-cyan-500/40',
     '"nx-admin-only flex items-center gap-1.5 px-3 py-2 rounded-xl border border-white/15 text-white/60 hover:border-cyan-500/40');
+  if (mh !== before) writeFileSync(file, mh);
+}
+
+// 3h. Video: a fatal network error made hls.js call startLoad() again at once,
+//     for ever (the "load loop"), and media errors looped the same way. They
+//     are now retried a few times with growing gaps, then the player falls back
+//     to its direct stream. Auto quality hopped between 1080p, 720p and 480p,
+//     and every hop starts a new transcode on the host (a stutter); it now
+//     picks one level for the screen and only steps down after two stalls.
+{
+  const file = path.join(assets, find("MediaHub-"));
+  let mh = readFileSync(file, "utf8");
+  const before = mh;
+  mh = patch(mh, "video retries with a limit", "a.__nxFixed=!0", "a.on(z.Events.ERROR,(y,I)=>{if(I?.fatal){if(I.type===z.ErrorTypes.NETWORK_ERROR){a.startLoad();return}if(I.type===z.ErrorTypes.MEDIA_ERROR){a.recoverMediaError();return}Re(Math.max(0,Math.floor(t.currentTime||0))),ut(!0)}})", "a.on(z.Events.ERROR,(y,I)=>{const R=a.__nx||(a.__nx={net:0,med:0,medAt:0,stalls:[]});if(!I?.fatal){if(I?.details===z.ErrorDetails.BUFFER_STALLED_ERROR&&a.__nxFixed&&a.currentLevel>0){const now=Date.now();R.stalls=R.stalls.filter(x=>now-x<6e4).concat(now);if(R.stalls.length>=2){R.stalls=[];a.nextLevel=a.currentLevel-1}}return}if(I.type===z.ErrorTypes.NETWORK_ERROR&&R.net<5){R.net++;setTimeout(()=>{try{a.startLoad()}catch{}},Math.min(15e3,1e3*2**(R.net-1)));return}if(I.type===z.ErrorTypes.MEDIA_ERROR&&R.med<3){const now=Date.now();R.med++;if(now-R.medAt<3e3)try{a.swapAudioCodec()}catch{}R.medAt=now;a.recoverMediaError();return}Re(Math.max(0,Math.floor(t.currentTime||0))),ut(!0)}),a.on(z.Events.FRAG_LOADED,()=>{a.__nx&&(a.__nx.net=0)}),a.on(z.Events.MANIFEST_PARSED,()=>{try{if(a.levels.length<2)return;const want=innerWidth<900?720:Math.min(1080,Math.max(720,(window.screen?.height||1080)*(window.devicePixelRatio||1)));let idx=0;a.levels.forEach((l,i)=>{if((l.height||0)<=want&&(l.height||0)>=(a.levels[idx].height||0))idx=i});a.startLevel=idx;a.currentLevel=idx;a.__nxFixed=!0}catch{}})");
   if (mh !== before) writeFileSync(file, mh);
 }
 

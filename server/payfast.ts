@@ -21,6 +21,7 @@
 import type express from "express";
 import crypto from "node:crypto";
 import type { Caller } from "./access.ts";
+import { receipt } from "./receipts.ts";
 
 export type PayfastTier = { id: string; name: string; priceCents: number; currency: string; period: "free" | "month" | "year" | "once" };
 
@@ -273,6 +274,7 @@ export function createPayfast(deps: PayfastDeps) {
     if (status === "COMPLETE") {
       await grant(payment, !!payment.recurring);
       deps.log("INFO", `${tag}: R${money(gross)} received, ${payment.tier_id} switched on`);
+      receipt({ kind: "payment", userId: String(payment.user_id ?? ""), title: `Payment received: R${money(gross)} for ${payment.tier_id}`, detail: `PayFast payment ${pfId || id}${payment.recurring ? " (subscription)" : ""}; plan switched on`, amountCents: gross, currency: "ZAR", data: { payment: id, provider: pfId } });
     } else {
       deps.log("INFO", `${tag}: recorded (the plan runs until its current end date)`);
     }

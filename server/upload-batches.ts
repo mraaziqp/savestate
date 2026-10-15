@@ -22,6 +22,7 @@ import type express from "express";
 import crypto from "node:crypto";
 import path from "node:path";
 import { mkdir, readdir, readFile, writeFile, rename, rm, stat } from "node:fs/promises";
+import { receipt, addLiveSource } from "./receipts.ts";
 
 export type Classified = {
   kind: "video" | "subtitle" | "image" | "other";
@@ -237,6 +238,12 @@ export function createUploadBatches(deps: BatchDeps) {
     if (finalRel) b.files[index].target = finalRel;
     delete b.files[index].note;
     await save(b);
+    const sum = summary(b);
+    if (sum.done === sum.total) {
+      receipt({ kind: "upload", userId: b.userId, title: `Uploaded to the library: ${b.name}`, bytes: sum.bytes,
+        detail: [sum.shows.length ? `${sum.shows.map((x) => x.title).join(", ")} (${sum.shows.reduce((n, x) => n + x.files, 0)} episodes)` : "", sum.movies.length ? `${sum.movies.length} film(s)` : "", `${(sum.bytes / 1024 ** 3).toFixed(1)} GB`].filter(Boolean).join(" · "),
+        data: { batch: b.id } });
+    }
   }
 
   // Interrupted chunk sessions are kept for resuming, but not forever.
@@ -262,6 +269,10 @@ export function createUploadBatches(deps: BatchDeps) {
   }
   setTimeout(() => void sweep(), 5 * 60_000).unref?.();
   setInterval(() => void sweep(), 12 * 3600_000).unref?.();
+
+  addLiveSource(() => [...cache.values()].filter((b) => Date.now() - b.updatedAt < 10 * 60_000).map((b) => ({ b, s: summary(b) }))
+    .filter(({ s }) => s.done < s.total).map(({ b, s }) => ({ kind: "media-upload", title: b.name, progress: s.bytes ? s.doneBytes / s.bytes : null,
+      detail: `${s.done} of ${s.total} file(s) in the library${s.failed ? `, ${s.failed} to retry` : ""}` })));
 
   function register(app: express.Express) {
     const who = async (req: express.Request, res: express.Response) => {

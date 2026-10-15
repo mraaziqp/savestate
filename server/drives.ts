@@ -23,6 +23,8 @@ import crypto from "node:crypto";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync, createWriteStream } from "node:fs";
 import { readFile, writeFile, stat, unlink, readdir, rmdir, mkdir, rm, rename, copyFile } from "node:fs/promises";
+import { receipt, addLiveSource } from "./receipts.ts";
+const gbs = (n: number) => `${(n / 1024 ** 3).toFixed(1)} GB`;
 
 export type DrivesDeps = {
   persistDir: string;
@@ -363,6 +365,9 @@ export function createDrives(deps: DrivesDeps) {
       job.finishedAt = Date.now();
       saveNow();
       deps.log("INFO", `Upload ${job.id} checked: ${v.matched} file(s) confirmed on Drive${v.missing + v.differ + v.errors ? `, ${v.missing + v.differ + v.errors} problem(s)` : ""}`);
+      receipt(job.status === "verified"
+        ? { kind: "upload", title: `On Google Drive: ${job.label}`, detail: `${v.matched} file(s), ${gbs(v.matchedBytes)}, every checksum matched (${job.remote}:${job.dest})`, bytes: v.matchedBytes, data: { job: job.id, source: job.source } }
+        : { kind: "upload", status: "warn", title: `Upload not complete yet: ${job.label}`, detail: `${v.matched} confirmed, ${v.missing + v.differ + v.errors} still to retry`, data: { job: job.id } });
       if (job.status === "verified") deps.onUploaded?.(job.kind);
       // The owner asked for this folder to be cleared once it is safely on Drive.
       if (job.status === "verified" && job.autoFree && (job.verify?.matched ?? 0) > 0) {
@@ -406,7 +411,15 @@ export function createDrives(deps: DrivesDeps) {
     job.status = "done";
     saveNow();
     deps.log("INFO", `Upload ${job.id}: deleted ${files} local file(s), ${(bytes / 1e9).toFixed(1)} GB freed${skipped ? `, ${skipped} left (changed or locked)` : ""}`);
+    receipt({ kind: "freed", title: `Freed ${gbs(bytes)} on this PC`, detail: `${files} file(s) from ${job.source}, safe on Google Drive (${job.remote}:${job.dest})${skipped ? `; ${skipped} left because they changed or were in use` : ""}`, bytes, data: { job: job.id } });
   }
+
+  addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued"].includes(j.status)).map((j) => ({
+    kind: "upload", title: j.label, status: j.status,
+    progress: j.status === "copying" && j.stats.totalBytes ? j.stats.bytes / j.stats.totalBytes : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(j.stats.bytes)} of ${gbs(j.stats.totalBytes)}` : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : "Waiting for its turn",
+    speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
+  })));
 
   // Jobs interrupted by a restart pick up where they were.
   void (async () => {

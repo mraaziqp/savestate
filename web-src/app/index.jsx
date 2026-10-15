@@ -15,3 +15,4 @@ export { MyDrives } from "./MyDrives.jsx";
 export { Household, ProfileLayer } from "./Household.jsx";
 export { DownloaderSetup } from "./Downloader.jsx";
 export { MediaUploader } from "./MediaUpload.jsx";
+export { ActivityLog } from "./ActivityLog.jsx";

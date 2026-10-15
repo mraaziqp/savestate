@@ -15,6 +15,7 @@ import type express from "express";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Caller } from "./access.ts";
+import { receipt, addLiveSource } from "./receipts.ts";
 
 type ArrConfig = { radarrUrl: string; radarrApiKey: string; sonarrUrl: string; sonarrApiKey: string };
 type QbtConfig = { host: string; username: string; password: string };
@@ -278,7 +279,7 @@ export function createDownloader(deps: DownloaderDeps) {
             let result = candidates.length ? "nothing approved" : "no well-seeded copy found (or not enough disk space)";
             for (const c of candidates.slice(0, 4)) {
               const d = await push(S, c);
-              if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${s.title} S${pad(season)}${one ? `E${pad(one.episodeNumber)}` : ""}`); break; }
+              if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${s.title} S${pad(season)}${one ? `E${pad(one.episodeNumber)}` : ""}`); receipt({ kind: "search", title: `Found and sent to Sonarr: ${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); break; }
             }
             tried[key] = { at: Date.now(), result };
             deps.log("INFO", `Deep search ${s.title} S${pad(season)} (${missing.length} missing): ${result}`);
@@ -309,7 +310,7 @@ export function createDownloader(deps: DownloaderDeps) {
           let result = candidates.length ? "nothing approved" : "no well-seeded copy found";
           for (const c of candidates.slice(0, 4)) {
             const d = await push(R, c);
-            if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${m.title} (${m.year})`); break; }
+            if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${m.title} (${m.year})`); receipt({ kind: "search", title: `Found and sent to Radarr: ${m.title} (${m.year})`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); break; }
           }
           tried[key] = { at: Date.now(), result };
           deps.log("INFO", `Deep search ${m.title} (${m.year}): ${result}`);
@@ -323,6 +324,18 @@ export function createDownloader(deps: DownloaderDeps) {
     }
     return lastRun;
   }
+  addLiveSource(async () => {
+    const out: any[] = [];
+    if (lastRun.running) out.push({ kind: "search", title: "Deep search for missing seasons and films", progress: null, detail: `${lastRun.checked} checked, ${lastRun.sent.length} found so far` });
+    const cfg = await deps.loadQbt().catch(() => null);
+    const cookie = cfg ? await deps.qbtLogin(cfg).catch(() => null) : null;
+    if (cfg && cookie !== null) {
+      const list = await fetch(`${cfg.host}/api/v2/torrents/info?filter=downloading`, { headers: cookie ? { Cookie: cookie } : {}, signal: AbortSignal.timeout(6000) }).then((r) => r.json()).catch(() => []);
+      for (const t of list as any[]) out.push({ kind: "download", title: t.name, progress: t.progress,
+        detail: `${t.state === "stalledDL" ? "Waiting for people to download from" : "Downloading"} · ${t.num_seeds} seeding · ${(t.size / 1024 ** 3).toFixed(1)} GB`, speed: t.dlspeed, eta: t.eta > 0 && t.eta < 8640000 ? t.eta : null, status: t.state });
+    }
+    return out;
+  });
   setTimeout(() => void deepSearch().catch(() => {}), 20 * 60_000).unref?.();
   setInterval(() => void deepSearch().catch(() => {}), 6 * 3600_000).unref?.();
 

@@ -28,6 +28,7 @@ import path from "node:path";
 import { readFile, writeFile, rename } from "node:fs/promises";
 import jwt from "jsonwebtoken";
 import type { Caller, ProfileSession } from "./access.ts";
+import { receipt } from "./receipts.ts";
 
 type MediaItem = { kind: string; category?: string | null; seriesTitle?: string | null; name: string; relPath: string };
 
@@ -486,6 +487,7 @@ export function createHousehold(deps: HouseholdDeps) {
         [id, c.userId, ...Object.values(f)]);
       if (!r) return res.status(500).json({ error: "Could not add the profile. Please try again." });
       deps.log("INFO", `Household profile added for ${c.username}: ${f.name}`);
+      receipt({ kind: "profile", userId: c.userId, title: `Profile added: ${f.name}`, detail: `Rating ${f.rating ?? "all"}${f.daily_minutes ? `, ${f.daily_minutes} min a day` : ""}` });
       if (f.rating && f.rating !== "all") void rateLibrary();
       res.json({ ok: true, profile: publicProfile((await profileById(id))!) });
     });
@@ -515,6 +517,7 @@ export function createHousehold(deps: HouseholdDeps) {
       await deps.query("DELETE FROM household_progress WHERE profile_id=$1", [p.id]);
       forget(p.id);
       deps.log("INFO", `Household profile removed for ${c.username}: ${p.name}`);
+      receipt({ kind: "profile", userId: c.userId, title: `Profile removed: ${p.name}`, detail: "Its watch history was deleted" });
       res.json({ ok: true });
     });
 
@@ -632,6 +635,7 @@ export function createHousehold(deps: HouseholdDeps) {
       const t = profileToken(p, rows[0].username, "link");
       deps.setSessionCookie(req, res, t);
       deps.log("INFO", `Profile link used: ${p.name} (${rows[0].username})`);
+      receipt({ kind: "profile", userId: p.ownerId, title: `A device signed in with ${p.name}'s link`, detail: `From ${ip || "unknown address"}` });
       res.json({ ok: true, token: t, profile: { name: p.name, avatar: p.avatar, color: p.color } });
     });
 
