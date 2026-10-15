@@ -21,7 +21,12 @@ const envOf = (k) => (env.match(new RegExp("^" + k + "=(.*)$", "m")) || [])[1]?.
 const BASE = process.env.AUDIT_BASE || "http://127.0.0.1:3000";
 // A host session (what the PIN login issues) is an admin.
 const admin = jwt.sign({ nexus: true, ts: Date.now() }, envOf("JWT_SECRET"), { expiresIn: "20m" });
-const db = () => new pg.Client({ connectionString: envOf("DATABASE_URL"), ssl: { rejectUnauthorized: false } });
+// Same TLS as the server: the certificate is checked; the URL's sslmode is
+// dropped because these settings govern (and it makes pg warn).
+const db = () => new pg.Client({
+  connectionString: envOf("DATABASE_URL").replace(/([?&])sslmode=[^&]*(&|$)/, (_m, a, b) => (b ? a : "")).replace(/[?&]$/, ""),
+  ssl: { rejectUnauthorized: true },
+});
 let pass = 0, fail = 0;
 const ok = (name, cond, extra = "") => { cond ? pass++ : fail++; console.log(`${cond ? "PASS" : "FAIL"}  ${name}${extra ? "  " + extra : ""}`); };
 async function call(method, path, { token, body, cookie } = {}) {
@@ -141,6 +146,8 @@ try {
   await c.query("DELETE FROM plan_upgrade_requests WHERE tier_id LIKE 'e2e-test-tier%'");
   await c.query("DELETE FROM friend_invites WHERE from_username LIKE 'nxtest%'").catch(() => {});
   await c.query("DELETE FROM friendships WHERE friend_username LIKE 'nxtest%' OR user_id::text = $1", [String(userId ?? "-")]).catch(() => {});
+  // The test's own changes appear in the Activity log; they don't belong there.
+  await c.query("DELETE FROM activity_receipts WHERE title LIKE 'nxtest%'").catch(() => {});
   const del = await c.query("DELETE FROM users WHERE username LIKE 'nxtest%' AND email LIKE '%@example.com' RETURNING username");
   await c.end();
   console.log(`cleanup: removed ${del.rowCount} test account(s)${tierId ? " and the test tier" : ""}`);
