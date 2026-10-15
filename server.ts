@@ -15509,7 +15509,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (!u?.id) return res.json(generic);
 
       let emailed = false;
-      if (resendKey() && u.email) {
+      // Reserved domains (example.com, .test, .invalid) can never receive mail;
+      // those resets go to the admin queue instead of costing a failed send.
+      const deliverable = !!u.email && !/@(example\.(com|net|org)|[^@]+\.(test|invalid|example|localhost))$/i.test(String(u.email));
+      if (resendKey() && deliverable) {
         const token = await createResetToken(u.id);
         const link = `${RESET_BASE_URL}/?reset=${token}`;
         const sent = await fetch("https://api.resend.com/emails", {
