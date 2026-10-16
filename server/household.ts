@@ -66,9 +66,9 @@ const SECTIONS: Record<string, { label: string; tabs: string[]; api: Pattern[] }
   books: { label: "Books & comics", tabs: ["codex"], api: ["/api/codex/"] },
   games: {
     label: "Games",
-    tabs: ["library", "consoles", "multiplayer", "handheld", "manual", "remoteplay"],
+    tabs: ["library", "consoles", "minigames", "multiplayer", "handheld", "manual", "remoteplay"],
     api: [
-      "/api/games", "/api/roms/", "/api/emulator/", "/api/bios/", "/api/cores", "/api/coop/", "/api/remote-play/",
+      "/api/games", "/api/minigames", "/api/roms/", "/api/emulator/", "/api/bios/", "/api/cores", "/api/coop/", "/api/remote-play/",
       /^\/api\/stream\/(check|start|stop|feed|input|hls\/)/, "/api/pc-games/", "/api/steam/", "/api/manual-library",
       /^\/api\/profiles\/[^/]+\/(games|saves|favorites|ratings|achievements|trophies|dashboard)/,
     ],

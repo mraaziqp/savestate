@@ -2761,7 +2761,7 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 5,
+    version: 6,
     native: true,
     embedded: 'electron',
     canPickFolder: true,
@@ -3349,6 +3349,12 @@ function startEmbeddedLauncher(opts = {}) {
 
   server.on('error', (err) => {
     if (err && err.code === 'EADDRINUSE') {
+      // Run on its own (the Windows runner), a second copy just leaves: the
+      // first one is already serving, and an idle copy would linger forever.
+      if (require.main === module) {
+        console.log('[launcher] Port 17373 is already served by another launcher; exiting');
+        process.exit(0);
+      }
       console.log('[electron] Launcher port 17373 already in use (external launcher running) — embedded launcher idle');
     } else {
       console.error('[electron] Embedded launcher error:', err);

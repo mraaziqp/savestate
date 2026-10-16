@@ -127,6 +127,7 @@ const before = shell;
     `NxHousehold=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Household}))),` +
     `NxDownloader=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DownloaderSetup}))),` +
     `NxActivity=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ActivityLog}))),` +
+    `NxMiniGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MiniGames}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -265,7 +266,16 @@ shell = patch(shell, "activity log tab", `x==="receipts"&&(0,e.jsx)(s.Suspense,{
 shell = patch(shell, "activity log menu", `{id:"receipts",icon:xs,label:"Activity log"`,
   `{id:"household",icon:us,label:"Profiles"`, `{id:"receipts",icon:xs,label:"Activity log",color:"#22d3ee",glow:"rgba(34,211,238,0.25)"},{id:"household",icon:us,label:"Profiles"`);
 shell = patch(shell, "activity log title", `receipts:"Activity log",`, `ql={ai:"SaveState AI",`, `ql={receipts:"Activity log",ai:"SaveState AI",`);
-shell = patch(shell, "activity log is known", `"household","receipts"]`, `"household"]`, `"household","receipts"]`);
+shell = patch(shell, "activity log is known", `"household","receipts"`, `"household"]`, `"household","receipts"]`);
+// Mini Games: agent-builder games for everyone, upload for admins (MiniGames.jsx).
+shell = patch(shell, "mini games tab", `x==="minigames"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxMiniGames,{})}),`,
+  `x==="receipts"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxActivity,{})}),`,
+  `x==="minigames"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxMiniGames,{})}),x==="receipts"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxActivity,{})}),`);
+shell = patch(shell, "mini games menu", `{id:"minigames",icon:be,label:"Mini Games"`,
+  `{id:"consoles",icon:be,label:"Play Offline",color:"#a855f7",glow:"rgba(168,85,247,0.25)"}`,
+  `{id:"consoles",icon:be,label:"Play Offline",color:"#a855f7",glow:"rgba(168,85,247,0.25)"},{id:"minigames",icon:be,label:"Mini Games",color:"#f472b6",glow:"rgba(244,114,182,0.25)"}`);
+shell = patch(shell, "mini games title", `minigames:"Mini Games",`, `ql={receipts:"Activity log",`, `ql={minigames:"Mini Games",receipts:"Activity log",`);
+shell = patch(shell, "mini games is known", `"household","receipts","minigames"]`, `"household","receipts"]`, `"household","receipts","minigames"]`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,

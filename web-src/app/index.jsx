@@ -5,6 +5,7 @@
 //   PlansPage     the Plans tab: pricing for members, the plans console for admins
 //   TabGate       upgrade / request-access screens over a tab that is not available
 //   EmulationTab  Games > Emulation Setup: the setup guide, plus host tools for admins
+//   MiniGames     Games > Mini Games: agent-builder games, upload and publish keys
 export { Welcome } from "./Welcome.jsx";
 export { AuthForm } from "./AuthForm.jsx";
 export { PlansPage } from "./Plans.jsx";
@@ -16,3 +17,4 @@ export { Household, ProfileLayer } from "./Household.jsx";
 export { DownloaderSetup } from "./Downloader.jsx";
 export { MediaUploader } from "./MediaUpload.jsx";
 export { ActivityLog } from "./ActivityLog.jsx";
+export { MiniGames } from "./MiniGames.jsx";

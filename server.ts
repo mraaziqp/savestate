@@ -29,6 +29,7 @@ import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
+import { createMiniGames } from "./server/minigames.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
@@ -5633,6 +5634,7 @@ async function startServer() {
     "/api/emulator/native-core/",
     "/api/downloads/",    // APK / installer downloads — public so any device can get the app
     "/api/webhooks/arr",        // called by Sonarr/Radarr; authenticated by shared secret, not JWT
+    "/api/minigames/publish",   // the agent builder; authenticated by a publish key, not JWT (server/minigames.ts)
     "/api/host/readiness",      // polled by setup wizard before first login
     "/api/host/info",           // public host identity for welcome screens
     "/api/host/public-profile", // join-step host card — called before user has a token
@@ -5771,6 +5773,11 @@ async function startServer() {
     log: (level, msg) => log(level, msg, "household"),
   });
   household.register(app);
+
+  // Mini games from the agent builder: upload, publish key, sandboxed play (server/minigames.ts).
+  const miniGames = createMiniGames({ persistDir: PERSIST_DIR, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "minigames") });
+  miniGames.register(app);
+  miniGames.tidy().catch(() => {});
 
   // Sonarr / Radarr / Prowlarr / qBittorrent: find, connect, and say why downloads stall (server/downloader.ts).
   createDownloader({
@@ -24273,6 +24280,76 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
+  // The Windows runner the installer saves as nexus-runner.vbs. Started at
+  // sign-in (Task Scheduler) and by nexusemu:// links. It starts the launcher
+  // with no window and restarts it within about 10 s if it stops; before, a
+  // launcher that crashed stayed down until the next sign-in and every
+  // "Play on this PC" fell back. Only one runner stays: a second one leaves.
+  app.get("/api/client-launcher/runner.vbs", (_req, res) => {
+    const vbs = String.raw`' SaveState game launcher runner. Keeps client-launcher.cjs running, no window.
+Option Explicit
+Dim sh, fso, dir, n, p, cmd
+Set sh = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+dir = sh.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\NexusEmuClient"
+
+' One runner at a time: this one counts itself.
+n = 0
+On Error Resume Next
+For Each p In GetObject("winmgmts:\\.\root\cimv2").ExecQuery("SELECT CommandLine FROM Win32_Process WHERE Name='wscript.exe' OR Name='cscript.exe'")
+  If InStr(1, LCase(p.CommandLine & ""), "nexus-runner.vbs") > 0 Then n = n + 1
+Next
+On Error GoTo 0
+If n > 1 Then WScript.Quit 0
+
+Function FindNode()
+  Dim c, f
+  FindNode = "node.exe"
+  If fso.FileExists(dir & "\node-path.txt") Then
+    Set f = fso.OpenTextFile(dir & "\node-path.txt", 1)
+    If Not f.AtEndOfStream Then c = Trim(f.ReadLine)
+    f.Close
+    If c <> "" Then
+      If fso.FileExists(c) Then
+        FindNode = c
+        Exit Function
+      End If
+    End If
+  End If
+  For Each c In Array(dir & "\node\node.exe", sh.ExpandEnvironmentStrings("%ProgramFiles%") & "\nodejs\node.exe", sh.ExpandEnvironmentStrings("%ProgramFiles(x86)%") & "\nodejs\node.exe")
+    If fso.FileExists(c) Then
+      FindNode = c
+      Exit Function
+    End If
+  Next
+End Function
+
+Function Healthy()
+  Dim h
+  Healthy = False
+  On Error Resume Next
+  Set h = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+  h.setTimeouts 2000, 2000, 3000, 3000
+  h.open "GET", "http://127.0.0.1:17373/health", False
+  h.send
+  If Err.Number = 0 Then Healthy = (h.status = 200)
+  On Error GoTo 0
+End Function
+
+Do
+  If Not Healthy() Then
+    cmd = Chr(34) & FindNode() & Chr(34) & " " & Chr(34) & dir & "\client-launcher.cjs" & Chr(34)
+    sh.Run cmd, 0, True
+  End If
+  WScript.Sleep 10000
+Loop
+`;
+    res.setHeader("Content-Type", "text/vbscript; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="nexus-runner.vbs"');
+    res.setHeader("Cache-Control", "no-store");
+    res.send(vbs.replace(/\r?\n/g, "\r\n"));
+  });
+
   app.get("/api/client-launcher/windows-installer", (req, res) => {
     const host = req.get("host");
     if (!host) {
@@ -24306,35 +24383,39 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       ":: Save preferred host URL for self-update",
       `echo %BASE_URL%> "%CLIENT_DIR%\\preferred-host-url.txt"`,
       "",
-      ":: Check for Node.js — install silently via winget if missing",
-      `where node >nul 2>&1`,
-      "if errorlevel 1 (",
-      "  echo [SaveState] Node.js not found. Installing silently via winget...",
-      `  where winget >nul 2>&1`,
-      "  if not errorlevel 1 (",
-      `    winget install -e --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements --silent >nul 2>&1`,
-      `    for /f "tokens=*" %%i in ('where /r "%ProgramFiles%\\nodejs" node.exe 2^>nul') do set "NODE_EXE=%%i"`,
-      `    if "!NODE_EXE!"=="node.exe" for /f "tokens=*" %%i in ('where /r "%ProgramFiles(x86)%\\nodejs" node.exe 2^>nul') do set "NODE_EXE=%%i"`,
-      "  ) else (",
-      "    echo [SaveState] winget not available. Install Node.js LTS from https://nodejs.org/ then re-run.",
-      "    pause",
-      "    exit /b 1",
-      "  )",
-      ") else (",
-      `  for /f "tokens=*" %%i in ('where node.exe 2^>nul') do if "!NODE_EXE!"=="node.exe" set "NODE_EXE=%%i"`,
+      ":: Node.js runs the launcher. Use the PC's own if it has one; otherwise keep",
+      ":: a private copy in the client folder, from nodejs.org (winget only if that",
+      ":: download is blocked). Winget was the only way before, and it is missing",
+      ":: on some Windows editions, so those PCs could never install.",
+      `set "NODE_EXE="`,
+      `for /f "tokens=*" %%i in ('where node.exe 2^>nul') do if not defined NODE_EXE set "NODE_EXE=%%i"`,
+      `if not defined NODE_EXE if exist "%CLIENT_DIR%\\node\\node.exe" set "NODE_EXE=%CLIENT_DIR%\\node\\node.exe"`,
+      `if not defined NODE_EXE if exist "%ProgramFiles%\\nodejs\\node.exe" set "NODE_EXE=%ProgramFiles%\\nodejs\\node.exe"`,
+      `if defined NODE_EXE goto :node_ok`,
+      "echo [SaveState] Getting Node.js for the game launcher (about 30 MB, only once)...",
+      `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; $arch='x64'; if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $arch='arm64' }; $all=Invoke-RestMethod 'https://nodejs.org/dist/index.json'; $v=($all | Where-Object { $_.lts } | Select-Object -First 1).version; $zip=Join-Path $env:TEMP 'savestate-node.zip'; $tmp=Join-Path $env:TEMP 'savestate-node'; Invoke-WebRequest -Uri ('https://nodejs.org/dist/' + $v + '/node-' + $v + '-win-' + $arch + '.zip') -OutFile $zip -UseBasicParsing; if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }; Expand-Archive -Path $zip -DestinationPath $tmp -Force; $inner=Get-ChildItem $tmp -Directory | Select-Object -First 1; New-Item -ItemType Directory -Force -Path '%CLIENT_DIR%\\node' | Out-Null; Copy-Item -Path (Join-Path $inner.FullName '*') -Destination '%CLIENT_DIR%\\node' -Recurse -Force; Remove-Item $zip, $tmp -Recurse -Force"`,
+      `if exist "%CLIENT_DIR%\\node\\node.exe" set "NODE_EXE=%CLIENT_DIR%\\node\\node.exe"`,
+      `if defined NODE_EXE goto :node_ok`,
+      `where winget >nul 2>&1`,
+      "if not errorlevel 1 (",
+      "  echo [SaveState] Trying winget instead...",
+      `  winget install -e --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements --silent >nul 2>&1`,
       ")",
-      "",
-      ":: Fallback: use known default Program Files path if where.exe gave us nothing",
-      `if "!NODE_EXE!"=="node.exe" if exist "%ProgramFiles%\\nodejs\\node.exe" set "NODE_EXE=%ProgramFiles%\\nodejs\\node.exe"`,
-      `if "!NODE_EXE!"=="node.exe" if exist "%ProgramFiles(x86)%\\nodejs\\node.exe" set "NODE_EXE=%ProgramFiles(x86)%\\nodejs\\node.exe"`,
-      "",
-      ":: Verify Node.js is now available",
+      `if exist "%ProgramFiles%\\nodejs\\node.exe" set "NODE_EXE=%ProgramFiles%\\nodejs\\node.exe"`,
+      `if defined NODE_EXE goto :node_ok`,
+      "echo [SaveState] Couldn't get Node.js. Check the internet connection and run this again,",
+      "echo             or install Node.js LTS from https://nodejs.org/ first.",
+      "pause",
+      "exit /b 1",
+      ":node_ok",
       `"%NODE_EXE%" --version >nul 2>&1`,
       "if errorlevel 1 (",
-      "  echo [SaveState] Node.js not accessible. Download and install it from https://nodejs.org/ then retry.",
+      "  echo [SaveState] Node.js at %NODE_EXE% doesn't start. Install Node.js LTS from https://nodejs.org/ then run this again.",
       "  pause",
       "  exit /b 1",
       ")",
+      ":: The runner reads this to start the launcher with the same Node.",
+      `>"%CLIENT_DIR%\\node-path.txt" echo %NODE_EXE%`,
       "",
       ":: Download client-launcher.cjs from the NexusEmu host",
       "echo [SaveState] Downloading the SaveState game launcher from %BASE_URL%...",
@@ -24345,24 +24426,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "  exit /b 1",
       ")",
       "",
-      ":: Create silent VBScript runner — wscript.exe calls node.exe with NO visible window",
-      `echo Set WshShell = CreateObject("WScript.Shell")> "%RUNNER_VBS%"`,
-      `echo Dim nodeExe : nodeExe = "!NODE_EXE!">> "%RUNNER_VBS%"`,
-      `echo If nodeExe = "" Or nodeExe = "node.exe" Then>> "%RUNNER_VBS%"`,
-      `echo   Dim fso : Set fso = CreateObject("Scripting.FileSystemObject")>> "%RUNNER_VBS%"`,
-      `echo   Dim p1 : p1 = WshShell.ExpandEnvironmentStrings("%ProgramFiles%") ^& "\\nodejs\\node.exe">> "%RUNNER_VBS%"`,
-      `echo   Dim p2 : p2 = WshShell.ExpandEnvironmentStrings("%ProgramFiles(x86)%") ^& "\\nodejs\\node.exe">> "%RUNNER_VBS%"`,
-      // Block form: a one-line If cannot take ElseIf in VBScript, and a compile
-      // error there stops wscript on a modal dialog before node ever starts.
-      `echo   If fso.FileExists(p1) Then>> "%RUNNER_VBS%"`,
-      `echo     nodeExe = p1>> "%RUNNER_VBS%"`,
-      `echo   ElseIf fso.FileExists(p2) Then>> "%RUNNER_VBS%"`,
-      `echo     nodeExe = p2>> "%RUNNER_VBS%"`,
-      `echo   Else>> "%RUNNER_VBS%"`,
-      `echo     nodeExe = "node.exe">> "%RUNNER_VBS%"`,
-      `echo   End If>> "%RUNNER_VBS%"`,
-      `echo End If>> "%RUNNER_VBS%"`,
-      `echo WshShell.Run Chr(34) ^& nodeExe ^& Chr(34) ^& " " ^& Chr(34) ^& WshShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") ^& "\\NexusEmuClient\\client-launcher.cjs" ^& Chr(34), 0, False>> "%RUNNER_VBS%"`,
+      ":: The runner (wscript, no window) keeps the launcher running: it starts it",
+      ":: and starts it again within seconds if it ever stops. See /runner.vbs.",
+      `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Invoke-WebRequest -Uri '%BASE_URL%/api/client-launcher/runner.vbs' -OutFile '%RUNNER_VBS%' -UseBasicParsing"`,
+      "if errorlevel 1 (",
+      "  echo [SaveState] Download failed. Check the internet connection and run this again.",
+      "  pause",
+      "  exit /b 1",
+      ")",
+      "",
+      ":: A launcher already running is the old version: stop it so the new one starts.",
+      `powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*NexusEmuClient*client-launcher.cjs*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`,
       "",
       ":: Register Task Scheduler autostart (wscript.exe runner — fully windowless)",
       "echo [SaveState] Registering autostart via Task Scheduler...",
@@ -24377,7 +24451,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "",
       ":: Launch the Node.js client launcher right now (via VBS — zero flashing)",
       "echo [SaveState] Starting the SaveState game launcher...",
-      `wscript.exe "%RUNNER_VBS%"`,
+      // start: the runner never exits, and a batch file waits for what it runs.
+      `start "" wscript.exe "%RUNNER_VBS%"`,
       "",
       ":: Wait up to 20 seconds for health check to confirm it started",
       `set "LAUNCH_OK=0"`,

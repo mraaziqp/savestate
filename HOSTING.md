@@ -331,6 +331,33 @@ standalone PCSX2 (`E:\PCSX2\bios`), in `Documents\PCSX2\bios` and in
 RetroArch's folder; GameCube/Wii use standalone Dolphin, or RetroArch's
 Dolphin core when that is all there is. 300 of 303 games pass.
 
+## Mini Games (agent builder games)
+
+Games > Mini Games (`web-src/app/MiniGames.jsx`, `server/minigames.ts`).
+Admins add a game as one `.html` file or a `.zip` with `index.html` (drag it
+onto the page), then edit the title and description, add a cover, replace the
+files or remove it. Every signed-in member can play. Files live in
+`<persist>/minigames/<id>/site`, the list in `minigames/games.json`.
+
+The agent builder publishes without a sign-in, using a publish key made on the
+same page (stored hashed; it can only add games):
+
+```bash
+curl -X POST "https://savestate.co.za/api/minigames/publish?title=Snake&description=..." \
+  -H "X-SaveState-Publish-Key: ssk_..." -H "X-Filename: snake.html" \
+  -H "Content-Type: application/octet-stream" --data-binary @snake.html
+```
+
+Safety: a game is someone else's JavaScript on our domain, so `/mg/<id>/...`
+is served with a CSP `sandbox` (no same-origin) and played in an equally
+sandboxed iframe. It cannot read the sign-in token, cookies or call the API
+as the player. In that sandbox localStorage throws, so each page gets a
+small stand-in (saves are kept per game on the device by the player page),
+and `no-transform` stops Cloudflare injecting its analytics script. The
+`~<version>` part of a game's address changes when its files are replaced,
+so cached copies of the old scripts are never mixed in. Game addresses are
+random and need no token (a sandboxed page can't send one).
+
 ## Changing the frontend
 
 `build.mjs` ends by parsing every chunk; a patch that breaks one stops the
@@ -464,7 +491,7 @@ Gemini and TMDB keys, entered in the app, stored encrypted in
 ## App builds
 
 Android: `scripts/windows/build-apk.ps1` (version from package.json, so
-1.0.62 is versionCode 1000062). Windows: `SaveState-Setup-<version>.exe` is
+1.0.63 is versionCode 1000063). Windows: `SaveState-Setup-<version>.exe` is
 the one-click installer (`/api/client-launcher/windows-installer`) wrapped
 by IExpress (built into Windows); see App downloads.
 
@@ -485,9 +512,14 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
   **Back the keystore up**: Android refuses an update signed with another key.
 - **Windows**: `releases\updates\SaveState-Setup-<version>.exe` (the newest
   `.exe` there is what `/api/downloads/desktop` serves). It runs the one-click
-  installer: Node.js via winget if missing, the game launcher
-  (`client-launcher.cjs`, autostart at login, `nexusemu://`), and a SaveState
-  shortcut on the Desktop and Start menu (Edge app window). To rebuild: save
+  installer: the PC's own Node.js, or a private copy in
+  `%LOCALAPPDATA%\NexusEmuClient\node` from nodejs.org (winget only if that is
+  blocked); the game launcher (`client-launcher.cjs`); the runner
+  (`/api/client-launcher/runner.vbs`, started at sign-in and by `nexusemu://`)
+  which keeps the launcher running and restarts it within ~10 s if it stops
+  (one runner at a time; a second launcher on the port exits); and a
+  SaveState shortcut on the Desktop and Start menu (Edge app window).
+  Re-running it replaces a running launcher with the new one. To rebuild: save
   `/api/client-launcher/windows-installer` as `SaveState-Setup.cmd` in an
   empty folder and run `iexpress /N /Q savestate.sed` with an SED whose
   `AppLaunched` is `cmd.exe /c SaveState-Setup.cmd`. PCs that already have the
