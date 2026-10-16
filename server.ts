@@ -2843,6 +2843,32 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
 }
 
 // ─── DB Mapper ───────────────────────────────────────────────────────────────
+/**
+ * The name a game is shown with. Switch dumps carry the title ID and version
+ * numbers ("Luigis Mansion 2 HD 010048701995E000 1 0 0 0 17 0 1"), and an
+ * extracted PS3 game is found by its EBOOT.BIN, so it was called "EBOOT";
+ * its name is the folder above PS3_GAME ("Uncharted - Drake's Fortune").
+ */
+function displayGameTitle(title: unknown, relativePath: unknown): string {
+  const rel = String(relativePath ?? "").replace(/\\/g, "/");
+  const ps3 = /(?:^|\/)([^/]+)\/PS3_GAME\/USRDIR\/EBOOT\.BIN$/i.exec(rel);
+  if (ps3 && /^eboot$/i.test(String(title ?? "").trim())) return ps3[1];
+  const t = String(title ?? "").replace(/\s+[0-9A-F]{16}(?:\s+\d+)*\s*$/i, "").trim();
+  return t || String(title ?? "");
+}
+
+/**
+ * Whether a library entry is something an emulator can start. A .rar can't
+ * be opened by any of them, and Switch "Updates" are patches for a game, not
+ * a game ("Zelda Tears of the Kingdom Update v1.4.3.rar" was listed).
+ */
+function isPlayableEntry(game: { platform?: string; relativePath?: string }): boolean {
+  const rel = String(game.relativePath ?? "").replace(/\\/g, "/").toLowerCase();
+  if (/\.(rar|txt|nfo|jpg|png|url|md)$/.test(rel)) return false;
+  if (String(game.platform ?? "").toLowerCase() === "switch" && /(^|\/)(updates?|dlc)\//.test(rel)) return false;
+  return true;
+}
+
 function rowToGame(row: Record<string, any>) {
   const platform = inferPlatformFromRecord(row.platform, row.relative_path, row.title, row.core_id);
   // Derive the core from the (possibly just-repaired) platform whenever the
@@ -2857,7 +2883,7 @@ function rowToGame(row: Record<string, any>) {
     id: row.id,
     // Switch dumps carry the title ID and version numbers in the name
     // ("Luigis Mansion 2 HD 010048701995E000 1 0 0 0 17 0 1").
-    title: String(row.title ?? "").replace(/\s+[0-9A-F]{16}(?:\s+\d+)*\s*$/i, "").trim() || row.title,
+    title: displayGameTitle(row.title, row.relative_path),
     platform,
     coreId: resolvedCore,
     boxArt: row.box_art ?? "",
@@ -2935,6 +2961,7 @@ function gameQualityScore(game: ReturnType<typeof rowToGame>): number {
 function dedupeGamesForClient(games: ReturnType<typeof rowToGame>[]): ReturnType<typeof rowToGame>[] {
   const byKey = new Map<string, ReturnType<typeof rowToGame>>();
   for (const game of games) {
+    if (!isPlayableEntry(game)) continue;
     const key = gameIdentityKey(game);
     const current = byKey.get(key);
     if (!current || gameQualityScore(game) > gameQualityScore(current)) {
@@ -4888,6 +4915,53 @@ async function startServer() {
   // Returns the emulator path plus which flavor was found, since the auto-fix
   // install step and any UI showing "which Switch emulator" need to know —
   // Ryujinx and the Yuzu-lineage forks have different CLI invocations.
+  /**
+   * Whether neogeo.zip (in the BIOS folder or RetroArch's system folder) has
+   * what FBNeo needs, found by checksum so file names don't matter: the
+   * 000-lo, sfix and sm1 chips plus at least one system BIOS.
+   */
+  async function neoGeoBiosStatus(): Promise<{ ok: boolean; detail: string; file: string | null }> {
+    const config = await getVaultConfig();
+    const coresDir = await getCoresDir().catch(() => null);
+    const places = [config.bios_path, coresDir ? path.join(path.dirname(coresDir), 'system') : ''].filter(Boolean).map((d) => path.join(d, 'neogeo.zip'));
+    const NEED: Record<string, string> = { '5a86cff2': '000-lo.lo', 'c2ea0cfd': 'sfix.sfix', '94416d67': 'sm1.sm1' };
+    const BIOS = new Set(['9036d879', '91b64be3', '2723a5b5', 'f0e8f27d', 'e72943de', 'ac5d3f0b', 'c7f2fa45']); // sp-s2, sp-s3, sp-e, vs-bios and other MVS/AES BIOS chips
+    for (const file of places) {
+      if (!existsSync(file)) continue;
+      try {
+        const AdmZip = (await import("adm-zip")).default;
+        const crcs = new Set(new AdmZip(file).getEntries().map((e: any) => ((e.header.crc >>> 0).toString(16)).padStart(8, '0')));
+        const missing = Object.entries(NEED).filter(([crc]) => !crcs.has(crc)).map(([, name]) => name);
+        const hasBios = [...crcs].some((c) => BIOS.has(c));
+        if (!hasBios) missing.push('a system BIOS (e.g. sp-s2.sp1)');
+        if (!missing.length) return { ok: true, detail: `neogeo.zip: ${file}`, file };
+        return { ok: false, detail: `${file} is an older set: missing ${missing.join(', ')}. Put a current neogeo.zip (FBNeo/MAME) in ${path.dirname(file)}`, file };
+      } catch { /* unreadable: try the next */ }
+    }
+    return { ok: false, detail: `neogeo.zip not found — put it in ${config.bios_path || 'the BIOS folder'}`, file: null };
+  }
+
+  /** An emulator unzipped somewhere in Downloads (one or two folders down, or in its publish\ folder). */
+  async function findUnpackedInDownloads(exe: string): Promise<string | null> {
+    const downloads = path.join(os.homedir(), "Downloads");
+    const want = exe.toLowerCase();
+    const dirs = (await readdir(downloads, { withFileTypes: true }).catch(() => [])).filter((d) => d.isDirectory());
+    for (const d of dirs) {
+      const base = path.join(downloads, d.name);
+      for (const rel of [exe, path.join("publish", exe)]) {
+        try { await fsAccess(path.join(base, rel)); return path.join(base, rel); } catch { /* no */ }
+      }
+      for (const inner of (await readdir(base, { withFileTypes: true }).catch(() => [])).filter((x) => x.isDirectory()).slice(0, 20)) {
+        for (const rel of [exe, path.join("publish", exe)]) {
+          const p = path.join(base, inner.name, rel);
+          if (path.basename(p).toLowerCase() !== want) continue;
+          try { await fsAccess(p); return p; } catch { /* no */ }
+        }
+      }
+    }
+    return null;
+  }
+
   async function detectSwitchEmuPathNow(): Promise<{ path: string; flavor: 'ryujinx' | 'yuzu-fork' } | null> {
     const cfg = await getVaultConfig();
     const explicit = String(process.env.RYUJINX_PATH ?? (cfg as any).ryujinx_path ?? "").trim();
@@ -4895,6 +4969,10 @@ async function startServer() {
     for (const candidate of RYUJINX_CANDIDATES) {
       try { await fsAccess(candidate); return { path: candidate, flavor: 'ryujinx' }; } catch { /* no */ }
     }
+    // Ryujinx comes as a zip that most people unpack where it landed:
+    // Downloads\ryujinx-<version>-win_x64\publish\Ryujinx.exe.
+    const unpacked = await findUnpackedInDownloads("Ryujinx.exe");
+    if (unpacked) return { path: unpacked, flavor: 'ryujinx' };
     for (const candidate of YUZU_FORK_CANDIDATES) {
       try { await fsAccess(candidate); return { path: candidate, flavor: 'yuzu-fork' }; } catch { /* no */ }
     }
@@ -5775,9 +5853,17 @@ async function startServer() {
   household.register(app);
 
   // Mini games from the agent builder: upload, publish key, sandboxed play (server/minigames.ts).
-  const miniGames = createMiniGames({ persistDir: PERSIST_DIR, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "minigames") });
+  // The Agent Builder on this PC (NEXUS_AGENT_BUILDER_DIR, or its usual folder):
+  // its finished games appear in Mini Games and stay in step with rebuilds.
+  const agentBuilderDir = [process.env.NEXUS_AGENT_BUILDER_DIR, "E:\\Projects\\Agent-Builder"]
+    .map((d) => String(d ?? "").trim()).find((d) => d && existsSync(path.join(d, "builds")) ) ?? null;
+  const miniGames = createMiniGames({ persistDir: PERSIST_DIR, agentBuilderDir, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "minigames") });
   miniGames.register(app);
   miniGames.tidy().catch(() => {});
+  if (agentBuilderDir) {
+    setTimeout(() => miniGames.syncAgentBuilder().catch(() => {}), 60_000).unref();
+    setInterval(() => miniGames.syncAgentBuilder().catch(() => {}), 10 * 60_000).unref();
+  }
 
   // Sonarr / Radarr / Prowlarr / qBittorrent: find, connect, and say why downloads stall (server/downloader.ts).
   createDownloader({
@@ -5907,6 +5993,7 @@ async function startServer() {
     callerOf: (req) => access.callerOf(req),
     gameModeActive: () => gameMode.active(),
     siteBusy: () => siteBusy(),
+    streamingNow: () => openStreams > 0,
     suggestions: async () => {
       const out: Array<{ label: string; source: string; kind: "roms" | "music" | "movies" | "files"; dest: string }> = [];
       const vc = await getVaultConfig().catch(() => null);
@@ -8338,7 +8425,15 @@ async function startServer() {
     } else if (platform === 'switch') {
       const switchEmu = await detectSwitchEmuPath();
       emuPath = switchEmu?.path ?? null;
-      checks.push({ name: 'Emulator (Ryujinx)', ok: !!emuPath, detail: emuPath ? `${emuPath} (${switchEmu!.flavor})` : 'No Switch emulator found — install Ryujinx or set RYUJINX_PATH' });
+      checks.push({ name: 'Emulator (Ryujinx)', ok: !!emuPath, detail: emuPath ? `${emuPath} (${switchEmu!.flavor})` : 'No Switch emulator found — unzip Ryujinx to E:\\Ryujinx (or leave it in Downloads) and it is found by itself' });
+      // Ryujinx can't start any game without the keys dumped from a Switch;
+      // they live in its data folder (portable\ beside the exe, or %APPDATA%).
+      if (emuPath && switchEmu?.flavor === 'ryujinx') {
+        const keyDirs = [path.join(path.dirname(emuPath), 'portable', 'system'), path.join(process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming'), 'Ryujinx', 'system')];
+        let keys = '';
+        for (const d of keyDirs) { try { await fsAccess(path.join(d, 'prod.keys')); keys = d; break; } catch { /* no */ } }
+        checks.push({ name: 'Switch keys', ok: !!keys, detail: keys ? `prod.keys in ${keys}` : `prod.keys not found — open Ryujinx once, then File > Open Ryujinx Folder and copy prod.keys (from your own Switch) into system\\, and install your firmware with Tools > Install Firmware` });
+      }
       coreOk = true; coreDetail = 'Not required (standalone emulator)';
     } else if (platform === 'ps2') {
       const pcsx2Info = await detectPcsx2Path();
@@ -8384,6 +8479,13 @@ async function startServer() {
         biosDetail = `BIOS dir not found. Create: ${canonicalPath} and place a PS2 .bin BIOS inside it`;
       }
       checks.push({ name: 'PS2 BIOS', ok: biosOk, detail: biosDetail });
+    }
+
+    // 5. Neo Geo BIOS. FBNeo needs a current neogeo.zip; older sets (ng-sm1.rom,
+    // ng-sfix.rom) look right but fail with "romset is missing files".
+    if (platform === 'neogeo') {
+      const r = await neoGeoBiosStatus();
+      checks.push({ name: 'Neo Geo BIOS', ok: r.ok, detail: r.detail });
     }
 
     const allOk = checks.every(c => c.ok);
@@ -18700,8 +18802,21 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         result[key] = { available: false, count: 0, bytes: 0, hashes: {} };
       }
     }
+    void writeFile(standaloneManifestFile, JSON.stringify([...standaloneManifestCache])).catch(() => {});
     return result;
   }
+  // The hashes survive restarts (each entry is checked against the folder's
+  // signature before use), and are worked out in the background after
+  // start-up: the first caller after a restart waited 20 s or more for them
+  // (two emulator folders, 0.5 GB), long enough to time out.
+  const standaloneManifestFile = path.join(PERSIST_DIR, "standalone-manifest-cache.json");
+  try {
+    for (const [k, v] of JSON.parse(readFileSync(standaloneManifestFile, "utf8"))) standaloneManifestCache.set(k, v);
+  } catch { /* none yet */ }
+  setTimeout(() => {
+    standaloneManifestBuilding ??= buildStandaloneManifest().finally(() => { standaloneManifestBuilding = null; });
+    standaloneManifestBuilding.catch(() => {});
+  }, 90_000).unref();
 
   app.get("/api/emulator/export/standalone", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;

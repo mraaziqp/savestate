@@ -110,6 +110,8 @@ select.nxa-input option{background:#15172a;color:#f4f5fb}
 .nxa-seg button.on{background:rgba(255,255,255,.12);color:var(--text)}
 .nxa-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:800;border:1px solid var(--line);color:var(--dim);white-space:nowrap}
 .nxa-pill.ok{color:var(--ok);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+.nxa p,.nxa small{overflow-wrap:anywhere}
+@media (max-width:640px){.nxa-pill{white-space:normal;max-width:100%}}
 .nxa-pill.warn{color:var(--warn);border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.08)}
 .nxa-pill.acc{color:var(--acc);border-color:rgba(34,211,238,.35);background:rgba(34,211,238,.08)}
 .nxa-pill.bad{color:var(--bad);border-color:rgba(251,113,133,.35);background:rgba(251,113,133,.08)}

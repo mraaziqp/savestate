@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync, createWriteStream } from "node:fs";
 import { readFile, writeFile, stat, unlink, readdir, rmdir, mkdir, rm, rename, copyFile } from "node:fs/promises";
-import { receipt, addLiveSource } from "./receipts.ts";
+import { receipt, addLiveSource, addCompletedSource, humanBytes } from "./receipts.ts";
 const gbs = (n: number) => `${(n / 1024 ** 3).toFixed(1)} GB`;
 
 export type DrivesDeps = {
@@ -35,6 +35,8 @@ export type DrivesDeps = {
   gameModeActive?: () => boolean;
   /** Someone is watching, listening or browsing right now (uploads hold back). */
   siteBusy?: () => boolean;
+  /** Someone is watching, listening or playing right now (that needs the upload line). */
+  streamingNow?: () => boolean;
   /** Who is calling (members' own drives are checked against it). */
   callerOf?: (req: express.Request) => Promise<{ userId: string | null; admin: boolean }>;
   /** Folders on this PC worth moving to Drive (ROM and music folders), with where each should go. */
@@ -59,6 +61,13 @@ type OffloadJob = {
   attempts?: number;
   retryAt?: number | null;
   lastProgressAt?: number | null;
+  /** Time spent actually copying (not queued or paused), for "took" in the Activity log. */
+  activeMs?: number;
+  tickAt?: number;
+  /** [time, bytes] over the last few minutes: the speed "time left" is worked out from. */
+  speedWin?: Array<[number, number]>;
+  /** rclone is still finding out what there is to send; no honest "time left" yet. */
+  counting?: boolean;
 };
 
 const EXCLUDES = ["desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**", "*.partial", "*.!qB", "*.crdownload", "*.tmp"];
@@ -245,6 +254,22 @@ export function createDrives(deps: DrivesDeps) {
   //   the site. At 650k a 500 GB backlog took months; with nobody watching or
   //   browsing, uploads run flat out (NEXUS_UPLOAD_BWLIMIT_IDLE, default off)
   //   and drop back to the cap within seconds of someone arriving.
+  //   Browsing (2026-10-16): the cap was also applied when someone was only
+  //   browsing, which barely uses the upload line, so uploads crawled all day
+  //   (31 GB took 8 h at 1.1 MB/s). Now the 650k cap is for streaming; while
+  //   someone browses, uploads take 70% of the line's speed, learned from
+  //   uncapped runs (NEXUS_UPLOAD_BROWSING_SHARE to change the share).
+  const capacityFile = path.join(deps.persistDir, "upload-capacity.json");
+  let capacity = 0; // bytes/s the line managed uncapped (slowly forgets peaks)
+  readFile(capacityFile, "utf8").then((t) => { capacity = Number(JSON.parse(t).bytesPerSecond) || 0; }).catch(() => {});
+  function learnCapacity(speed: number) {
+    if (!(speed > 0)) return;
+    const next = speed > capacity ? capacity * 0.7 + speed * 0.3 : capacity * 0.999 + speed * 0.001;
+    if (Math.abs(next - capacity) / Math.max(1, capacity) > 0.02) {
+      capacity = next;
+      writeFile(capacityFile, JSON.stringify({ bytesPerSecond: Math.round(capacity), at: new Date().toISOString() })).catch(() => {});
+    } else capacity = next;
+  }
   function desiredRate(): string {
     if (deps.gameModeActive?.()) return process.env.NEXUS_UPLOAD_BWLIMIT_GAMING?.trim() || "64k";
     const [from, to] = (process.env.NEXUS_UPLOAD_FULL_HOURS?.trim() || "1-7").split("-").map(Number);
@@ -252,7 +277,18 @@ export function createDrives(deps: DrivesDeps) {
     const full = from <= to ? h >= from && h < to : h >= from || h < to;
     if (full) return "off";
     if (deps.siteBusy && !deps.siteBusy()) return process.env.NEXUS_UPLOAD_BWLIMIT_IDLE?.trim() || "off";
-    return process.env.NEXUS_UPLOAD_BWLIMIT?.trim() || "650k";
+    // While someone streams: leave 60% of the measured line for them (a
+    // film needs ~1 MB/s; this line measured ~24 MB/s, where a flat 650k
+    // left uploads crawling during every evening's viewing).
+    const floor = process.env.NEXUS_UPLOAD_BWLIMIT?.trim() || "650k";
+    const streamKib = capacity > 0 ? Math.round((capacity * 0.4) / 1024) : 0;
+    const capped = streamKib > 650 ? `${streamKib}k` : floor;
+    if (deps.streamingNow && !deps.streamingNow() && capacity > 0) {
+      const share = Math.min(0.95, Math.max(0.2, Number(process.env.NEXUS_UPLOAD_BROWSING_SHARE) || 0.7));
+      const kib = Math.round((capacity * share) / 1024);
+      return kib > 650 ? `${kib}k` : capped;
+    }
+    return capped;
   }
   /** Apply the current limit to every running upload now (someone just arrived). */
   function applyRate() {
@@ -279,11 +315,30 @@ export function createDrives(deps: DrivesDeps) {
     const s = entry?.stats;
     if (s) {
       if ((Number(s.bytes) || 0) !== job.stats.bytes || (Number(s.checks) || 0) !== job.stats.checks) job.lastProgressAt = Date.now();
+      const now = Date.now();
+      const bytes = Number(s.bytes) || 0;
+      const totalBytes = Number(s.totalBytes) || 0;
+      if (job.tickAt && now - job.tickAt < 60_000) job.activeMs = (job.activeMs ?? 0) + (now - job.tickAt);
+      job.tickAt = now;
+      // "Time left" from the last five minutes of real progress. rclone's own
+      // figure follows the speed of the moment, which jumps every time the
+      // limit changes (someone arrives, leaves, the night window opens).
+      const win = (job.speedWin ??= []);
+      if (win.length && bytes < win[win.length - 1][1]) win.length = 0; // rclone restarted its count
+      win.push([now, bytes]);
+      while (win.length > 2 && now - win[0][0] > 5 * 60_000) win.shift();
+      const span = (now - win[0][0]) / 1000;
+      const speed = span >= 20 ? Math.max(0, (bytes - win[0][1]) / span) : Number(s.speed) || 0;
+      // Still listing: files to check are still being found, so the total is not known yet.
+      job.counting = (Number(s.totalChecks) || 0) > (Number(s.checks) || 0) || (span < 20 && bytes === 0);
+      const left = Math.max(0, totalBytes - bytes);
+      if (jobRc.get(job.id)?.rate === "off" && span >= 60) learnCapacity(speed);
       job.stats = {
-        bytes: Number(s.bytes) || 0, totalBytes: Number(s.totalBytes) || 0,
+        bytes, totalBytes,
         transfers: Number(s.transfers) || 0, totalTransfers: Number(s.totalTransfers) || 0,
         checks: Number(s.checks) || 0, totalChecks: Number(s.totalChecks) || 0,
-        errors: Number(s.errors) || 0, speed: Number(s.speed) || 0, eta: s.eta == null ? null : Number(s.eta),
+        errors: Number(s.errors) || 0, speed,
+        eta: job.counting || !(speed > 0) ? null : Math.round(left / speed),
         current: Array.isArray(s.transferring) ? s.transferring.slice(0, 4).map((t: any) => `${t.name} ${Math.round(t.percentage ?? 0)}%`) : [],
       };
       save();
@@ -308,7 +363,10 @@ export function createDrives(deps: DrivesDeps) {
     const rate = desiredRate();
     jobRc.set(job.id, { url: `http://127.0.0.1:${rcPort}`, auth: "Basic " + Buffer.from(`nx:${rcPass}`).toString("base64"), rate });
     const args = ["copy", job.source, `${job.remote}:${job.dest}`, `--bwlimit=${rate}`, "--rc", `--rc-addr=127.0.0.1:${rcPort}`, "--rc-user=nx", `--rc-pass=${rcPass}`,
-      "--transfers=4", "--checkers=8", "--drive-chunk-size=64M",
+      // ROM and music folders are thousands of small files, where Drive's
+      // per-file overhead, not the line, sets the pace: send more at once.
+      // --fast-list reads the folder on Drive in a few big requests.
+      `--transfers=${job.kind === "movies" || job.kind === "tv" ? 4 : 8}`, "--checkers=16", "--fast-list", "--drive-chunk-size=64M",
       "--retries=10", "--low-level-retries=20", "--use-json-log", "--log-level=NOTICE", "--stats=4s", "--stats-log-level=NOTICE",
       ...excludeArgs()];
     const proc = spawn(bin, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
@@ -417,9 +475,42 @@ export function createDrives(deps: DrivesDeps) {
   addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued"].includes(j.status)).map((j) => ({
     kind: "upload", title: j.label, status: j.status,
     progress: j.status === "copying" && j.stats.totalBytes ? j.stats.bytes / j.stats.totalBytes : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
-    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(j.stats.bytes)} of ${gbs(j.stats.totalBytes)}` : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : "Waiting for its turn",
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(j.stats.bytes)} of ${gbs(j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
+      : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : "Waiting for its turn",
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
   })));
+
+  // Finished copies for the Activity log's "Completed" list: what was copied
+  // where, and what the file-by-file check against Drive found.
+  addCompletedSource(() => jobs.filter((j) => j.verify || j.status === "failed").map((j) => {
+    const v = j.verify;
+    const bad = v ? v.missing + v.differ + v.errors : 0;
+    const checked = v ? v.matched + bad : 0;
+    // Time actually spent copying; older jobs only have start and finish.
+    const took = j.activeMs && j.activeMs > 0 ? j.activeMs : j.startedAt && j.finishedAt && j.finishedAt > j.startedAt ? j.finishedAt - j.startedAt : 0;
+    const dur = took >= 3600_000 ? `${Math.floor(took / 3600_000)} h ${Math.round((took % 3600_000) / 60_000)} min` : took >= 60_000 ? `${Math.round(took / 60_000)} min` : took ? `${Math.round(took / 1000)} s` : "";
+    const result: "verified" | "warn" | "failed" = !v ? "failed" : bad ? "warn" : "verified";
+    const facts: Array<[string, string]> = [];
+    if (v) {
+      facts.push(["Files checked", `${checked}`], ["Matched on Drive", `${v.matched} (${humanBytes(v.matchedBytes)})`]);
+      if (v.missing) facts.push(["Not on Drive yet", `${v.missing}`]);
+      if (v.differ) facts.push(["Different on Drive", `${v.differ}`]);
+      if (v.errors) facts.push(["Couldn't check", `${v.errors}`]);
+      facts.push(["Checked", new Date(v.at).toLocaleString("en-ZA")]);
+    }
+    if (dur) facts.push(["Took", `${dur}${took && v ? ` (about ${humanBytes(v.matchedBytes / (took / 1000))}/s)` : ""}`]);
+    if (j.deleted) facts.push(["Freed on this PC", `${j.deleted.files} file(s), ${humanBytes(j.deleted.bytes)}${j.deleted.skipped ? `, ${j.deleted.skipped} left (changed or in use)` : ""}`]);
+    facts.push(["Kept in step", j.keepSynced ? `yes, rechecked daily${j.nextSyncAt ? ` (next ${new Date(j.nextSyncAt).toLocaleDateString("en-ZA")})` : ""}` : "no"]);
+    if (existsSync(path.join(reportsDir, `${j.id}.txt`))) facts.push(["Full report", `/api/admin/offload/${j.id}/report`]);
+    return {
+      kind: "upload", id: j.id, title: j.label, result,
+      summary: !v ? `Stopped: ${j.lastError ?? "the copy failed"}`
+        : bad ? `${v.matched} of ${checked} files confirmed on Drive; ${bad} will be retried`
+        : `All ${v.matched} files are on Google Drive and every checksum matched (${humanBytes(v.matchedBytes)}).`,
+      startedAt: j.startedAt, finishedAt: j.finishedAt ?? v?.at ?? null,
+      from: j.source, to: `${j.remote}:${j.dest}`, facts, problems: v?.problems?.length ? v.problems : undefined,
+    };
+  }));
 
   // Jobs interrupted by a restart pick up where they were.
   void (async () => {
@@ -615,6 +706,21 @@ export function createDrives(deps: DrivesDeps) {
       const protectedFiles = jobs.reduce((n, j) => n + (j.verify && ["verified", "kept", "done"].includes(j.status) ? j.verify.matched : 0), 0);
       const protectedBytes = jobs.reduce((n, j) => n + (j.verify && ["verified", "kept", "done"].includes(j.status) ? j.verify.matchedBytes : 0), 0);
       res.json({ jobs, gameMode: !!deps.gameModeActive?.(), speedLimit: desiredRate(), protectedFiles, protectedBytes });
+    });
+
+    // The file-by-file check of a copy (rclone's report: "= file" matched,
+    // "+" not on Drive, "*" different, "!" couldn't be read), with a key on top.
+    app.get("/api/admin/offload/:id/report", async (req, res) => {
+      const job = jobs.find((j) => j.id === req.params.id);
+      if (!job) return res.status(404).json({ error: "No such upload." });
+      const body = await readFile(path.join(reportsDir, `${job.id}.txt`), "utf8").catch(() => null);
+      if (body == null) return res.status(404).json({ error: "This upload hasn't been checked yet." });
+      const head = `SaveState check report: ${job.label}\r\nFrom ${job.source} to ${job.remote}:${job.dest}\r\n`
+        + `Checked ${job.verify ? new Date(job.verify.at).toLocaleString("en-ZA") : "?"}\r\n`
+        + `Key: "=" on Drive and identical, "+" not on Drive, "*" different on Drive, "!" could not be checked\r\n\r\n`;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="check-${job.id}.txt"`);
+      res.send(head + body.replace(/\r?\n/g, "\r\n"));
     });
 
     app.get("/api/admin/offload/suggestions", async (_req, res) => {

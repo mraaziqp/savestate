@@ -164,7 +164,7 @@ const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(
 const normTitle = (t: string) => t.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim();
 
 function tabsFor(sections: string[], maxLevel: number | null): string[] {
-  const tabs = new Set<string>(["household"]);
+  const tabs = new Set<string>(["household", "help"]); // Help & guides is for everyone
   for (const k of sections) for (const t of SECTIONS[k]?.tabs ?? []) tabs.add(t);
   if (maxLevel != null && maxLevel <= 2) for (const t of OPEN_WORLD_TABS) tabs.delete(t);
   return [...tabs];

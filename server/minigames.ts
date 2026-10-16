@@ -31,10 +31,12 @@ import path from "node:path";
 import { createReadStream } from "node:fs";
 import { readFile, writeFile, mkdir, rm, rename, readdir, stat } from "node:fs/promises";
 import type { Caller } from "./access.ts";
-import { receipt } from "./receipts.ts";
+import { receipt, humanBytes } from "./receipts.ts";
 
 export type MiniGamesDeps = {
   persistDir: string;
+  /** The Agent Builder's folder on this PC; its games appear here (null: not linked). */
+  agentBuilderDir: string | null;
   callerOf: (req: express.Request) => Promise<Caller>;
   log: (level: string, msg: string) => void;
 };
@@ -52,8 +54,27 @@ type Game = {
   createdAt: string;
   updatedAt: string;
   addedBy: string | null;
-  source: "upload" | "publish-key";
+  source: "upload" | "publish-key" | "agent-builder";
+  /** Agent Builder games: which game it is (games/snake, builds/new_pgame) and the build's time. */
+  sourceKey?: string;
+  sourceStamp?: number;
 };
+
+/** A game the Agent Builder has made, found on disk (see scanAgentBuilder). */
+type Candidate = {
+  key: string;            // games/snake or builds/new_pgame_1791239989502
+  group: string;          // one game across its build attempts: games/snake, builds/new_pgame
+  dir: string;            // the folder holding index.html
+  title: string;
+  description: string;
+  status: "finished" | "passed" | "unchecked";
+  stamp: number;          // index.html's modified time
+};
+
+// A build counts as a game when its name or brief says so (the Agent
+// Builder's own test, plus the names its game orders use).
+const GAME_WORDS = /\b(games?|arcade|platformer|shooter|rpg|roguelike|puzzle|racing|runner|tower defen[cs]e|strategy|base builder|snake|invaders?|brick|breaker|clan|pgame|tetris|pong|asteroids)\b/i;
+const GENERIC_TITLE = /^(vite|react|vite \+ react|app|web app|untitled|index|document)( app)?$/i;
 
 const MAX_UPLOAD = 300 * 1024 * 1024;     // a zip or html as sent
 const MAX_UNPACKED = 600 * 1024 * 1024;   // all files of one game
@@ -223,7 +244,7 @@ export function createMiniGames(deps: MiniGamesDeps) {
       };
       list.unshift(game);
       await save();
-      receipt({ kind: "library", title: `Mini game added: ${game.title}`, detail: `${game.files} file${game.files === 1 ? "" : "s"}, ${(game.bytes / 1024 / 1024).toFixed(1)} MB${by.source === "publish-key" ? `, published by ${by.name}` : ""}`, userId: by.userId, actor: by.name, bytes: game.bytes, data: { id } });
+      receipt({ kind: "library", title: `Mini game added: ${game.title}`, detail: `${game.files} file${game.files === 1 ? "" : "s"}, ${humanBytes(game.bytes)}${by.source === "publish-key" ? `, published by ${by.name}` : ""}`, userId: by.userId, actor: by.name, bytes: game.bytes, data: { id } });
       deps.log("INFO", `[minigames] added ${game.title} (${id}) by ${by.name}`);
       return game;
     } catch (err) {
@@ -258,7 +279,185 @@ export function createMiniGames(deps: MiniGamesDeps) {
     return c;
   }
 
+  // ── The Agent Builder link ──────────────────────────────────────────────
+  // The Agent Builder (and Jarvis, which orders games from it) runs on this
+  // PC. Its finished games sit in <builder>/games/<name>/index.html, and each
+  // build attempt in <builder>/builds/<name>_<time>/dist/index.html, with
+  // data/builds.json saying which attempts passed every check. Finished and
+  // passing games are put on the shelf by themselves; a newer passing build
+  // of the same game replaces the files in place (plays and cover kept).
+  // Everything else is listed for an admin to add. A game an admin removes
+  // is never added back by itself.
+  const dismissedFile = path.join(root, "agent-builder-removed.json");
+  async function dismissed(): Promise<Set<string>> {
+    try { return new Set(JSON.parse(await readFile(dismissedFile, "utf8"))); } catch { return new Set(); }
+  }
+  async function dismiss(key: string) {
+    const s = await dismissed(); s.add(key);
+    await mkdir(root, { recursive: true });
+    await writeFile(dismissedFile, JSON.stringify([...s], null, 2));
+  }
+
+  // A scan reads a few dozen folders on another drive; the page asks often.
+  let lastScan: { at: number; list: Candidate[] } | null = null;
+  async function scanAgentBuilder(maxAgeMs = 60_000): Promise<Candidate[]> {
+    if (lastScan && Date.now() - lastScan.at < maxAgeMs) return lastScan.list;
+    const list = await scanAgentBuilderNow();
+    lastScan = { at: Date.now(), list };
+    return list;
+  }
+
+  async function scanAgentBuilderNow(): Promise<Candidate[]> {
+    const base = deps.agentBuilderDir;
+    if (!base) return [];
+    const out: Candidate[] = [];
+    for (const name of await readdir(path.join(base, "games")).catch(() => [] as string[])) {
+      const dir = path.join(base, "games", name);
+      const st = await stat(path.join(dir, "index.html")).catch(() => null);
+      if (!st?.isFile()) continue;
+      const t = titleFromHtml(await readFile(path.join(dir, "index.html"), "utf8").catch(() => ""));
+      out.push({ key: `games/${name}`, group: `games/${name}`, dir, title: t && !GENERIC_TITLE.test(t) ? t : titleFromName(name), description: "", status: "finished", stamp: st.mtimeMs });
+    }
+    let records: any[] = [];
+    try {
+      const j = JSON.parse(await readFile(path.join(base, "data", "builds.json"), "utf8"));
+      records = Array.isArray(j) ? j : Array.isArray(j?.builds) ? j.builds : Object.values(j ?? {});
+    } catch { /* no records */ }
+    const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+    for (const name of await readdir(path.join(base, "builds")).catch(() => [] as string[])) {
+      const dir = path.join(base, "builds", name);
+      const st = await stat(path.join(dir, "dist", "index.html")).catch(() => null);
+      if (!st?.isFile()) continue;
+      const recs = records.filter((r) => r?.outputDir && same(String(r.outputDir), dir));
+      const last = recs[recs.length - 1];
+      let pkg: any = {};
+      try { pkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8")); } catch { /* none */ }
+      // Folder names join words with _ and -, which a \b test reads as one word.
+      if (!GAME_WORDS.test(`${name} ${last?.projectName ?? ""} ${last?.description ?? ""} ${pkg.description ?? ""}`.replace(/[_-]+/g, " "))) continue;
+      const group = name.replace(/_\d{9,}$/, "");
+      const t = titleFromHtml(await readFile(path.join(dir, "dist", "index.html"), "utf8").catch(() => ""));
+      const title = String(last?.projectName ?? "").trim() || (t && !GENERIC_TITLE.test(t) ? t : titleFromName(group.replace(/^(new|order|project|academy)_/, "")));
+      out.push({
+        key: `builds/${name}`, group: `builds/${group}`, dir: path.join(dir, "dist"), title,
+        description: String(last?.description ?? pkg.description ?? "").replace(/^Build (me )?(a |an )?/i, "").trim().slice(0, 500),
+        status: recs.some((r) => r?.passed === true) ? "passed" : "unchecked", stamp: st.mtimeMs,
+      });
+    }
+    return out.sort((a, b) => b.stamp - a.stamp);
+  }
+
+  /** Copy a game folder into a game's site, skipping tooling folders. */
+  async function copyGame(src: string, dest: string): Promise<{ bytes: number; files: number }> {
+    let bytes = 0, files = 0;
+    const walk = async (from: string, to: string) => {
+      await mkdir(to, { recursive: true });
+      for (const e of await readdir(from, { withFileTypes: true })) {
+        if (e.isDirectory() && /^(node_modules|\.git|\.cache)$/.test(e.name)) continue;
+        const a = path.join(from, e.name), b = path.join(to, e.name);
+        if (e.isDirectory()) { await walk(a, b); continue; }
+        if (!e.isFile()) continue;
+        const data = await readFile(a);
+        bytes += data.length; files++;
+        if (bytes > MAX_UNPACKED || files > MAX_FILES) throw Object.assign(new Error("That game is too large to add (over 600 MB or 5000 files)."), { status: 400 });
+        await writeFile(b, data);
+      }
+    };
+    await walk(src, dest);
+    return { bytes, files };
+  }
+
+  /** Put an Agent Builder game on the shelf, or refresh the one already there. */
+  async function importCandidate(c: Candidate, by: { userId: string | null; name: string }): Promise<{ game: Game; updated: boolean }> {
+    const list = await load();
+    const existing = list.find((g) => g.source === "agent-builder" && g.sourceKey === c.group);
+    const id = existing?.id ?? newId();
+    const dir = path.join(root, id);
+    const fresh = path.join(dir, `site-${Date.now()}`);
+    try {
+      const got = await copyGame(c.dir, fresh);
+      await rm(path.join(dir, "site"), { recursive: true, force: true });
+      await rename(fresh, path.join(dir, "site"));
+      const now = new Date().toISOString();
+      let game: Game;
+      if (existing) {
+        Object.assign(existing, { entry: "index.html", bytes: got.bytes, files: got.files, updatedAt: now, sourceStamp: c.stamp });
+        if (!existing.description && c.description) existing.description = c.description;
+        game = existing;
+      } else {
+        game = {
+          id, entry: "index.html", bytes: got.bytes, files: got.files, plays: 0, cover: null,
+          title: c.title.slice(0, 120), description: c.description, author: "Agent Builder",
+          createdAt: now, updatedAt: now, addedBy: by.userId, source: "agent-builder", sourceKey: c.group, sourceStamp: c.stamp,
+        };
+        list.unshift(game);
+      }
+      await save();
+      receipt({ kind: "library", title: `Mini game ${existing ? "updated" : "added"} from the Agent Builder: ${game.title}`, detail: `${got.files} file${got.files === 1 ? "" : "s"}, ${humanBytes(got.bytes)} (${c.key})`, userId: by.userId, actor: by.name, bytes: got.bytes, data: { id: game.id, source: c.key } });
+      deps.log("INFO", `[minigames] ${existing ? "updated" : "added"} ${game.title} from the Agent Builder (${c.key})`);
+      return { game, updated: !!existing };
+    } catch (err) {
+      await rm(fresh, { recursive: true, force: true }).catch(() => {});
+      if (!existing) await rm(dir, { recursive: true, force: true }).catch(() => {});
+      throw err;
+    }
+  }
+
+  let syncing: Promise<{ added: number; updated: number }> | null = null;
+  /** Add finished and passing Agent Builder games; refresh ones that were rebuilt. */
+  function syncAgentBuilder(): Promise<{ added: number; updated: number }> {
+    if (syncing) return syncing;
+    syncing = (async () => {
+      let added = 0, updated = 0;
+      const [cands, gone, list] = [await scanAgentBuilder(0), await dismissed(), await load()];
+      const newest = new Map<string, Candidate>();
+      for (const c of cands) if (c.status !== "unchecked" && !newest.has(c.group)) newest.set(c.group, c);
+      for (const c of newest.values()) {
+        if (gone.has(c.group)) continue;
+        const have = list.find((g) => g.source === "agent-builder" && g.sourceKey === c.group);
+        if (have && (have.sourceStamp ?? 0) >= c.stamp) continue;
+        try { (await importCandidate(c, { userId: null, name: "Agent Builder" })).updated ? updated++ : added++; }
+        catch (err: any) { deps.log("WARN", `[minigames] couldn't add ${c.key} from the Agent Builder: ${err?.message ?? err}`); }
+      }
+      return { added, updated };
+    })().finally(() => { syncing = null; });
+    return syncing;
+  }
+
   function register(app: express.Express) {
+    // ── The Agent Builder link: admins ────────────────────────────────────
+    app.get("/api/minigames/agent-builder", async (req, res) => {
+      if (!(await requireAdmin(req, res))) return;
+      const base = deps.agentBuilderDir;
+      if (!base) return res.json({ linked: false, dir: null, candidates: [] });
+      const [cands, list, gone] = [await scanAgentBuilder(), await load(), await dismissed()];
+      const seen = new Set<string>();
+      res.json({
+        linked: true, dir: base,
+        candidates: cands.map((c) => {
+          const g = list.find((x) => x.source === "agent-builder" && x.sourceKey === c.group);
+          const latest = !seen.has(c.group); seen.add(c.group);
+          return { key: c.key, group: c.group, title: c.title, description: c.description, status: c.status, builtAt: new Date(c.stamp).toISOString(), latest,
+            onShelf: g ? { id: g.id, current: (g.sourceStamp ?? 0) >= c.stamp } : null, removed: gone.has(c.group) };
+        }),
+      });
+    });
+    app.post("/api/minigames/agent-builder/add", async (req, res) => {
+      const c = await requireAdmin(req, res); if (!c) return;
+      const key = String(req.query.key ?? "");
+      const cand = (await scanAgentBuilder()).find((x) => x.key === key);
+      if (!cand) return res.status(404).json({ error: "That build isn't in the Agent Builder any more." });
+      try {
+        const gone = await dismissed();
+        if (gone.delete(cand.group)) await writeFile(dismissedFile, JSON.stringify([...gone], null, 2));
+        const r = await importCandidate(cand, { userId: c.userId, name: c.username ?? "admin" });
+        res.json({ ok: true, updated: r.updated, game: view(r.game) });
+      } catch (err) { fail(res, err); }
+    });
+    app.post("/api/minigames/agent-builder/sync", async (req, res) => {
+      if (!(await requireAdmin(req, res))) return;
+      try { res.json({ ok: true, ...(await syncAgentBuilder()) }); } catch (err) { fail(res, err); }
+    });
+
     // ── The list, for every signed-in member ──────────────────────────────
     app.get("/api/minigames", async (req, res) => {
       const c = await deps.callerOf(req);
@@ -329,7 +528,7 @@ export function createMiniGames(deps: MiniGamesDeps) {
         await rename(fresh, path.join(dir, "site"));
         Object.assign(g, { entry: got.entry, bytes: got.bytes, files: got.files, updatedAt: new Date().toISOString() });
         await save();
-        receipt({ kind: "library", title: `Mini game updated: ${g.title}`, detail: `${got.files} files, ${(got.bytes / 1024 / 1024).toFixed(1)} MB`, userId: c.userId, actor: c.username, bytes: got.bytes, data: { id: g.id } });
+        receipt({ kind: "library", title: `Mini game updated: ${g.title}`, detail: `${got.files} files, ${humanBytes(got.bytes)}`, userId: c.userId, actor: c.username, bytes: got.bytes, data: { id: g.id } });
         res.json({ ok: true, game: view(g) });
       } catch (err) {
         await rm(fresh, { recursive: true, force: true }).catch(() => {});
@@ -361,6 +560,8 @@ export function createMiniGames(deps: MiniGamesDeps) {
       if (at < 0) return res.status(404).json({ error: "No such game." });
       const [g] = list.splice(at, 1);
       await save();
+      // Removed on purpose: the Agent Builder link must not add it back.
+      if (g.source === "agent-builder" && g.sourceKey) await dismiss(g.sourceKey).catch(() => {});
       await rm(path.join(root, g.id), { recursive: true, force: true }).catch(() => {});
       receipt({ kind: "library", title: `Mini game removed: ${g.title}`, userId: c.userId, actor: c.username, data: { id: g.id } });
       res.json({ ok: true });
@@ -447,5 +648,5 @@ export function createMiniGames(deps: MiniGamesDeps) {
     if (kept.length !== list.length) { games = kept; await save(); }
   }
 
-  return { register, tidy };
+  return { register, tidy, syncAgentBuilder };
 }

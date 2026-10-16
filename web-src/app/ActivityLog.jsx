@@ -44,6 +44,96 @@ function Live() {
   );
 }
 
+// Finished jobs with proof: for a folder copied to Drive, how many files were
+// checked against the copy on Drive, what matched, what didn't, how long it
+// took, and the file-by-file report.
+const RESULT = {
+  verified: { icon: "check", color: "var(--ok)", label: "Done and checked" },
+  warn: { icon: "alert", color: "var(--warn)", label: "Needs a look" },
+  failed: { icon: "alert", color: "var(--bad)", label: "Stopped" },
+};
+const COMPLETED_KINDS = [["", "Everything"], ["upload", "Copies & uploads"], ["download", "Downloads"], ["freed", "Space freed"], ["library", "Library"]];
+
+async function downloadReport(url) {
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${localStorage.getItem("nexus_token") ?? ""}` } });
+  if (!r.ok) throw new Error("The report couldn't be downloaded.");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await r.blob());
+  a.download = (r.headers.get("Content-Disposition") ?? "").match(/filename="([^"]+)"/)?.[1] ?? "report.txt";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+function Completed() {
+  const [items, setItems] = useState(null);
+  const [error, setError] = useState("");
+  const [kind, setKind] = useState("");
+  const [open, setOpen] = useState(null);
+  const [all, setAll] = useState(false);
+  useEffect(() => {
+    let live = true;
+    const tick = () => api("/api/activity/completed").then((r) => live && setItems(r.items)).catch((e) => live && setError(e.message));
+    tick();
+    const t = setInterval(() => { if (!document.hidden) tick(); }, 30000);
+    return () => { live = false; clearInterval(t); };
+  }, []);
+  const shown = (items ?? []).filter((i) => !kind || i.kind === kind);
+  const list = all ? shown : shown.slice(0, 12);
+  return (
+    <div className="nxa-card">
+      <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="check" /> Completed</h3>
+        <p className="nxa-sub" style={{ margin: 0 }}>Everything that finished, and how it was checked. A folder copied to Drive is marked done only after every file was compared with the copy on Drive.</p></div></div>
+      <div className="nxa-row nxa-wrap" style={{ gap: 6, marginBottom: 10 }}>
+        {COMPLETED_KINDS.map(([k, label]) => <button key={k} className={`nxa-btn sm${kind === k ? " primary" : ""}`} onClick={() => setKind(k)}>{label}</button>)}
+      </div>
+      {error && <Note kind="bad">{error}</Note>}
+      {!items && !error && <p className="nxa-dim"><Icon name="spinner" /> Loading…</p>}
+      {items && shown.length === 0 && <p className="nxa-faint" style={{ fontSize: 13 }}>Nothing finished here yet.</p>}
+      <div style={{ display: "grid", gap: 8 }}>
+        {list.map((i) => {
+          const r = RESULT[i.result] ?? RESULT.verified;
+          const isOpen = open === i.id;
+          return (
+            <div key={i.id} className="nxa-file" style={{ display: "block", minWidth: 0, borderColor: isOpen ? "rgba(34,211,238,.35)" : undefined }}>
+              <button onClick={() => setOpen(isOpen ? null : i.id)} style={{ all: "unset", cursor: "pointer", display: "block", width: "100%" }} aria-expanded={isOpen}>
+                <div className="nxa-row" style={{ justifyContent: "space-between", gap: 8 }}>
+                  <b style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    <span style={{ color: r.color, display: "flex", flex: "none" }} title={r.label}><Icon name={r.icon} size={15} /></span>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.title}</span>
+                  </b>
+                  <span className="nxa-faint" style={{ fontSize: 12, whiteSpace: "nowrap" }}>{i.finishedAt ? when(i.finishedAt) : ""}</span>
+                </div>
+                <small style={{ color: i.result === "verified" ? undefined : r.color }}>{i.summary}</small>
+              </button>
+              {isOpen && (
+                <div style={{ marginTop: 10, display: "grid", gap: 6, fontSize: 13 }}>
+                  {(i.from || i.to) && <div className="nxa-dim" style={{ wordBreak: "break-all" }}>{i.from}{i.from && i.to ? " → " : ""}{i.to}</div>}
+                  {i.startedAt && <div className="nxa-row" style={{ justifyContent: "space-between" }}><span className="nxa-faint">Started</span><span>{when(i.startedAt)}</span></div>}
+                  {i.facts.map(([k, v]) => (
+                    <div key={k} className="nxa-row" style={{ justifyContent: "space-between", gap: 12 }}>
+                      <span className="nxa-faint">{k}</span>
+                      {k === "Full report"
+                        ? <button className="nxa-link" onClick={() => downloadReport(v).catch((e) => setError(e.message))}>Download the file-by-file check</button>
+                        : <span style={{ textAlign: "right" }}>{v}</span>}
+                    </div>
+                  ))}
+                  {i.problems?.length > 0 && (
+                    <div style={{ marginTop: 4 }}>
+                      <div className="nxa-label" style={{ marginBottom: 4 }}>Files that need another go (they are retried by themselves)</div>
+                      <div style={{ maxHeight: 180, overflow: "auto", fontSize: 12 }} className="nxa-dim">{i.problems.map((p) => <div key={p} style={{ wordBreak: "break-all" }}>{p}</div>)}</div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {shown.length > 12 && <button className="nxa-link" style={{ marginTop: 10 }} onClick={() => setAll((v) => !v)}>{all ? "Show fewer" : `Show all ${shown.length}`}</button>}
+    </div>
+  );
+}
+
 function printReceipt(r) {
   const w = window.open("", "_blank", "width=480,height=640");
   if (!w) return;
@@ -130,6 +220,7 @@ export function ActivityLog() {
   return (
     <div className="nxa nxa-page">
       {admin && <Live />}
+      {admin && <Completed />}
       <Receipts admin={admin} />
     </div>
   );

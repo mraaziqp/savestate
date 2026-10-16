@@ -42,9 +42,15 @@ matches by checksum, and only when the owner asks (or switched on
 `rsend` CNAME in Cloudflare must be "DNS only" (grey cloud); the other
 records are in. The old Tauri desktop app cannot be rebuilt (its source,
 `I:\NexussEmu\src-tauri`, is gone); Windows now gets `SaveState-Setup`
-(see App downloads). No Neo Geo BIOS (`neogeo.zip`) is on this PC, so Neo
-Geo can't play in a browser (the player says so); RPCS3
-(1 PS3 entry) and Ryujinx (2 Switch games) are not installed. Back up `.env` and the Android signing key
+(see App downloads). The Neo Geo BIOS in place is an old set (missing
+`sm1.sm1`, `sfix.sfix`); the launch check says so until a current
+`neogeo.zip` replaces it. RPCS3 is at `E:\RPCS3` with Sony firmware 4.93
+installed (the installer file is in `%APPDATA%\NexusEmuHost\firmware`).
+Ryujinx isn't installed: its official server (ryujinx.app / update.ryujinx.app)
+refused connections from this network; unzip it to `E:\Ryujinx` (or leave
+it in Downloads) and add your own `prod.keys` and firmware. Sunshine is
+installed; run `scripts\windows\Add SaveState to Sunshine.cmd` once (it
+needs admin) so Moonlight lists SaveState. Back up `.env` and the Android signing key
 (`%APPDATA%\NexusEmuHost\android-release.keystore`) somewhere off this PC:
 without the key, installed Android apps can never be updated.
 
@@ -331,6 +337,18 @@ standalone PCSX2 (`E:\PCSX2\bios`), in `Documents\PCSX2\bios` and in
 RetroArch's folder; GameCube/Wii use standalone Dolphin, or RetroArch's
 Dolphin core when that is all there is. 300 of 303 games pass.
 
+### Playing anything from anywhere (Sunshine + Moonlight)
+
+The site's own stream (`/api/stream/*`, ffmpeg JPEG frames, input through a
+PowerShell call per key) is too slow for games. "Stream from the host PC"
+starts the game on the host, and the player sees and controls it through
+Sunshine (on this PC) and the Moonlight app (phone, tablet, TV, Vita).
+`scripts\windows\add-sunshine-app.ps1` adds a **SaveState** entry to
+Sunshine that opens `/?tab=consoles&host=1&bp=1`: Big Picture, in host mode
+(games start on this PC directly), straight away. Pair a device by entering
+its PIN at `https://localhost:47990`. Outside the home: Tailscale on both
+ends, or forward TCP 47984/47989/47990/48010 and UDP 47998-48000/48010.
+
 ## Mini Games (agent builder games)
 
 Games > Mini Games (`web-src/app/MiniGames.jsx`, `server/minigames.ts`).
@@ -357,6 +375,45 @@ and `no-transform` stops Cloudflare injecting its analytics script. The
 `~<version>` part of a game's address changes when its files are replaced,
 so cached copies of the old scripts are never mixed in. Game addresses are
 random and need no token (a sandboxed page can't send one).
+
+### The Agent Builder link
+
+`E:\Projects\Agent-Builder` (or `NEXUS_AGENT_BUILDER_DIR`) is scanned every
+10 minutes: `games/<name>/index.html` and `builds/<name>_<time>/dist` whose
+name or brief says "game", with `data/builds.json` saying which passed.
+Finished and passing games go on the shelf by themselves (a rebuild updates
+the same entry, plays and cover kept); an admin's removal is remembered in
+`minigames/agent-builder-removed.json`. Other attempts are listed on the
+Mini Games page with **Add**. Jarvis orders games through the Agent Builder,
+so they arrive the same way. The Agent Builder's own API (port 4000,
+`agent.savestate.co.za`) was not running at the time.
+
+## Activity log: Completed
+
+`/api/activity/completed` collects finished work: Drive copies report
+themselves (`addCompletedSource` in `server/drives.ts`: files checked and
+matched, missing or different, active time, freed space, and the
+file-by-file report at `/api/admin/offload/<job>/report`); other finished
+work comes from receipts. Time left on uploads is worked out from the last
+five minutes of progress and withheld while rclone is still counting.
+
+## Upload speed
+
+`desiredRate()` in `server/drives.ts`: gaming on the host 64k; 01:00-07:00
+or nobody on the site: no limit; someone browsing: 70% of the line;
+someone streaming: 40% (never under 650k). The line's speed is learned from
+uncapped runs and kept in `%APPDATA%\NexusEmuHost\upload-capacity.json`
+(about 24 MB/s here). ROM and music folders copy 8 files at a time.
+`run-host.ps1` starts the server with `UV_THREADPOOL_SIZE=16`: with Node's
+default 4, slow first reads from the Drive folder made the page itself take
+up to 5 s to serve. It is read at start-up, so changing it means reloading
+the host task (see Moving to another machine > Windows hosts).
+
+## Help & guides
+
+`web-src/app/Guides.jsx` is the in-app manual (Help & guides in the menu,
+`/?tab=help&guide=<id>`). Members see the everyday guides; admins also see
+host setup. Keep it in step when a screen changes.
 
 ## Changing the frontend
 

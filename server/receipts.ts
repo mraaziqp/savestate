@@ -65,6 +65,30 @@ export function receipt(r: Receipt): void {
 /** Something long-running reports its progress here (called on every refresh). */
 export function addLiveSource(fn: () => Promise<LiveItem[]> | LiveItem[]) { liveSources.push(fn); }
 
+/**
+ * A finished job, with the proof that it finished properly: a folder copied to
+ * Drive and every file checked against the original. The Activity log's
+ * "Completed" list shows these (a receipt line alone didn't say what was
+ * checked, and was lost among other receipts).
+ */
+export type CompletedItem = {
+  kind: string;
+  id: string;
+  title: string;
+  /** verified: done and checked. warn: done, but something needs a look. failed: stopped. */
+  result: "verified" | "warn" | "failed";
+  summary: string;
+  startedAt: number | null;
+  finishedAt: number | null;
+  from?: string;
+  to?: string;
+  facts: Array<[string, string]>;
+  problems?: string[];
+};
+export const humanBytes = (n: number) => (n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round(n / 1024))} KB`);
+const completedSources: Array<() => Promise<CompletedItem[]> | CompletedItem[]> = [];
+export function addCompletedSource(fn: () => Promise<CompletedItem[]> | CompletedItem[]) { completedSources.push(fn); }
+
 export function initReceipts(deps: { query: Query; dbUp: () => boolean; callerOf: (req: express.Request) => Promise<Caller>; log: (level: string, msg: string) => void }) {
   q = deps.query;
   const tryInit = async (): Promise<boolean> => {
@@ -107,6 +131,43 @@ export function initReceipts(deps: { query: Query; dbUp: () => boolean; callerOf
       }
       res.setHeader("Cache-Control", "no-store");
       res.json({ items });
+    });
+
+    // Finished work, newest first: what each job did and how it was checked.
+    // Jobs that report themselves (Drive copies) come with their full check;
+    // other finished work (uploads, downloads, space freed) from its receipt.
+    app.get("/api/activity/completed", async (req, res) => {
+      const c = await deps.callerOf(req);
+      if (!c.admin) return res.status(403).json({ error: "admin_only" });
+      const items: CompletedItem[] = [];
+      for (const s of completedSources) {
+        try { items.push(...(await s())); } catch (e: any) { deps.log("WARN", `completed activity source failed: ${e?.message ?? e}`); }
+      }
+      const covered = new Set(items.map((i) => i.id));
+      if (await ready) {
+        const rows = await deps.query(`SELECT id, at, kind, title, detail, status, actor, bytes, data FROM activity_receipts
+          WHERE kind IN ('upload','download','freed','library') AND at > NOW() - INTERVAL '90 days' AND title NOT ILIKE '%nxtest%'
+          ORDER BY id DESC LIMIT 200`);
+        for (const r of rows ?? []) {
+          const job = r.data?.job ? String(r.data.job) : "";
+          // A Drive copy reports itself in full; its receipt would only repeat it.
+          if (job && covered.has(job) && r.kind === "upload") continue;
+          const at = new Date(r.at).getTime();
+          items.push({
+            kind: r.kind, id: `receipt-${r.id}`, title: r.title,
+            result: r.status === "failed" ? "failed" : r.status === "warn" ? "warn" : "verified",
+            summary: r.detail || "", startedAt: null, finishedAt: at,
+            facts: [
+              ...(r.bytes != null ? [["Size", humanBytes(Number(r.bytes))] as [string, string]] : []),
+              ...(r.actor ? [["By", String(r.actor)] as [string, string]] : []),
+              ["Receipt", `#${r.id}`],
+            ],
+          });
+        }
+      }
+      items.sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0));
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ items: items.slice(0, 300) });
     });
   }
   return { register };

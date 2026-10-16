@@ -128,6 +128,7 @@ const before = shell;
     `NxDownloader=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.DownloaderSetup}))),` +
     `NxActivity=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ActivityLog}))),` +
     `NxMiniGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MiniGames}))),` +
+    `NxGuides=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Guides}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -275,7 +276,16 @@ shell = patch(shell, "mini games menu", `{id:"minigames",icon:be,label:"Mini Gam
   `{id:"consoles",icon:be,label:"Play Offline",color:"#a855f7",glow:"rgba(168,85,247,0.25)"}`,
   `{id:"consoles",icon:be,label:"Play Offline",color:"#a855f7",glow:"rgba(168,85,247,0.25)"},{id:"minigames",icon:be,label:"Mini Games",color:"#f472b6",glow:"rgba(244,114,182,0.25)"}`);
 shell = patch(shell, "mini games title", `minigames:"Mini Games",`, `ql={receipts:"Activity log",`, `ql={minigames:"Mini Games",receipts:"Activity log",`);
-shell = patch(shell, "mini games is known", `"household","receipts","minigames"]`, `"household","receipts"]`, `"household","receipts","minigames"]`);
+shell = patch(shell, "mini games is known", `"household","receipts","minigames"`, `"household","receipts"]`, `"household","receipts","minigames"]`);
+// Help & guides: how to set up and use everything (Guides.jsx), for everyone.
+shell = patch(shell, "guides tab", `x==="help"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGuides,{})}),`,
+  `x==="minigames"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxMiniGames,{})}),`,
+  `x==="help"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGuides,{})}),x==="minigames"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxMiniGames,{})}),`);
+shell = patch(shell, "guides menu", `{id:"help",icon:xs,label:"Help & guides"`,
+  `{id:"receipts",icon:xs,label:"Activity log",color:"#22d3ee",glow:"rgba(34,211,238,0.25)"}`,
+  `{id:"receipts",icon:xs,label:"Activity log",color:"#22d3ee",glow:"rgba(34,211,238,0.25)"},{id:"help",icon:xs,label:"Help & guides",color:"#a3e635",glow:"rgba(163,230,53,0.25)"}`);
+shell = patch(shell, "guides title", `help:"Help & guides",`, `ql={minigames:"Mini Games",`, `ql={help:"Help & guides",minigames:"Mini Games",`);
+shell = patch(shell, "guides is known", `"receipts","minigames","help"]`, `"household","receipts","minigames"]`, `"household","receipts","minigames","help"]`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
@@ -495,6 +505,10 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ch = patch(ch, "big picture plays on the client", "R=(0,s.useMemo)(()=>!(pt()||nxClientMode()),[])",
     'R=(0,s.useMemo)(()=>!(pt()||(typeof localStorage<"u"?localStorage.getItem("nexus_setup_role"):null)==="client"),[])',
     "R=(0,s.useMemo)(()=>!(pt()||nxClientMode()),[])");
+  // ?tab=consoles&bp=1 opens straight into Big Picture: the Sunshine entry
+  // (Moonlight on a phone) and TV shortcuts land on the couch view.
+  ch = patch(ch, "big picture from a link", '[F,j]=(0,s.useState)(()=>{try{return new URLSearchParams(location.search).get("bp")==="1"}catch{return!1}})',
+    "[F,j]=(0,s.useState)(!1)", '[F,j]=(0,s.useState)(()=>{try{return new URLSearchParams(location.search).get("bp")==="1"}catch{return!1}})');
   // A member pressing Play on a PS2 or GameCube game without the desktop
   // launcher had the whole disc image downloaded into the browser, which
   // then can't run it. Say what to do instead, before downloading anything.
@@ -504,6 +518,18 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ch = patch(ch, "big picture heavy games need the app", "!nxCanBrowser(d.platform)",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);d&&(R?",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!R&&!re.has(d.id)&&!nxCanBrowser(d.platform)&&!await _())throw new Error(`${String(d.platform).toUpperCase()} can't run in a browser. On a PC, install the SaveState desktop app once (Get the App); on a phone, open the game in Games and choose Stream from the host PC.`);d&&(R?");
+  // Big Picture knew each game only by id, so a downloaded ROM was saved as
+  // roms/<platform>/<id> (no name, no extension) and handed to the player
+  // without one. Arcade emulators find the game by its file name (mslugx.zip)
+  // and answered "Romset is unknown"; RetroArch can't pick a core without the
+  // extension. The library's real file name now travels with each game.
+  ch = patch(ch, "big picture keeps file names", "coverUrl:u.box_art??u.boxArt??null,fileName:",
+    "coverUrl:u.box_art??u.boxArt??null}",
+    'coverUrl:u.box_art??u.boxArt??null,fileName:String(u.relativePath??u.relative_path??"").split(String.fromCharCode(92)).join("/").split("/").pop()}');
+  ch = patch(ch, "big picture caches under the file name", "relativePath:`roms/${t.platform}/${t.fileName||t.id}`",
+    "relativePath:`roms/${t.platform}/${t.id}`", "relativePath:`roms/${t.platform}/${t.fileName||t.id}`");
+  ch = patch(ch, "big picture launches the named file", "relativePath:`roms/${a.platform}/${a.fileName||a.id}`,fileName:a.fileName",
+    "relativePath:`roms/${a.platform}/${a.id}`", "relativePath:`roms/${a.platform}/${a.fileName||a.id}`,fileName:a.fileName");
   if (ch !== before) writeFileSync(file, ch);
 }
 
@@ -544,6 +570,19 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   gd = patch(gd, "game details cover fits", '"nx-detail-cover w-full aspect-[3/4]',
     '"w-full aspect-[3/4] object-cover rounded-2xl shadow-2xl mb-8 border border-white/10"',
     '"nx-detail-cover w-full aspect-[3/4] object-cover rounded-2xl shadow-2xl mb-8 border border-white/10"');
+  // "Stream from the host PC" starts the game on the host; the picture and the
+  // controls travel through Sunshine and the Moonlight app (the site's own
+  // JPEG feed is too slow for games). It said "streams the picture here" and
+  // then "enjoy!", leaving someone on a phone elsewhere looking at nothing.
+  gd = patch(gd, "stream option names Moonlight", "you see and play it in the free Moonlight app",
+    '"Runs on the host and streams the picture here. Needs a steady connection."',
+    '"Runs on the host PC; you see and play it in the free Moonlight app (Help & guides). Needs a steady connection."');
+  gd = patch(gd, "stream option on phones names Moonlight", "the host runs it and the Moonlight app shows it here",
+    '`The only way to play ${(t.platform??"this system").toUpperCase()} on a phone — the host runs the real emulator.`',
+    '`The way to play ${(t.platform??"this system").toUpperCase()} on a phone: the host runs it and the Moonlight app shows it here.`');
+  gd = patch(gd, "stream start tells where to look", "open Moonlight on this device",
+    "c({text:`${l} is running — enjoy!`,success:!0})",
+    "c({text:y?`${l} is running on the host PC — open Moonlight on this device and choose SaveState or Desktop to play it.`:`${l} is running — enjoy!`,success:!0})");
   // On a PC, "stream from the host" read "the only way to play PSP on a phone".
   gd = patch(gd, "game details stream wording on a PC", 'children:be(t.platform)||!f?"Runs on the host',
     'children:be(t.platform)?"Runs on the host', 'children:be(t.platform)||!f?"Runs on the host');
@@ -563,6 +602,14 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ep = patch(ep, "browser play bios by name", "const nxBios=",
     'let d=`${a}/api/emulator/bios/serve/${t?`?token=${encodeURIComponent(t)}`:""}`;',
     'const nxBios={psx:"scph5501.bin",segaCD:"bios_CD_U.bin",neogeo:"neogeo.zip",arcade:"neogeo.zip",fbneo:"neogeo.zip"}[b],nxOk=async u=>{try{return(await fetch(u,{method:"HEAD"})).ok}catch{return!1}};let d=nxBios?`${a}/api/emulator/bios/serve/${nxBios}${t?`?token=${encodeURIComponent(t)}`:""}`:"";d&&!await nxOk(d)&&(d="");');
+  // A downloaded copy (blob: address) has no file name, so EmulatorJS called
+  // every such game "game": arcade sets weren't recognised and all of them
+  // shared one save name. It gets the game's real file name (only for blob:
+  // addresses, so saves of games loaded by URL keep their names).
+  ep = patch(ep, "browser play names downloaded games", "window.EJS_gameName=",
+    "window.EJS_gameUrl=s,",
+    'window.EJS_gameUrl=s,String(s).startsWith("blob:")&&(window.EJS_gameName=r.fileName||String(r.relative_path||r.relativePath||"").split(String.fromCharCode(92)).join("/").split("/").pop()||void 0),');
+  ep = patch(ep, "browser play forgets the name", '"EJS_biosUrl","EJS_gameName",', '"EJS_biosUrl",', '"EJS_biosUrl","EJS_gameName",');
   ep = patch(ep, "browser play bios only when set", "d&&(window.EJS_biosUrl=d),",
     "window.EJS_biosUrl=d,", "d&&(window.EJS_biosUrl=d),");
   // Neo Geo and Sega CD can't start without theirs: say so instead of a black screen.

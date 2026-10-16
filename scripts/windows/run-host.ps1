@@ -50,6 +50,13 @@ function Start-Part($name, $exe, [string[]]$argList, $workDir) {
 }
 
 $env:NODE_ENV = 'production'
+# Node does file reads, hashing and compression on 4 threads by default. The
+# server ties them up (films and uploads, checksums, slow first reads from
+# the Google Drive folder), and everything else waited: the page itself took
+# up to 5 s to serve, a folder scan 110 s instead of 7 (2026-10-16). The size
+# is read once at start-up, before any of the server's own code runs, so it
+# can only be set here.
+if (-not $env:UV_THREADPOOL_SIZE) { $env:UV_THREADPOOL_SIZE = '16' }
 $env:NEXUS_DATA_DIR = $cfg.dataDir
 if ($cfg.ffmpegDir) { $env:Path = "$($cfg.ffmpegDir);$env:Path" }
 

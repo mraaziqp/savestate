@@ -185,7 +185,8 @@ export function MediaUploader() {
     if (init.skipUpload) return "skipped";
     if (!init.uploadId) throw new Error(init.message || init.error || "The server didn't start the upload.");
     const have = new Set(init.receivedChunks ?? []);
-    onBytes([...have].reduce((n, i) => n + Math.min(CHUNK, file.size - i * CHUNK), 0));
+    // Already on the server from an earlier try: counts as done, not as speed.
+    onBytes([...have].reduce((n, i) => n + Math.min(CHUNK, file.size - i * CHUNK), 0), true);
     const todo = [...Array(total).keys()].filter((i) => !have.has(i));
     let next = 0;
     const worker = async () => {
@@ -214,8 +215,28 @@ export function MediaUploader() {
     const todo = fresh.files.filter((f) => f.state === "pending" || f.state === "failed");
     const total = fresh.summary.bytes;
     let sent = fresh.summary.doneBytes;
-    const t0 = Date.now(), s0 = sent;
-    const tick = (n, current) => { sent += n; const secs = (Date.now() - t0) / 1000; setProgress({ bytes: sent, total, speed: secs > 2 ? (sent - s0) / secs : 0, current }); };
+    // Speed is what actually crossed the line in the last 30 s, smoothed, so
+    // "time left" follows the connection as it is now. Averaging the whole run
+    // (and counting chunks already on the server from an earlier try as if
+    // just sent) made the estimate far too hopeful and then jump.
+    let moved = 0, smooth = 0, shownAt = 0;
+    const samples = [{ t: Date.now(), moved: 0 }];
+    const tick = (n, current, resumed = false) => {
+      sent += n;
+      if (!resumed && n > 0) moved += n;
+      const now = Date.now();
+      samples.push({ t: now, moved });
+      while (samples.length > 2 && now - samples[1].t > 30_000) samples.shift();
+      const span = (now - samples[0].t) / 1000;
+      if (span >= 3) {
+        const recent = (moved - samples[0].moved) / span;
+        smooth = smooth ? smooth * 0.8 + recent * 0.2 : recent;
+      }
+      // At most four updates a second: every chunk used to re-render the page.
+      if (now - shownAt < 250 && n !== 0) return;
+      shownAt = now;
+      setProgress({ bytes: sent, total, speed: smooth, current });
+    };
     tick(0, "");
     let missing = 0, failed = 0;
     for (const f of todo) {
@@ -223,7 +244,7 @@ export function MediaUploader() {
       setStatus(`Uploading ${f.rel.split("/").pop()}`);
       let counted = 0;
       try {
-        const r = await sendFile(fresh, f, (n) => { counted += n; tick(n, f.rel); });
+        const r = await sendFile(fresh, f, (n, resumed) => { counted += n; tick(n, f.rel, resumed); });
         if (r === "missing" || r === "changed") {
           missing++; tick(-counted, f.rel);
           await api(`/api/media/upload/batches/${fresh.id}/files/${f.i}`, { method: "POST", body: { state: "failed", note: r === "missing" ? "Not in the folder picked" : "The file changed since the upload began" } }).catch(() => {});

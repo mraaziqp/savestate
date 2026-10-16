@@ -210,6 +210,58 @@ function PublishKeys() {
   );
 }
 
+// Games the Agent Builder (and Jarvis, through it) has made on this PC.
+// Finished and passing ones come onto the shelf by themselves; the rest are
+// build attempts an admin can add. One row per game; older attempts fold away.
+function AgentBuilder({ onChanged }) {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [note, setNote] = useState("");
+  const [all, setAll] = useState(false);
+  const load = useCallback(() => api("/api/minigames/agent-builder").then(setData).catch((e) => setError(e.message)), []);
+  useEffect(() => { load(); }, [load]);
+  if (data && !data.linked) return null;
+  const add = async (c) => {
+    setBusy(c.key); setError(""); setNote("");
+    try { const r = await api(`/api/minigames/agent-builder/add?key=${encodeURIComponent(c.key)}`, { method: "POST" }); setNote(`${r.game.title} ${r.updated ? "updated" : "added"}.`); onChanged(); load(); }
+    catch (e) { setError(e.message); } finally { setBusy(""); }
+  };
+  const sync = async () => {
+    setBusy("sync"); setError(""); setNote("");
+    try { const r = await api("/api/minigames/agent-builder/sync", { method: "POST" }); setNote(r.added || r.updated ? `${r.added} added, ${r.updated} updated.` : "Everything finished is already on the shelf."); onChanged(); load(); }
+    catch (e) { setError(e.message); } finally { setBusy(""); }
+  };
+  const rows = (data?.candidates ?? []).filter((c) => all || c.latest);
+  const label = { finished: "Finished", passed: "Passed every check", unchecked: "Build attempt" };
+  return (
+    <div className="nxa-card">
+      <div className="nxa-card-head" style={{ alignItems: "center" }}>
+        <div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="bolt" /> From the Agent Builder</h3>
+          <p className="nxa-sub" style={{ margin: 0 }}>Games the Agent Builder makes on this PC (including ones Jarvis asks it for). Finished games and builds that pass every check appear here by themselves, and a newer build updates the game in place.</p></div>
+        <button className="nxa-btn sm" disabled={busy === "sync"} onClick={sync}>{busy === "sync" ? <Icon name="spinner" /> : <Icon name="refresh" size={14} />} Check now</button>
+      </div>
+      {!data && !error && <p className="nxa-dim"><Icon name="spinner" /> Looking in the Agent Builder…</p>}
+      {data && rows.length === 0 && <p className="nxa-dim" style={{ fontSize: 13 }}>No games from the Agent Builder yet.</p>}
+      <div style={{ display: "grid", gap: 8 }}>
+        {rows.map((c) => (
+          <div key={c.key} className="nxa-file" style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between" }}>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <b style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.title}</b>
+              <small style={{ overflowWrap: "anywhere" }}>{label[c.status]} · built {ago(c.builtAt)} · {c.key}{c.removed ? " · removed from the shelf" : ""}</small>
+            </div>
+            {c.onShelf?.current ? <span className="nxa-faint" style={{ fontSize: 12, whiteSpace: "nowrap" }}><Icon name="check" size={13} /> On the shelf</span>
+              : <button className="nxa-btn sm" disabled={!!busy} onClick={() => add(c)}>{busy === c.key ? <Icon name="spinner" /> : <Icon name="plus" size={14} />} {c.onShelf ? "Update" : "Add"}</button>}
+          </div>
+        ))}
+      </div>
+      {data?.candidates?.some((c) => !c.latest) && <button className="nxa-link" style={{ marginTop: 10 }} onClick={() => setAll((v) => !v)}>{all ? "Show only the newest build of each game" : "Show older build attempts"}</button>}
+      {note && <div style={{ marginTop: 10 }}><Note kind="ok">{note}</Note></div>}
+      {error && <div style={{ marginTop: 10 }}><Note kind="bad">{error}</Note></div>}
+    </div>
+  );
+}
+
 function Edit({ game, onDone, onClose }) {
   const [title, setTitle] = useState(game.title);
   const [description, setDescription] = useState(game.description);
@@ -297,6 +349,7 @@ export function MiniGames() {
       </div>
       {data?.canManage && editing && <Edit key={editing.id} game={editing} onDone={changed} onClose={() => setEditing(null)} />}
       {data?.canManage && <AddGame onAdded={() => load()} />}
+      {data?.canManage && <AgentBuilder onChanged={() => load()} />}
       {data?.canManage && <PublishKeys />}
       {playing && <Player game={playing} onClose={() => { setPlaying(null); const u = new URL(location.href); if (u.searchParams.has("game")) { u.searchParams.delete("game"); history.replaceState(null, "", u); } }} />}
     </div>

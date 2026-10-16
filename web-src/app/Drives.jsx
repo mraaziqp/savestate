@@ -7,6 +7,8 @@ import { loadOldCloudHub } from "old-cloud";
 
 const OldCloudHub = lazy(loadOldCloudHub);
 const gb = (n) => (n == null ? "?" : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round((n || 0) / 1024))} KB`);
+// rclone limits read "650k" or "17528k" (KiB/s); people read MB/s.
+const rateText = (r) => { const m = /^(\d+(?:\.\d+)?)([kKmM])$/.exec(String(r)); if (!m) return `${r}/s`; const kib = Number(m[1]) * (/m/i.test(m[2]) ? 1024 : 1); return kib >= 1024 ? `${(kib / 1024).toFixed(1)} MB/s` : `${Math.round(kib)} KB/s`; };
 const isLocal = (fs) => /^[A-Za-z]:$/.test(fs);
 const joinPath = (a, b) => [a, b].filter(Boolean).join("/");
 const parentOf = (p) => p.split("/").slice(0, -1).join("/");
@@ -525,14 +527,15 @@ export function DrivesPage() {
       )}
 
       {jobs.length > 0 && (
-        <div style={{ display: "grid", gap: 12 }}>
+        // minmax(0,1fr): a long folder path must wrap, not widen the page on a phone.
+        <div style={{ display: "grid", gap: 12, gridTemplateColumns: "minmax(0,1fr)" }}>
           <div className="nxa-row nxa-wrap" style={{ justifyContent: "space-between" }}>
             <h3 style={{ fontSize: 16, fontWeight: 800 }}>Uploads</h3>
             {protectedSum?.files > 0 && <span className="nxa-pill ok"><Icon name="shield" size={12} /> {protectedSum.files.toLocaleString()} files ({gb(protectedSum.bytes)}) confirmed safe on Drive</span>}
           </div>
           <p className="nxa-faint" style={{ fontSize: 12, marginTop: -6 }}>Uploads remember where they are: pausing, closing the app, a restart or a power cut only means they carry on from the last finished file. A stuck upload is restarted, and a failed one tries again by itself.</p>
           {speedLimit && <p className="nxa-faint" style={{ fontSize: 12, marginTop: -6 }}>
-            {speedLimit === "off" ? "Uploading at full speed: nobody is watching or browsing right now (and from 01:00 to 07:00). The moment someone starts, it slows down so the site stays quick." : `Upload speed is held at ${speedLimit}B/s while ${gameMode ? "you game" : "someone is using SaveState"}, so streaming stays smooth. It goes back to full speed a few minutes after they stop.`}
+            {speedLimit === "off" ? "Uploading at full speed: nobody is watching or browsing right now (and from 01:00 to 07:00). The moment someone starts, it slows down so the site stays quick." : `Upload speed is held at ${rateText(speedLimit)} while ${gameMode ? "you game" : "someone is using SaveState"}, leaving the rest of the line for them. It goes back to full speed a few minutes after they stop.`}
           </p>}
           {jobs.map((j) => <JobCard key={j.id} job={j} onAction={onAction} />)}
         </div>

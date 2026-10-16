@@ -6,6 +6,7 @@
 //   TabGate       upgrade / request-access screens over a tab that is not available
 //   EmulationTab  Games > Emulation Setup: the setup guide, plus host tools for admins
 //   MiniGames     Games > Mini Games: agent-builder games, upload and publish keys
+//   Guides        Help & guides: how to set up and use everything
 export { Welcome } from "./Welcome.jsx";
 export { AuthForm } from "./AuthForm.jsx";
 export { PlansPage } from "./Plans.jsx";
@@ -18,3 +19,4 @@ export { DownloaderSetup } from "./Downloader.jsx";
 export { MediaUploader } from "./MediaUpload.jsx";
 export { ActivityLog } from "./ActivityLog.jsx";
 export { MiniGames } from "./MiniGames.jsx";
+export { Guides } from "./Guides.jsx";
