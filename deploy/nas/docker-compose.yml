@@ -1,11 +1,4 @@
-# SaveState on a NAS or any Linux box with Docker: the app and its own
-# database, nothing in the cloud. install.sh writes .env next to this file
-# (passwords, your folders) and runs `docker compose up -d --build`.
-#
-#   http://<this machine>:3000      the first account made there owns the host
-#
-# Your folders are mounted read-only: SaveState never changes or deletes
-# your films, music or games. Uploads and settings live in the "data" volume.
+# SaveState on a NAS: the app, Cloudflare tunnel (savestate.co.za), and database.
 services:
   db:
     image: postgres:16-alpine
@@ -13,9 +6,9 @@ services:
     environment:
       POSTGRES_USER: savestate
       POSTGRES_DB: savestate
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?run install.sh first}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-savestate_nas_password}
     volumes:
-      - db:/var/lib/postgresql/data
+      - db-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U savestate -d savestate"]
       interval: 5s
@@ -26,20 +19,15 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-    image: savestate:local
+    image: savestate:latest
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     ports:
       - "${PORT:-3000}:3000"
     environment:
-      DATABASE_URL: postgres://savestate:${DB_PASSWORD}@db:5432/savestate
+      DATABASE_URL: ${DATABASE_URL:-postgres://savestate:${DB_PASSWORD:-savestate_nas_password}@db:5432/savestate}
       NEXUS_DB_SSL: "0"
-      JWT_SECRET: ${JWT_SECRET:?run install.sh first}
+      JWT_SECRET: ${JWT_SECRET}
       NEXUS_DATA_DIR: /data
-      # The Dockerfile's defaults are for the cloud image; a NAS scans and
-      # plays its own disks.
       NEXUS_CLOUD_FIRST: "0"
       NEXUS_STREAM_ONLY: "0"
       NEXUS_DISABLE_LOCAL_SCAN: "0"
@@ -47,13 +35,25 @@ services:
       NEXUS_MEDIA_ROOT: /library/media
       NEXUS_MUSIC_ROOTS: /library/music
       VAULT_ROOT: /library/games
-      NEXUS_PUBLIC_URL: ${PUBLIC_URL:-}
+      NEXUS_PUBLIC_URL: ${PUBLIC_URL:-https://savestate.co.za}
+      PAYFAST_MERCHANT_ID: ${PAYFAST_MERCHANT_ID:-}
+      PAYFAST_MERCHANT_KEY: ${PAYFAST_MERCHANT_KEY:-}
+      PAYFAST_PASSPHRASE: ${PAYFAST_PASSPHRASE:-}
     volumes:
-      - data:/data
-      - ${MEDIA_DIR:-./empty}:/library/media:ro
-      - ${MUSIC_DIR:-./empty}:/library/music:ro
-      - ${GAMES_DIR:-./empty}:/library/games:ro
+      - ./data:/data
+      - ${MEDIA_DIR:-/share/Multimedia}:/library/media:ro
+      - ${MUSIC_DIR:-/share/Multimedia/Music}:/library/music:ro
+      - ${GAMES_DIR:-/share/Public/Games}:/library/games:ro
+
+  # Cloudflare Named Tunnel: routes savestate.co.za directly to this container
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./cloudflared:/etc/cloudflared:ro
+    depends_on:
+      - app
 
 volumes:
-  db:
-  data:
+  db-data:

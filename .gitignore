@@ -10,6 +10,10 @@ letsencrypt/
 # rclone/Google OAuth tokens and Cloudflare tunnel credentials
 *credentials*.json
 .cloudflared/
+deploy/nas/cloudflared/*.json
+deploy/nas/data/
+*.tar.gz
+
 
 # ── Dependencies & build scratch ─────────────────────────────────────────────
 node_modules/

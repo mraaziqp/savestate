@@ -14,6 +14,7 @@ const when = (d) => new Date(d).toLocaleString([], { dateStyle: "medium", timeSt
 function Live() {
   const [items, setItems] = useState(null);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState("");
   useEffect(() => {
     let live = true;
     const tick = () => api("/api/activity/live").then((r) => live && setItems(r.items)).catch((e) => live && setError(e.message));
@@ -21,10 +22,24 @@ function Live() {
     const t = setInterval(() => { if (!document.hidden) tick(); }, 5000);
     return () => { live = false; clearInterval(t); };
   }, []);
+  // Pause / Continue a Drive copy (admins; the same actions as on Cloud Drives).
+  async function act(ids, action) {
+    setBusy(ids.join(",") + action); setError("");
+    try {
+      for (const id of ids) await api(`/api/admin/offload/${encodeURIComponent(id)}/${action}`, { method: "POST", body: {} });
+      setItems((await api("/api/activity/live")).items);
+    } catch (e) { setError(e.message); } finally { setBusy(""); }
+  }
+  const pausable = (items ?? []).filter((i) => i.jobId && i.actions?.includes("pause")).map((i) => i.jobId);
+  const resumable = (items ?? []).filter((i) => i.jobId && i.actions?.includes("resume")).map((i) => i.jobId);
   return (
     <div className="nxa-card">
       <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="refresh" /> Happening now</h3>
-        <p className="nxa-sub" style={{ margin: 0 }}>Uploads to Drive, downloads, media uploads and searches, refreshed every few seconds.</p></div></div>
+        <p className="nxa-sub" style={{ margin: 0 }}>Uploads to Drive, downloads, media uploads and searches, refreshed every few seconds.</p></div>
+        <div className="nxa-row nxa-wrap">
+          {pausable.length > 1 && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act(pausable, "pause")}>Pause all uploads</button>}
+          {resumable.length > 0 && <button className="nxa-btn sm primary" disabled={!!busy} onClick={() => act(resumable, "resume")}>{resumable.length > 1 ? "Continue all" : "Continue"}</button>}
+        </div></div>
       {error && <Note kind="bad">{error}</Note>}
       {!items && !error && <p className="nxa-dim"><Icon name="spinner" /> Checking…</p>}
       {items?.length === 0 && <p className="nxa-faint" style={{ fontSize: 13 }}>Nothing running right now.</p>}
@@ -33,7 +48,11 @@ function Live() {
           <div key={n} className="nxa-file" style={{ display: "block", minWidth: 0 }}>
             <div className="nxa-row nxa-wrap" style={{ justifyContent: "space-between", gap: 4 }}>
               <b style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><Icon name={ICON[i.kind] ?? "info"} size={14} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.title}</span></b>
-              <span className="nxa-faint" style={{ fontSize: 12 }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed ? ` · ${size(i.speed)}/s` : ""}{i.eta ? ` · ${eta(i.eta)} left` : ""}</span>
+              <span className="nxa-row" style={{ gap: 8 }}>
+                <span className="nxa-faint" style={{ fontSize: 12 }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed ? ` · ${size(i.speed)}/s` : ""}{i.eta ? ` · ${eta(i.eta)} left` : ""}</span>
+                {i.jobId && i.actions?.includes("pause") && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act([i.jobId], "pause")}>Pause</button>}
+                {i.jobId && i.actions?.includes("resume") && <button className="nxa-btn sm primary" disabled={!!busy} onClick={() => act([i.jobId], "resume")}>Continue</button>}
+              </span>
             </div>
             {i.progress != null && <div className="nxa-progress" style={{ marginTop: 6 }} role="progressbar" aria-valuenow={Math.round(i.progress * 100)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${Math.min(100, i.progress * 100)}%` }} /></div>}
             <small>{i.detail}</small>

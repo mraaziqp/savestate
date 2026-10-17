@@ -2197,6 +2197,41 @@ function findRomAnywhere(cfg, gameId, title, platform) {
 // process alive, but its stdout/stderr keep streaming to this process's own
 // console for as long as both processes are running, so a delayed crash is
 // still diagnosable instead of silent.
+// Games started by this launcher, until they close: the app shows "Playing",
+// then "Closed" (or what went wrong if the emulator quit straight away).
+const runningGames = new Map(); // pid -> { emulator, startedAt, endedAt, exitCode, stderr }
+function trackGame(child, exe, chunks) {
+  const pid = child.pid || 0;
+  if (!pid) return;
+  const rec = { pid, emulator: path.basename(exe, path.extname(exe)), startedAt: Date.now(), endedAt: null, exitCode: null, stderr: '' };
+  runningGames.set(pid, rec);
+  child.once('exit', (code) => {
+    rec.endedAt = Date.now(); rec.exitCode = code;
+    rec.stderr = Buffer.concat(chunks).toString('utf8').trim().slice(-600);
+    setTimeout(() => runningGames.delete(pid), 10 * 60_000).unref?.();
+  });
+}
+
+// A torrent still downloading creates the file at full size and fills it in
+// as pieces arrive (a sparse file). Started half-full, PCSX2 crashed with
+// "Jump to unaligned address". Windows knows how much of it is really there.
+function downloadedShare(file) {
+  if (!IS_WIN) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const q = String(file).replace(/'/g, "''");
+    const ps = "$f=Get-Item -LiteralPath '" + q + "'; if (-not ($f.Attributes -band [IO.FileAttributes]::SparseFile)) { 'full'; exit }; " +
+      "Add-Type -Namespace Nx -Name A -MemberDefinition '[DllImport(\"kernel32.dll\",CharSet=CharSet.Unicode)] public static extern uint GetCompressedFileSizeW(string f, out uint hi);'; " +
+      "$hi=[uint32]0; $lo=[Nx.A]::GetCompressedFileSizeW($f.FullName,[ref]$hi); [Console]::Out.Write((([int64]$hi -shl 32) + $lo) / [double]$f.Length)";
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, timeout: 15_000 }, (err, out) => {
+      const t = String(out || '').trim();
+      if (err || !t || t === 'full') return resolve(null);
+      // Some Windows locales write 0,71 for 0.71.
+      const share = Number(t.replace(',', '.'));
+      resolve(Number.isFinite(share) && share < 0.999 ? share : null);
+    });
+  });
+}
+
 function spawnAndVerify(exe, args, waitMs = 1200) {
   return new Promise((resolve) => {
     const chunks = [];
@@ -2223,6 +2258,7 @@ function spawnAndVerify(exe, args, waitMs = 1200) {
 
     const timer = setTimeout(() => {
       child.removeListener('exit', onEarlyExit);
+      trackGame(child, exe, chunks);
       child.unref();
       resolve({ pid: child.pid || 0, alive: true, stderr: '' });
     }, waitMs);
@@ -2838,9 +2874,17 @@ async function handleLaunch(body) {
     // Legacy ".rom" repair BEFORE the archive check — a zip misnamed ".rom"
     // would otherwise skip extraction here and then be unloadable in RetroArch.
     romFile = ensureLoadableRom(romFile, platform);
+    const share = await downloadedShare(romFile).catch(() => null);
+    if (share != null) {
+      return { status: 409, json: { success: false, code: 'still_downloading', error: `${path.basename(romFile)} is still downloading (${Math.floor(share * 100)}% so far). It plays once the download has finished.` } };
+    }
     romFile = await extractRomIfArchived(romFile, platform);
 
+    // Full screen and no emulator menus, so a game looks like part of SaveState.
+    const plat = String(platform || '').toLowerCase();
     const args = [];
+    if (isRetroArch(emu)) args.push('-f');
+    else if (plat === 'switch') args.push('--fullscreen');
     if (isRetroArch(emu)) {
       ensureSaneVideoDriver(emu);
       const core = getCorePath(emu, platform);
@@ -2878,7 +2922,7 @@ async function handleLaunch(body) {
       // the game behind PCSX2's own library/main window instead of actually
       // booting into it fullscreen — from the outside that looks exactly like
       // "the game window is just black," which is what this was reported as.
-      args.push('-batch');
+      args.push('-batch', '-fullscreen', '-nogui');
     }
     args.push(romFile);
     const { pid, alive, stderr } = await spawnAndVerify(emu, args);
@@ -3000,9 +3044,10 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 8,
+    version: 9,
     // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
     // v8: unpacks without bundled modules; copies RetroArch from the host.
+    // v9: follows each game until it closes (/launch/status, /launch/stop), full screen, refuses half-downloaded games.
     features: ['setup-consoles', 'bios', 'rom-folder'],
     native: true,
     embedded: 'electron',
@@ -3495,6 +3540,25 @@ function startEmbeddedLauncher(opts = {}) {
         invalidateRomIndexes();
         const found = getRomIndex(dir, true).length;
         send({ ok: true, path: dir, filesFound: found, extraRomDirs: cfg.extraRomDirs });
+        return;
+      }
+
+      // GET /launch/status?pid=: is the game still running, or how did it end.
+      if (req.method === 'GET' && p === '/launch/status') {
+        const rec = runningGames.get(Number(url.searchParams.get('pid')) || 0);
+        if (!rec) { send({ ok: true, known: false }); return; }
+        send({ ok: true, known: true, running: rec.endedAt == null, emulator: rec.emulator, startedAt: rec.startedAt, endedAt: rec.endedAt,
+          exitCode: rec.exitCode, quick: rec.endedAt != null && rec.endedAt - rec.startedAt < 20_000, stderr: rec.endedAt != null ? rec.stderr : '' });
+        return;
+      }
+      // POST /launch/stop { pid }: close a game this launcher started.
+      if (req.method === 'POST' && p === '/launch/stop') {
+        const body = await readBody(req);
+        const rec = runningGames.get(Number(body.pid) || 0);
+        if (!rec || rec.endedAt != null) { send({ ok: true, stopped: false }); return; }
+        try { process.kill(rec.pid); } catch { /* already gone */ }
+        if (IS_WIN) execFile('taskkill', ['/PID', String(rec.pid), '/T', '/F'], { windowsHide: true }, () => {});
+        send({ ok: true, stopped: true });
         return;
       }
 

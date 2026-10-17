@@ -28,7 +28,9 @@ export type Receipt = {
   /** Anything else worth keeping (ids, paths). */
   data?: Record<string, unknown>;
 };
-export type LiveItem = { kind: string; title: string; progress: number | null; detail: string; speed?: number | null; eta?: number | null; status?: string };
+export type LiveItem = { kind: string; title: string; progress: number | null; detail: string; speed?: number | null; eta?: number | null; status?: string;
+  /** A Drive copy: its id and what can be done to it here (Pause / Continue). */
+  jobId?: string; actions?: string[] };
 
 type Query = <T = any>(sql: string, params?: unknown[]) => Promise<T[] | null>;
 let q: Query | null = null;

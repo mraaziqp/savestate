@@ -41,6 +41,8 @@ export type DrivesDeps = {
   callerOf?: (req: express.Request) => Promise<{ userId: string | null; admin: boolean }>;
   /** Folders on this PC worth moving to Drive (ROM and music folders), with where each should go. */
   suggestions?: () => Promise<Array<{ label: string; source: string; kind: OffloadKind; dest: string }>>;
+  /** Returns true if a local file is currently downloading (e.g. sparse torrent file). */
+  isIncomplete?: (filePath: string) => boolean;
 };
 
 export type OffloadKind = "movies" | "tv" | "music" | "roms" | "files";
@@ -411,10 +413,14 @@ export function createDrives(deps: DrivesDeps) {
     const dest = job.dest.replace(/\/+$/, "");
     const skip: string[] = []; const examples: string[] = [];
     let bytes = 0;
-    const recent = here.filter((f) => Date.now() - f.mtimeMs < SETTLE_MS);
+    const recent = here.filter((f) => Date.now() - f.mtimeMs < SETTLE_MS || Boolean(deps.isIncomplete?.(path.join(job.source, f.rel))));
     job.stillChanging = recent.length ? { count: recent.length, bytes: recent.reduce((n, f) => n + f.size, 0), at: Date.now() } : null;
-    if (recent.length) deps.log("INFO", `Upload ${job.id}: ${recent.length} file(s) changed in the last half hour (still downloading?); they go in a later run`);
+    if (recent.length) deps.log("INFO", `Upload ${job.id}: ${recent.length} file(s) changed in the last half hour or still downloading; they go in a later run`);
+    for (const f of recent) {
+      skip.push(`- /${globEscape(f.rel)}`);
+    }
     for (const f of here) {
+      if (recent.includes(f)) continue;
       if (f.size < 5 * 1024 * 1024) continue;
       const there = onDrive.get(`${f.name.toLowerCase()}|${f.size}`);
       // Not on Drive, or at this job's own place (rclone skips those itself).
@@ -560,11 +566,12 @@ export function createDrives(deps: DrivesDeps) {
     receipt({ kind: "freed", title: `Freed ${gbs(bytes)} on this PC`, detail: `${files} file(s) from ${job.source}, safe on Google Drive (${job.remote}:${job.dest})${skipped ? `; ${skipped} left because they changed or were in use` : ""}`, bytes, data: { job: job.id } });
   }
 
-  addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued"].includes(j.status)).map((j) => ({
-    kind: "upload", title: j.label, status: j.status,
+  addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued", "paused"].includes(j.status)).map((j) => ({
+    kind: "upload", title: j.label, status: j.status, jobId: j.id,
+    actions: j.status === "paused" ? ["resume"] : j.status === "deleting" ? [] : ["pause"],
     progress: j.status === "copying" && j.stats.totalBytes ? ((j.carriedBytes ?? 0) + j.stats.bytes) / ((j.carriedBytes ?? 0) + j.stats.totalBytes) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
-    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs((j.carriedBytes ?? 0) + j.stats.bytes)} of ${gbs((j.carriedBytes ?? 0) + j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
-      : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : "Waiting for its turn",
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs((j.carriedBytes ?? 0) + j.stats.bytes)} of ${gbs((j.carriedBytes ?? 0) + j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
+      : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : j.status === "paused" ? "Paused. Press Continue to carry on where it stopped." : "Waiting for its turn",
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
   })));
 

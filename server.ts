@@ -37,6 +37,7 @@ import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
 import { initReceipts, receipt, addLiveSource } from "./server/receipts.ts";
+import { createIncompleteFiles } from "./server/incomplete.ts";
 
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
@@ -1272,6 +1273,7 @@ const ROM_INDEX_TTL_MS = 10 * 60_000;
 type RomIndex = Map<string, string>;   // lower-cased file name -> full path
 let romIndex: { key: string; at: number; names: RomIndex } | null = null;
 let romIndexBuilding: Promise<RomIndex> | null = null;
+let globalIncompleteFiles: ReturnType<typeof createIncompleteFiles> | null = null;
 async function romFileIndex(roots: string[]): Promise<RomIndex> {
   const key = roots.join("|").toLowerCase();
   const build = () => {
@@ -1326,7 +1328,7 @@ async function resolveRomPath(configRoot: string, game: Record<string, any>, ext
   // Found on Drive: use the same file on a local disk when there is one.
   if (found.absolutePath && isCloudPath(found.absolutePath)) {
     const local = romIndex?.names.get(path.basename(found.absolutePath).toLowerCase());
-    if (local && !isCloudPath(local) && await fsAccess(local).then(() => true, () => false)) return { absolutePath: local, relativePath: found.relativePath };
+    if (local && !isCloudPath(local) && !globalIncompleteFiles?.get(local) && await fsAccess(local).then(() => true, () => false)) return { absolutePath: local, relativePath: found.relativePath };
   }
   return found;
 }
@@ -6033,6 +6035,21 @@ async function startServer() {
   setTimeout(() => void findMediaFolders().catch(() => {}), 90_000).unref?.();
   setInterval(() => void findMediaFolders().catch(() => {}), 6 * 3600_000).unref?.();
 
+  // Detection for sparse torrent files still downloading in ROM folders (server/incomplete.ts)
+  const incompleteFiles = createIncompleteFiles({
+    roots: async () => {
+      const vc = await getVaultConfig().catch(() => null);
+      return [
+        ...(vc ? getExtraRoots(vc) : []),
+        ...(vc?.root_path ? [vc.root_path] : []),
+        ...(process.env.NEXUS_LOCAL_ROM_DIRS ?? "E:\\ROMS").split(/[;,]/).map((p) => p.trim()).filter(Boolean),
+        ...(process.env.NEXUS_EXTRA_ROM_ROOTS ?? "").split(";").map((p) => p.trim()).filter(Boolean)
+      ];
+    },
+    log: (level, msg) => log(level, msg, "incomplete")
+  });
+  globalIncompleteFiles = incompleteFiles;
+
   // Google Drive accounts, local disks and upload-and-verify jobs (server/drives.ts).
   const drives = createDrives({
     persistDir: PERSIST_DIR,
@@ -6041,6 +6058,7 @@ async function startServer() {
     gameModeActive: () => gameMode.active(),
     siteBusy: () => siteBusy(),
     streamingNow: () => openStreams > 0,
+    isIncomplete: (p: string) => incompleteFiles.get(p) != null,
     suggestions: async () => {
       const out: Array<{ label: string; source: string; kind: "roms" | "music" | "movies" | "files"; dest: string }> = [];
       const vc = await getVaultConfig().catch(() => null);
@@ -6760,7 +6778,8 @@ async function startServer() {
       if (!present) return games;
       const marked = games.map((g) => {
         const found = present.get(romBasename(g.relativePath ?? ""));
-        const out = { ...g, syncStatus: found ? "synced" : "missing_media" };
+        const inc = found ? incompleteFiles.get(found) : null;
+        const out = { ...g, syncStatus: inc ? "downloading" : found ? "synced" : "missing_media", downloadProgress: inc ? Math.round(inc.share * 100) : undefined };
         // No stored art yet: the art route serves a generated cover and fetches the real one.
         if (!String((out as any).boxArt ?? "").trim() && (out as any).id) (out as any).boxArt = `/api/art/${(out as any).id}`;
         // A bare "./Okami.iso" says nothing about its platform; the folder it
@@ -20187,6 +20206,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!game) return res.status(404).end();
     const resolvedRom = await resolveRomPath(config.root_path, game, getExtraRoots(config));
     if (!resolvedRom.absolutePath) return res.status(404).end();
+    if (incompleteFiles.get(resolvedRom.absolutePath)) return res.status(409).end();
     res.status(200).end();
   });
 
@@ -20208,6 +20228,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const resolvedRom = await resolveRomPath(config.root_path, game, getExtraRoots(config));
     if (!resolvedRom.absolutePath) {
       return res.status(404).json({ error: "ROM file not found on host storage" });
+    }
+    const inc = incompleteFiles.get(resolvedRom.absolutePath);
+    if (inc) {
+      return res.status(409).json({
+        error: `${game.title || path.basename(resolvedRom.absolutePath)} is still downloading on the host (${Math.floor(inc.share * 100)}% so far). It plays once the download finishes.`,
+        code: "still_downloading",
+        share: inc.share
+      });
     }
 
     if (resolvedRom.relativePath && resolvedRom.relativePath !== (game.relative_path ?? game.relativePath ?? "")) {
