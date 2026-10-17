@@ -6039,11 +6039,27 @@ async function startServer() {
   const incompleteFiles = createIncompleteFiles({
     roots: async () => {
       const vc = await getVaultConfig().catch(() => null);
+      const jobSources: string[] = [];
+      try {
+        const raw = await readFile(path.join(PERSIST_DIR, "offload-jobs.json"), "utf8").catch(() => null);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            for (const j of parsed) {
+              if (j?.source && typeof j.source === "string") jobSources.push(j.source);
+            }
+          }
+        }
+      } catch { /* ignore */ }
+
       return [
         ...(vc ? getExtraRoots(vc) : []),
         ...(vc?.root_path ? [vc.root_path] : []),
         ...(process.env.NEXUS_LOCAL_ROM_DIRS ?? "E:\\ROMS").split(/[;,]/).map((p) => p.trim()).filter(Boolean),
-        ...(process.env.NEXUS_EXTRA_ROM_ROOTS ?? "").split(";").map((p) => p.trim()).filter(Boolean)
+        ...(process.env.NEXUS_EXTRA_ROM_ROOTS ?? "").split(";").map((p) => p.trim()).filter(Boolean),
+        ...jobSources,
+        "E:\\Download",
+        "E:\\Downloads"
       ];
     },
     log: (level, msg) => log(level, msg, "incomplete")
