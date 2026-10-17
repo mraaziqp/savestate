@@ -48,7 +48,7 @@ export type Caller = {
   /** A household profile of an admin's account: the plan's limits don't apply to it either. */
   ownerAdmin?: boolean;
   /** Set when the token is valid but the account is gone or the token predates a password change. */
-  stale?: "deleted" | "password-changed" | "profile-ended";
+  stale?: "deleted" | "password-changed" | "profile-ended" | "suspended";
   /** A household profile of the account (household.ts): never an admin, limited to its sections. */
   profile?: ProfileSession;
 };
@@ -237,7 +237,7 @@ export function createAccess(deps: AccessDeps) {
   type Row = {
     id: string; username: string; role: string | null; media_access: boolean | null; games_access: boolean | null;
     can_upload_media: boolean | null; user_tier: string | null; tier_expires_at: string | Date | null;
-    password_changed_at: string | Date | null; created_at?: string | Date | null;
+    password_changed_at: string | Date | null; created_at?: string | Date | null; suspended_at?: string | null;
   };
   const cache = new Map<string, { at: number; row: Row | null }>();
   const TTL_MS = 30_000;
@@ -247,7 +247,8 @@ export function createAccess(deps: AccessDeps) {
     if (hit && Date.now() - hit.at < TTL_MS) return { row: hit.row, known: true };
     if (deps.dbUp()) {
       const rows = await deps.query<Row>(
-        `SELECT id, username, role, media_access, games_access, can_upload_media, user_tier, tier_expires_at, password_changed_at, created_at
+        `SELECT id, username, role, media_access, games_access, can_upload_media, user_tier, tier_expires_at, password_changed_at, created_at,
+                to_jsonb(users)->>'suspended_at' AS suspended_at
            FROM users WHERE id::text = $1`, [userId]);
       if (rows) {
         const row = rows[0] ?? null;
@@ -298,6 +299,7 @@ export function createAccess(deps: AccessDeps) {
     if (changed && typeof payload.iat === "number" && payload.iat * 1000 < changed - 5000) {
       return done({ ...ANON, stale: "password-changed" });
     }
+    if (row.suspended_at) return done({ ...ANON, stale: "suspended" });
     const role = row.role ?? "user";
     const admin = ADMIN_ROLES.has(role);
     const media = admin || !!row.media_access;
@@ -349,6 +351,7 @@ export function createAccess(deps: AccessDeps) {
       if (caller.stale && !(deps.isPublic?.(req.path) && !need)) {
         return res.status(401).json({
           error: caller.stale === "deleted" ? "This account no longer exists."
+            : caller.stale === "suspended" ? "This account is suspended. Ask the host if you think that's a mistake."
             : caller.stale === "profile-ended" ? "This profile was signed out by the account owner."
             : "Your password was changed. Please sign in again.",
           code: "session_expired",

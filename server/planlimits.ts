@@ -214,5 +214,5 @@ export function createPlanLimits(deps: PlanLimitsDeps) {
     });
   }
 
-  return { streamGuard, gameGuard, register, streamLimit, activeCount: () => [...streams.values()].filter((s) => live(s)).length };
+  return { streamGuard, gameGuard, register, streamLimit, screensOf: (userId: string) => activeFor(userId).length, activeCount: () => [...streams.values()].filter((s) => live(s)).length };
 }

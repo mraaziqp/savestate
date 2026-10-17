@@ -26,6 +26,7 @@ import { createAccess } from "./server/access.ts";
 import { createTiers } from "./server/tiers.ts";
 import { createPlanLimits } from "./server/planlimits.ts";
 import { createHotCache } from "./server/hotcache.ts";
+import { createAdminPeople } from "./server/adminpeople.ts";
 import { createGameMode } from "./server/game-mode.ts";
 import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
@@ -2868,6 +2869,9 @@ function isPlayableEntry(game: { platform?: string; relativePath?: string }): bo
   const rel = String(game.relativePath ?? "").replace(/\\/g, "/").toLowerCase();
   if (/\.(rar|txt|nfo|jpg|png|url|md)$/.test(rel)) return false;
   if (String(game.platform ?? "").toLowerCase() === "switch" && /(^|\/)(updates?|dlc)\//.test(rel)) return false;
+  // Arcade BIOS sets sit next to the games (FinalBurn Neo looks for them
+  // there) but aren't games: "Neo Geo System" was offered as one.
+  if (/(^|\/)(neogeo|neocdz|pgm|naomi|naomi2|awbios|hod2bios|f355bios|isgsm|skns|stvbios|cpzn1|cpzn2|decocass|qsound|ym2608|nmk004|airlbios|cchip|coh1000[a-z]?|konamigx|megaplay|segasp|taitofx1|tps|atarisy1|bubsys)\.(zip|7z)$/.test(rel)) return false;
   return true;
 }
 
@@ -5855,6 +5859,15 @@ async function startServer() {
   // Local copies of films and games played from Google Drive (server/hotcache.ts).
   const hotCache = createHotCache({ persistDir: PERSIST_DIR, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "hot-cache") });
   hotCache.register(app);
+
+  // Admin > Manage Users: every account and every group (server/adminpeople.ts).
+  createAdminPeople({
+    query: dbRows, callerOf: (req) => access.callerOf(req), invalidateUser: (id) => access.invalidate(id),
+    grantHostAccess: (g, t) => grantHostAccess(g, t),
+    resetLink: async (id) => `${RESET_BASE_URL}/?reset=${await createResetToken(id)}`,
+    tierIds: () => tiers.tierIds(), screensOf: (id) => planLimits.screensOf(id),
+    log: (level, msg) => log(level, msg, "people"),
+  }).register(app);
 
   // Receipts for everything that finishes, and live progress (server/receipts.ts).
   initReceipts({ query: dbRows, dbUp: () => !!pool && dbConnected, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "activity") }).register(app);
@@ -15893,6 +15906,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         log("WARN", `Failed login: ${identifier.slice(0, 64)}`, "auth");
         return res.status(401).json({ error: "That username and password don't match. Check them and try again." });
       }
+      if (u.suspended_at) return res.status(403).json({ error: "This account is suspended. Ask the host if you think that's a mistake." });
       pool.query("UPDATE users SET last_seen=NOW() WHERE id=$1", [u.id]).catch(() => {});
       const token = sessionFor(req, res, u);
       log("INFO", `User logged in: ${u.username}`, "auth");

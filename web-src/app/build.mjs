@@ -132,6 +132,7 @@ const before = shell;
     `NxAddGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AddGames}))),` +
     `NxGetStarted=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GetStarted}))),` +
     `NxScreens=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ScreensInUse}))),` +
+    `NxAdminUsers=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AdminUsers}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -141,6 +142,20 @@ const before = shell;
     `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
+
+// A link to an admin page (?tab=cloud) sent admins to Movies & TV: the check
+// "not an admin, so leave admin pages" ran before the account had loaded in
+// a browser that had not cached it yet. It now waits for the account.
+shell = patch(shell, "admin pages wait for the account", "(0,s.useEffect)(()=>{!Ee&&!re.loading&&Da.has(x)",
+  "(0,s.useEffect)(()=>{!Ee&&Da.has(x)&&S(\"media\")", "(0,s.useEffect)(()=>{!Ee&&!re.loading&&Da.has(x)&&S(\"media\")");
+shell = patch(shell, "admin pages wait for the account (deps)", "},[x,Ue,kt,Ee,re.loading])",
+  "},[x,Ue,kt,Ee])", "},[x,Ue,kt,Ee,re.loading])");
+
+// Admin > Manage Users: every account and every group (AdminUsers.jsx). The
+// old panel listed accounts only, and groups showed only to whoever made them.
+shell = patch(shell, "manage users is the new screen", "NxAdminUsers,{})",
+  'x==="users"&&Je&&(0,e.jsxs)("div",{className:"w-full max-w-2xl mx-auto space-y-2 py-2"',
+  'x==="users"&&Je&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxAdminUsers,{})}),x==="users-old"&&Je&&(0,e.jsxs)("div",{className:"w-full max-w-2xl mx-auto space-y-2 py-2"');
 
 // Upgrade / request-access screens over a tab that is not available.
 // The "Update available — Install Update" prompt is for installed apps (the

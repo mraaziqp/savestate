@@ -42,13 +42,16 @@ matches by checksum, and only when the owner asks (or switched on
 `rsend` CNAME in Cloudflare must be "DNS only" (grey cloud); the other
 records are in. The old Tauri desktop app cannot be rebuilt (its source,
 `I:\NexussEmu\src-tauri`, is gone); Windows now gets `SaveState-Setup`
-(see App downloads). The Neo Geo BIOS in place is an old set (missing
-`sm1.sm1`, `sfix.sfix`); the launch check says so until a current
-`neogeo.zip` replaces it. RPCS3 is at `E:\RPCS3` with Sony firmware 4.93
+(see App downloads). The Neo Geo BIOS is the MAME 0.251 `neogeo.zip`
+(2026-10-17) in the BIOS folder, RetroArch `system` and beside the Neo Geo
+games; the old set is kept as `neogeo.old-set.zip`. BIOS archives are hidden
+from the games list (isPlayableEntry). RPCS3 is at `E:\RPCS3` with Sony firmware 4.93
 installed (the installer file is in `%APPDATA%\NexusEmuHost\firmware`).
-Ryujinx isn't installed: its official server (ryujinx.app / update.ryujinx.app)
-refused connections from this network; unzip it to `E:\Ryujinx` (or leave
-it in Downloads) and add your own `prod.keys` and firmware. Sunshine is
+Ryujinx 1.1.1403 is at `E:\Ryujinx` (portable; from the user's download, a
+SourceForge mirror, Defender-scanned 2026-10-17); desktop clients get it
+through the emulator export. Switch games still need the user's own
+`prod.keys` in `E:\Ryujinx\portable\system` and firmware (Tools > Install
+Firmware). Sunshine is
 installed and lists SaveState (added 2026-10-17 with
 `scripts\windows\Add SaveState to Sunshine.cmd`, which needs admin; rerun it
 after reinstalling Sunshine). Back up `.env` and the Android signing key
@@ -465,6 +468,20 @@ host setup. Keep it in step when a screen changes.
   have prices; Unlimited stays private for the household. `games.full` is
   gated to Plus, Family and Unlimited.
 
+## Manage Users (server/adminpeople.ts, AdminUsers.jsx)
+
+Admin > Manage Users (`?tab=users`) lists every account and every group,
+whoever created it. Per person: plan and end date, host library (films,
+games, uploads), display name and email, role (owner only), groups, a
+one-hour password link, sign out everywhere, suspend (refused at sign-in and
+on every request; ends sessions) and remove (type the username). The owner
+account and your own can't be changed there. Groups: create, rename, colour,
+what they open, members. API: `GET /api/admin/people`, `PATCH/DELETE
+/api/admin/people/:id`, `POST .../sign-out`, `POST .../reset-link`,
+`/api/admin/groups` (+ `/:id`, `/:id/members`). Plan and access changes
+go through `PUT /api/admin/plans/users/:id` (receipts). `users.suspended_at`
+is read with `to_jsonb(users)` so sign-in keeps working before the column exists.
+
 ## Local cache (server/hotcache.ts)
 
 The library is on Google Drive, so a first play fetches from Google (7 s for
@@ -613,7 +630,7 @@ Gemini and TMDB keys, entered in the app, stored encrypted in
 ## App builds
 
 Android: `scripts/windows/build-apk.ps1` (version from package.json, so
-1.0.63 is versionCode 1000063). Windows: `SaveState-Setup-<version>.exe` is
+1.0.64 is versionCode 1000064). Windows: `SaveState-Setup-<version>.exe` is
 the one-click installer (`/api/client-launcher/windows-installer`) wrapped
 by IExpress (built into Windows); see App downloads.
 
@@ -642,7 +659,8 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
   (one runner at a time; a second launcher on the port exits); and a
   SaveState shortcut on the Desktop and Start menu (Edge app window).
   Re-running it replaces a running launcher with the new one. To rebuild: save
-  `/api/client-launcher/windows-installer` as `SaveState-Setup.cmd` in an
+  `https://savestate.co.za/api/client-launcher/windows-installer` (through the
+  public site: fetched from localhost it points PCs at localhost) as `SaveState-Setup.cmd` in an
   empty folder and run `iexpress /N /Q savestate.sed` with an SED whose
   `AppLaunched` is `cmd.exe /c SaveState-Setup.cmd`. PCs that already have the
   launcher get a new one by running the installer again (the launcher does

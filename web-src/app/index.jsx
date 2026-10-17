@@ -10,6 +10,7 @@
 //   AddGames      Games > Add games (admins): ROM files and folders into the library
 //   GetStarted    after sign-up: profile, then join / connect / host / explore
 //   ScreensInUse  "all your screens are in use" / "part of a paid plan", over the app
+//   AdminUsers    admin: every account and every group (Manage Users)
 export { Welcome } from "./Welcome.jsx";
 export { AuthForm } from "./AuthForm.jsx";
 export { PlansPage } from "./Plans.jsx";
@@ -26,3 +27,4 @@ export { Guides } from "./Guides.jsx";
 export { AddGames } from "./AddGames.jsx";
 export { GetStarted } from "./GetStarted.jsx";
 export { ScreensInUse } from "./ScreensInUse.jsx";
+export { AdminUsers } from "./AdminUsers.jsx";
