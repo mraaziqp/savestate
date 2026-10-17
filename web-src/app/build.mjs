@@ -133,13 +133,14 @@ const before = shell;
     `NxGetStarted=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GetStarted}))),` +
     `NxScreens=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ScreensInUse}))),` +
     `NxAdminUsers=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AdminUsers}))),` +
+    `NxGameSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameSetup}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
@@ -742,6 +743,18 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   if (at < 0) throw new Error("index.html: no module script to load the boot script ahead of");
   html = html.slice(0, at) + tag + "\n    " + html.slice(at);
   writeFileSync(file, html);
+}
+
+// 4a. Get the App: macOS and Linux offered a ".dmg installer" and an
+//     ".AppImage" that don't exist (the buttons stayed grey). Say what's true.
+{
+  const file = path.join(assets, find("AppDownloadPage-"));
+  let dl = readFileSync(file, "utf8");
+  const before = dl;
+  dl = patch(dl, "download page: mac and linux use the web app", 'note:"Use the web app (Install App)"',
+    '{id:"mac",label:"macOS",note:".dmg installer"},{id:"linux",label:"Linux",note:".AppImage"}',
+    '{id:"mac",label:"macOS",note:"Use the web app (Install App)"},{id:"linux",label:"Linux",note:"Use the web app (Install App)"}');
+  if (dl !== before) writeFileSync(file, dl);
 }
 
 // 4b. Error messages people can read. Screens built their errors from the

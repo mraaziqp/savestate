@@ -68,6 +68,10 @@ type OffloadJob = {
   speedWin?: Array<[number, number]>;
   /** rclone is still finding out what there is to send; no honest "time left" yet. */
   counting?: boolean;
+  /** Sent in earlier runs of this copy (before a restart), so progress carries on instead of starting at 0. */
+  carriedBytes?: number;
+  /** Files already on Drive somewhere else in the archive (same name and size): not sent again. */
+  dupes?: { count: number; bytes: number; at: number; file: string; examples: string[] } | null;
 };
 
 const EXCLUDES = ["desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**", "*.partial", "*.!qB", "*.crdownload", "*.tmp"];
@@ -332,6 +336,8 @@ export function createDrives(deps: DrivesDeps) {
       // limit changes (someone arrives, leaves, the night window opens).
       const win = (job.speedWin ??= []);
       if (win.length && bytes < win[win.length - 1][1]) win.length = 0; // rclone restarted its count
+      // A new run after a restart counts from 0: keep what the last run sent.
+      if (bytes < job.stats.bytes && job.stats.bytes > 0) job.carriedBytes = (job.carriedBytes ?? 0) + job.stats.bytes;
       win.push([now, bytes]);
       while (win.length > 2 && now - win[0][0] > 5 * 60_000) win.shift();
       const span = (now - win[0][0]) / 1000;
@@ -355,6 +361,68 @@ export function createDrives(deps: DrivesDeps) {
     }
   }
 
+  // ── Duplicates already on Drive ──────────────────────────────────────
+  // rclone skips a file that is already at the same place on Drive. A film
+  // copied earlier from another folder (E:\Movies, then F:\movies) would be
+  // sent again, so before a copy the archive on Drive is listed once and any
+  // file here with the same name and size as one there (5 MB or more) is
+  // left out of the copy and of the check. Left-out files are never deleted
+  // from this PC: only files the check confirmed at this job's destination are.
+  const driveListing = new Map<string, { at: number; files: Map<string, string> }>();
+  async function listDrive(bin: string, remote: string, root: string): Promise<Map<string, string>> {
+    const key = `${remote}:${root}`;
+    const hit = driveListing.get(key);
+    if (hit && Date.now() - hit.at < 30 * 60_000) return hit.files;
+    const out = await new Promise<string>((resolve, reject) => {
+      execFile(bin, ["lsjson", "-R", "--files-only", "--fast-list", "--no-mimetype", "--no-modtime", key],
+        { windowsHide: true, maxBuffer: 512 * 1024 * 1024, timeout: 10 * 60_000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    });
+    const files = new Map<string, string>();
+    for (const e of JSON.parse(out || "[]") as Array<{ Path: string; Name: string; Size: number }>) {
+      if (e.Size >= 5 * 1024 * 1024) files.set(`${e.Name.toLowerCase()}|${e.Size}`, `${root}/${e.Path}`);
+    }
+    driveListing.set(key, { at: Date.now(), files });
+    return files;
+  }
+  async function walkLocal(root: string): Promise<Array<{ rel: string; name: string; size: number }>> {
+    const out: Array<{ rel: string; name: string; size: number }> = [];
+    const visit = async (dir: string, rel: string) => {
+      for (const d of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+        if (/^(\$RECYCLE\.BIN|System Volume Information)$/i.test(d.name)) continue;
+        const r = rel ? `${rel}/${d.name}` : d.name;
+        if (d.isDirectory()) await visit(path.join(dir, d.name), r);
+        else if (d.isFile()) { const st = await stat(path.join(dir, d.name)).catch(() => null); if (st) out.push({ rel: r, name: d.name, size: st.size }); }
+      }
+    };
+    await visit(root, "");
+    return out;
+  }
+  const globEscape = (p: string) => p.replace(/[\\*?[\]{}]/g, (c) => `\\${c}`);
+  async function findDupes(job: OffloadJob, bin: string) {
+    if (job.dupes && Date.now() - job.dupes.at < 6 * 3600_000 && existsSync(job.dupes.file)) return;
+    const root = job.dest.split("/")[0] || job.dest;
+    const [onDrive, here] = await Promise.all([listDrive(bin, job.remote, root), walkLocal(job.source)]);
+    const dest = job.dest.replace(/\/+$/, "");
+    const skip: string[] = []; const examples: string[] = [];
+    let bytes = 0;
+    for (const f of here) {
+      if (f.size < 5 * 1024 * 1024) continue;
+      const there = onDrive.get(`${f.name.toLowerCase()}|${f.size}`);
+      // Not on Drive, or at this job's own place (rclone skips those itself).
+      if (!there || there.toLowerCase() === `${dest}/${f.rel}`.toLowerCase()) continue;
+      skip.push(`- /${globEscape(f.rel)}`);
+      bytes += f.size;
+      if (examples.length < 20) examples.push(`${f.rel} = ${there}`);
+    }
+    await mkdir(reportsDir, { recursive: true });
+    const file = path.join(reportsDir, `${job.id}.dupes.txt`);
+    await writeFile(file, skip.join("\n") + (skip.length ? "\n" : ""));
+    job.dupes = { count: skip.length, bytes, at: Date.now(), file, examples };
+    if (skip.length) deps.log("INFO", `Upload ${job.id}: ${skip.length} file(s), ${gbs(bytes)}, are already on Drive elsewhere; not sending them again`);
+    saveNow();
+  }
+  const dupeArgs = (job: OffloadJob) => (job.dupes?.count && existsSync(job.dupes.file) ? [`--exclude-from=${job.dupes.file}`] : []);
+
   async function runCopy(job: OffloadJob) {
     const bin = await findRclone();
     if (!bin) { job.status = "failed"; job.lastError = "rclone is not installed on the host"; return saveNow(); }
@@ -364,6 +432,8 @@ export function createDrives(deps: DrivesDeps) {
     job.lastProgressAt = Date.now();
     if (job.lastError !== "Stalled; restarted automatically") job.lastError = null;
     saveNow();
+    await findDupes(job, bin).catch((e) => deps.log("WARN", `Upload ${job.id}: duplicate check skipped: ${e?.message ?? e}`));
+    if (job.status !== "copying") return; // paused or removed while looking
     deps.log("INFO", `Upload ${job.id}: ${job.source} -> ${job.remote}:${job.dest}`);
     const rcPort = 6100 + Math.floor(Math.random() * 800);
     const rcPass = crypto.randomBytes(12).toString("hex");
@@ -375,7 +445,7 @@ export function createDrives(deps: DrivesDeps) {
       // --fast-list reads the folder on Drive in a few big requests.
       `--transfers=${job.kind === "movies" || job.kind === "tv" ? 4 : 8}`, "--checkers=16", "--fast-list", "--drive-chunk-size=64M",
       "--retries=10", "--low-level-retries=20", "--use-json-log", "--log-level=NOTICE", "--stats=4s", "--stats-log-level=NOTICE",
-      ...excludeArgs()];
+      ...excludeArgs(), ...dupeArgs(job)];
     const proc = spawn(bin, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     running.set(job.id, proc);
     let buf = "";
@@ -391,7 +461,7 @@ export function createDrives(deps: DrivesDeps) {
       jobRc.delete(job.id);
       if (job.status === "paused") { saveNow(); return pump(); }
       if (restarting.delete(job.id)) { job.status = "queued"; saveNow(); return pump(); }
-      if (code === 0) { job.attempts = 0; void runVerify(job); return; }
+      if (code === 0) { job.attempts = 0; job.carriedBytes = 0; job.stats = { ...job.stats, bytes: 0 }; void runVerify(job); return; }
       failed(job, job.lastError ?? `rclone stopped with code ${code}`);
       saveNow();
       pump();
@@ -408,7 +478,7 @@ export function createDrives(deps: DrivesDeps) {
     // One-way: every file in the folder on this PC must be on Drive with the
     // same size and MD5. Files only on Drive are fine.
     const proc = spawn(bin, ["check", job.source, `${job.remote}:${job.dest}`, "--one-way", `--combined=${report}`, "--checkers=8",
-      "--use-json-log", "--log-level=ERROR", ...excludeArgs()], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+      "--use-json-log", "--log-level=ERROR", ...excludeArgs(), ...dupeArgs(job)], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
     running.set(job.id, proc);
     proc.stderr!.on("data", () => {});
     proc.on("close", async () => {
@@ -481,8 +551,8 @@ export function createDrives(deps: DrivesDeps) {
 
   addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued"].includes(j.status)).map((j) => ({
     kind: "upload", title: j.label, status: j.status,
-    progress: j.status === "copying" && j.stats.totalBytes ? j.stats.bytes / j.stats.totalBytes : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
-    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(j.stats.bytes)} of ${gbs(j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
+    progress: j.status === "copying" && j.stats.totalBytes ? ((j.carriedBytes ?? 0) + j.stats.bytes) / ((j.carriedBytes ?? 0) + j.stats.totalBytes) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs((j.carriedBytes ?? 0) + j.stats.bytes)} of ${gbs((j.carriedBytes ?? 0) + j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
       : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : "Waiting for its turn",
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
   })));
@@ -505,6 +575,7 @@ export function createDrives(deps: DrivesDeps) {
       if (v.errors) facts.push(["Couldn't check", `${v.errors}`]);
       facts.push(["Checked", new Date(v.at).toLocaleString("en-ZA")]);
     }
+    if (j.dupes?.count) facts.push(["Already on Drive elsewhere", `${j.dupes.count} file(s), ${humanBytes(j.dupes.bytes)}, not sent again (kept on this PC)`]);
     if (dur) facts.push(["Took", `${dur}${took && v ? ` (about ${humanBytes(v.matchedBytes / (took / 1000))}/s)` : ""}`]);
     if (j.deleted) facts.push(["Freed on this PC", `${j.deleted.files} file(s), ${humanBytes(j.deleted.bytes)}${j.deleted.skipped ? `, ${j.deleted.skipped} left (changed or in use)` : ""}`]);
     facts.push(["Kept in step", j.keepSynced ? `yes, rechecked daily${j.nextSyncAt ? ` (next ${new Date(j.nextSyncAt).toLocaleDateString("en-ZA")})` : ""}` : "no"]);

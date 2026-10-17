@@ -12,6 +12,7 @@ import React, { useState, useEffect, useMemo, Suspense, lazy } from "react";
 import { useStyles, api, Icon, Note, goTab } from "./lib.jsx";
 import { SYSTEMS, EMULATORS, PLAY } from "./systems.js";
 import { loadOldEmulationHub } from "old-emulation";
+import { openGameSetup } from "./GameSetup.jsx";
 
 const HostTools = lazy(loadOldEmulationHub);
 const MAKERS = ["Sony", "Nintendo", "Sega", "Microsoft", "SNK", "Arcade", "NEC", "Atari"];
@@ -114,7 +115,12 @@ export function SetupGuide({ isAdmin = false }) {
               : <Note>This host's game library is private. Follow the steps below to play your own games, or ask the host for access.</Note>}
           </div>
         )}
-        <div className="nxa-steps" style={{ marginTop: 18 }}>
+        <div className="nxa-row nxa-wrap" style={{ marginTop: 16 }}>
+          <button className="nxa-btn primary" onClick={openGameSetup}><Icon name="bolt" size={15} /> Set up games, step by step</button>
+          <span className="nxa-dim" style={{ fontSize: 13 }}>Pick your consoles; SaveState installs what they need and asks only for the files you have to bring.</span>
+        </div>
+        <p className="nxa-label" style={{ marginTop: 18 }}>OR DO IT YOURSELF</p>
+        <div className="nxa-steps" style={{ marginTop: 8 }}>
           <div className="nxa-step"><div><b>Choose where you'll play</b>
             <p>Older consoles and handhelds run right here in the browser. Bigger systems run in the desktop or Android app, which installs RetroArch and the right cores for you. A few (PS2, PS3, GameCube, Wii, Xbox, Switch) use their own emulator: install it from the link on the system's card.</p>
             <p>On Windows, install SaveState once: it sets up the game launcher (it starts by itself at login, so Play just works, and games you download stay on this PC) and adds SaveState to the Desktop and Start menu.</p>

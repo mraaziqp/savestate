@@ -25,6 +25,7 @@ const CSS = `
 `;
 
 const C = ({ children }) => <span className="nxg-code">{children}</span>;
+const SetUpGames = () => <button className="nxa-btn sm primary" style={{ marginTop: 10, marginRight: 8 }} onClick={() => window.dispatchEvent(new CustomEvent("nexus:game-setup"))}><Icon name="bolt" size={13} /> Set up games, step by step</button>;
 const Go = ({ tab, children }) => <button className="nxa-btn sm" style={{ marginTop: 10 }} onClick={() => goTab(tab)}><Icon name="arrow" size={13} /> {children}</button>;
 
 // Each guide: id, group, title, words people might search for, and its body.
@@ -130,7 +131,9 @@ const GUIDES = [
     words: "games play browser pc phone stream host desktop app launcher emulator rom recommended how",
     body: (
       <>
-        <p className="lead">Open any game in <b>Games</b>. Under <b>How do you want to play?</b> the option that works best on the device you're holding comes first, marked <b>Recommended</b>.</p>
+        <p className="lead"><b>New here?</b> Use <b>Set up games</b>: pick the consoles you want, and it installs what they need (on Windows), then asks only for the system files you have to bring yourself.</p>
+        <SetUpGames />
+        <p className="lead" style={{ marginTop: 14 }}>Open any game in <b>Games</b>. Under <b>How do you want to play?</b> the option that works best on the device you're holding comes first, marked <b>Recommended</b>.</p>
         <div className="nxg-sec"><h4>Play in this browser</h4>
           <p>For older consoles and handhelds (NES, SNES, Game Boy, GBA, Mega Drive, PS1, arcade and more). Nothing to install: the game downloads once and runs on your device. Works on phones, tablets and PCs.</p></div>
         <div className="nxg-sec"><h4>Play on this PC</h4>
@@ -147,7 +150,8 @@ const GUIDES = [
     words: "windows install installer desktop app launcher setup node shortcut permission local network chrome edge allow",
     body: (
       <>
-        <p className="lead">One install, about two minutes. After that, <b>Play</b> just works on that PC.</p>
+        <p className="lead">One install, about two minutes. After that, <b>Play</b> just works on that PC. The easiest way: <b>Set up games</b> asks for it at the right moment and sets up your consoles in one go.</p>
+        <SetUpGames />
         <div className="nxg-sec"><h4>Install</h4>
           <ol>
             <li>On the PC, open SaveState and choose <b>Get the App &gt; Windows</b> (or <b>Emulation Setup &gt; Get SaveState for Windows</b>).</li>
@@ -157,6 +161,8 @@ const GUIDES = [
           </ol></div>
         <div className="nxg-sec"><h4>The first time you press Play</h4>
           <p>Chrome or Edge asks whether <b>savestate.co.za</b> may connect to apps on this device. Choose <b>Allow</b>: that is how the site talks to the game launcher on your PC.</p></div>
+        <div className="nxg-sec"><h4>System files (BIOS)</h4>
+          <p>PS1, PS2, PS3, Switch and a few others need a file from the console itself. SaveState can't include them (they're copyrighted): dump them from your own console, then add them in <b>Set up games</b>, which puts each where its console looks.</p></div>
         <div className="nxg-sec"><h4>It keeps itself running</h4>
           <p>The launcher starts with Windows and restarts by itself within seconds if it ever stops. To update it, run the installer again.</p></div>
         <Go tab="emulation">Open Emulation Setup</Go>

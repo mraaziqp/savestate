@@ -76,8 +76,10 @@ COPY dist ./dist
 COPY public ./public
 COPY package.json ./
 
-RUN mkdir -p /tmp/nexus-vault /tmp/nexus-data \
- && chown -R node:node /tmp/nexus-vault /tmp/nexus-data /app
+# /data: the NAS install (deploy/nas) keeps settings, caches and uploads there
+# in a volume; created here so the volume starts out owned by the node user.
+RUN mkdir -p /tmp/nexus-vault /tmp/nexus-data /data \
+ && chown -R node:node /tmp/nexus-vault /tmp/nexus-data /data /app
 
 USER node
 EXPOSE 3000

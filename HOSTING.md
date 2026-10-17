@@ -482,6 +482,40 @@ what they open, members. API: `GET /api/admin/people`, `PATCH/DELETE
 go through `PUT /api/admin/plans/users/:id` (receipts). `users.suspended_at`
 is read with `to_jsonb(users)` so sign-in keeps working before the column exists.
 
+## Set up games (GameSetup.jsx, launcher v7)
+
+One guided path for members and admins, opened from Emulation Setup, the
+note on Games / Play Offline, Get started and Help & guides (event
+`nexus:game-setup`, or `?gamesetup`): pick consoles (browser ones need
+nothing; heavy ones show "Paid plan" without `games.full`) → on Windows, ask
+for SaveState for Windows until the launcher answers on 127.0.0.1:17373
+(v7 or newer), then `POST /setup-consoles` sets up every chosen console in
+one go (RetroArch + cores; PCSX2, RPCS3, Cemu from their releases; the
+host's own Dolphin/Switch emulator where there is no public download) →
+system files: `/bios-check` and `/bios-add` put the person's own BIOS where
+each console looks (RetroArch `system`, PCSX2 `bios`, Ryujinx
+`portable/system`) and compare MD5s → games: the host's library, or a folder
+on the PC (`/add-rom-folder` opens Windows' folder picker). The launcher has
+no self-update: an installed one updates by running the installer again
+(the wizard says so when it finds an older version).
+
+**The host never hands out system files any more:** the export manifest's
+BIOS part is empty, `/api/emulator/export/bios` answers 410, and emulator
+exports skip `bios`, `portable`, `bis`, `nand`, `keys`, `firmware`, `user`
+folders and `.keys`/`.pup` files.
+
+## NAS / Linux hosts (install.sh)
+
+`curl -fsSL https://savestate.co.za/install.sh | bash` (served from
+`scripts/install.sh`) needs Docker. It downloads the repo to
+`~/savestate` (or `SAVESTATE_DIR`), asks for the films, music and games
+folders (mounted read-only) and the port, writes `deploy/nas/.env` with
+generated passwords, and runs `deploy/nas/docker-compose.yml` (the app from
+the Dockerfile plus its own Postgres, `NEXUS_DB_SSL=0`). The first account
+made on a brand-new host becomes its owner (`ultra_admin`). Re-running it
+updates and keeps the settings. Not tested end to end on a NAS yet (no
+Docker on this PC).
+
 ## Local cache (server/hotcache.ts)
 
 The library is on Google Drive, so a first play fetches from Google (7 s for
@@ -513,6 +547,18 @@ Then rebuild the server (`host-up.ps1` does, or the esbuild line in it) and
 restart it.
 
 ## Cloud Drives (Google Drive accounts, upload & verify)
+
+**Interrupted copies carry on, duplicates are skipped.** Jobs are saved in
+`offload-jobs.json`; a restart (or a server restart) queues them again and
+rclone skips every file already at the destination, so only the files that
+were mid-transfer start over. Progress keeps what earlier runs sent
+(`carriedBytes`). Before each copy the whole archive on that Drive is listed
+once (cached 30 min) and any local file of 5 MB or more with the same name and
+size as a file elsewhere in the archive is left out of the copy and of the
+check (`offload-reports/<job>.dupes.txt`); those are never deleted from the
+PC. Seen 2026-10-17: F:\movies had 136 files (69 GB) already on Drive under
+`media/TV Shows`. Each server restart still costs the files mid-transfer, so
+batch server changes while a big copy runs.
 
 The Cloud Drives tab (admins) is `server/drives.ts` on top of rclone, which
 holds a sign-in per Google account (`rclone config` remotes; `gdrive` =

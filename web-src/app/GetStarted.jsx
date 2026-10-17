@@ -142,9 +142,10 @@ export function GetStarted() {
               <div className="nxa-card" style={{ display: "grid", gap: 10 }}>
                 <p style={{ margin: 0 }}>Your own SaveState runs on a computer that stays on: a PC, a Mac, or a NAS.</p>
                 <ul style={{ margin: 0, paddingLeft: 20, display: "grid", gap: 6, fontSize: 14 }}>
-                  <li><b>NAS or Linux</b> (Synology, Unraid, TrueNAS with a shell, any Linux PC): one command installs everything.
-                    <div className="nxgs-code" style={{ marginTop: 6 }}>curl -fsSL {location.origin}/install.sh | bash</div></li>
-                  <li><b>Windows or Mac:</b> the <b>Become a Host</b> page walks you through it.</li>
+                  <li><b>Any machine with Docker</b> (Synology, QNAP, Unraid, TrueNAS, a Linux PC, or Windows/Mac with Docker Desktop): one command sets up SaveState and its database, asks where your films, music and games are, and prints the address to open.
+                    <div className="nxgs-code" style={{ marginTop: 6 }}>curl -fsSL {location.origin}/install.sh | bash</div>
+                    <span className="nxa-faint" style={{ fontSize: 12.5 }}>On Windows run it in WSL (Ubuntu); on a Mac, in Terminal. The first account you create there owns it.</span></li>
+                  <li><b>Then</b> the <b>Become a Host</b> page lists your host and makes invite links for people.</li>
                 </ul>
                 <div className="nxa-row nxa-wrap"><button className="nxa-btn primary" onClick={() => finish("become-host")}>Open Become a Host</button><button className="nxa-link" onClick={() => setStep(2)}>Later</button></div>
               </div>
@@ -164,6 +165,10 @@ export function GetStarted() {
               <li><b>Windows:</b> <a href="/api/downloads/desktop?platform=windows">get SaveState for Windows</a>; it sets up games on your PC.</li>
               <li><b>TV:</b> open the site in the TV's browser, or use Moonlight for games.</li>
             </ul>
+            <div className="nxa-row nxa-wrap" style={{ alignItems: "center" }}>
+              <button className="nxa-btn" onClick={() => window.dispatchEvent(new CustomEvent("nexus:game-setup"))}><Icon name="game" /> Set up games now</button>
+              <span className="nxa-dim" style={{ fontSize: 13 }}>Pick your consoles; it installs what they need, step by step.</span>
+            </div>
             <div className="nxa-row nxa-wrap">
               <button className="nxa-btn primary" onClick={() => finish(path === "explore" ? "minigames" : hasLibrary ? "media" : path === "join" ? "minigames" : null)}>Start using SaveState</button>
               <button className="nxa-btn" onClick={() => finish("help")}>Read the guides</button>

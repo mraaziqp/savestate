@@ -73,7 +73,11 @@ const REQUIRED_BIOS: Record<string, { anyOf: string[]; required: boolean; label:
 // which let anyone on the path read or change the traffic). The URL's
 // sslmode is dropped because these settings govern; leaving it made the
 // driver warn on every start about sslmode changing meaning in pg 9.
-const DB_SSL = { rejectUnauthorized: true };
+// Neon (the hosted database) needs TLS. A host with its own database next to
+// it (the NAS install, deploy/nas) runs Postgres without TLS: NEXUS_DB_SSL=0
+// or sslmode=disable in DATABASE_URL.
+const DB_SSL = process.env.NEXUS_DB_SSL === "0" || /[?&]sslmode=disable/.test(process.env.DATABASE_URL ?? "")
+  ? false : { rejectUnauthorized: true };
 function dbConnectionString(): string {
   return String(process.env.DATABASE_URL ?? "")
     .replace(/([?&])sslmode=[^&]*(&|$)/, (_m, a: string, b: string) => (b ? a : ""))
@@ -15697,6 +15701,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         [username, displayName, await hashPasswordAsync(password), email]
       );
       const u = r.rows[0];
+      // A brand-new host (installed with install.sh): the very first account
+      // is the person who set it up, so it owns the host.
+      const only = await pool.query("SELECT count(*)::int AS n FROM users").then((x) => x.rows[0]?.n).catch(() => null);
+      if (only === 1) {
+        await pool.query("UPDATE users SET role='ultra_admin', media_access=TRUE, can_upload_media=TRUE WHERE id=$1", [u.id]).catch(() => {});
+        u.role = "ultra_admin";
+        log("INFO", `First account on this host: ${u.username} is its owner`, "auth");
+      }
       const token = sessionFor(req, res, u);
       log("INFO", `New user registered: ${u.username}`, "auth");
       logActivity({ userId: u.id, username: u.username, ip: clientIp(req), userAgent: req.headers["user-agent"], method: "POST", path: "/api/auth/register", eventType: "auth_register", statusCode: 200 });
@@ -18584,7 +18596,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   let exportManifestCache: { at: number; body: any } | null = null;
   app.get("/api/emulator/export/manifest", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
-    const mayHaveBios = (await access.callerOf(req)).games;
+    // System files are never copied from the host any more (each person adds
+    // their own in Set up games); the BIOS part of the manifest stays empty.
+    const mayHaveBios = false;
     const forCaller = (body: any) => (mayHaveBios ? body : { ...body, bios: { count: 0, files: [], bytes: 0, available: false, hashes: {} } });
     if (exportManifestCache && Date.now() - exportManifestCache.at < 10 * 60_000) return res.json(forCaller(exportManifestCache.body));
     const config = await getVaultConfig();
@@ -18662,6 +18676,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   app.get("/api/emulator/export/bios", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
+    return res.status(410).json({ error: "System files are not shared by the host. Add your own in Games > Set up games." });
     const sources = await getAllHostBiosSources();
     const anyFiles = sources.some((s) => s.files.length > 0);
     if (!anyFiles) return res.status(404).json({ error: "No BIOS files on this host" });
@@ -18710,6 +18725,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // run to tens of GB. The emulator recreates it empty on first run.
     'dev_hdd0', 'dev_hdd1', 'dev_usb000', 'dev_flash', 'dev_flash2', 'dev_flash3',
     '.git', 'node_modules',
+    // Console system files and keys are never handed out: each person adds
+    // their own (Games > Set up games). PCSX2 bios, Ryujinx portable/system
+    // and bis (keys, firmware), Dolphin's User folder (IPL dumps).
+    'bios', 'portable', 'bis', 'nand', 'keys', 'firmware', 'user',
   ]);
 
   // Refuse to build an archive beyond this. A misdetected path (an emulator exe
@@ -18761,6 +18780,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
           if (STANDALONE_EMULATOR_EXCLUDE_DIRS.has(e.name.toLowerCase())) continue;
           await walk(childRel, depth + 1);
         } else if (e.isFile()) {
+          if (/\.(keys|pup)$/i.test(e.name)) continue;
           out.push(childRel);
         }
       }
@@ -28477,6 +28497,16 @@ Format as JSON:
 
   // Public desktop installer download endpoint (no auth required) — one stable link the
   // frontend can hardcode instead of round-tripping through /api/updates/check first.
+  // `curl -fsSL https://savestate.co.za/install.sh | bash` sets up a NAS or
+  // Linux host (scripts/install.sh). It answered with the web page before.
+  app.get('/install.sh', (_req, res) => {
+    res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(path.join(process.cwd(), 'scripts', 'install.sh'), (err) => {
+      if (err && !res.headersSent) res.status(404).type('text/plain').send('echo "The installer is missing on this host." >&2; exit 1\n');
+    });
+  });
+
   app.get('/api/downloads/desktop', async (req, res) => {
     const platform = normalizeDesktopPlatform(String(req.query.platform ?? 'windows'));
     const installer = await findLatestDesktopInstaller(platform);

@@ -10,6 +10,7 @@
 // styles.js) instead of unmounting it, so the shell needs no other change.
 import React, { useState, useEffect, useCallback } from "react";
 import { useStyles, api, token, Icon, Note, goTab } from "./lib.jsx";
+import { openGameSetup } from "./GameSetup.jsx";
 
 const MEDIA_TABS = new Set(["media", "music", "codex", "torrent", "party", "playlists", "gallery", "photos", "matchmaker"]);
 const GAMES_TABS = new Set(["library", "consoles"]);
@@ -110,7 +111,46 @@ function RequestAccess({ tab }) {
   );
 }
 
+// Games and Play Offline: say plainly what this device needs. Playing offline
+// on a PC needs SaveState for Windows, and nothing used to say so there.
+function GameHint({ tab }) {
+  const [app, setApp] = useState("checking");
+  const u = typeof navigator === "undefined" ? "" : navigator.userAgent;
+  const phone = /Android|iPhone|iPad|iPod/i.test(u);
+  const windows = !phone && /Windows/i.test(u);
+  useEffect(() => {
+    if (!windows) return undefined;
+    let live = true;
+    fetch("http://127.0.0.1:17373/health", { signal: AbortSignal.timeout(2500) }).then((r) => r.json())
+      .then((h) => { if (live) setApp((h.version ?? 0) >= 7 ? "ready" : "old"); })
+      .catch(() => { if (live) setApp("missing"); });
+    return () => { live = false; };
+  }, [windows]);
+  if (windows && app === "checking") return null;
+  const setup = <button className="nxa-btn sm primary" onClick={openGameSetup}><Icon name="bolt" size={13} /> Set up games</button>;
+  let text;
+  if (phone) text = <>Retro consoles (NES, SNES, Game Boy, Mega Drive, PS1 and more) play right here with touch controls. PS2, GameCube and other big consoles stream from the host PC with the free Moonlight app.</>;
+  else if (windows && app === "ready") text = <>SaveState for Windows is installed: games play here at full speed and keep working offline once downloaded.</>;
+  else if (windows && app === "old") text = <>SaveState for Windows on this PC needs an update for the newest setup. Run the installer again, or use Set up games.</>;
+  else if (windows) text = <><b>Playing offline on this PC needs SaveState for Windows</b> (a one-time install). Retro consoles also play right here in the browser without it. Set up games installs it and gets your consoles ready.</>;
+  else text = <>Retro consoles play right here in the browser. Bigger consoles need SaveState for Windows on a PC, or stream from the host with Moonlight.</>;
+  return (
+    <div className="nxa" style={{ marginBottom: 10 }}>
+      <Note kind={windows && app === "ready" ? "ok" : "info"}>
+        <span>{text}</span>
+        <span className="nxa-row nxa-wrap" style={{ marginTop: 8 }}>{setup}{tab !== "emulation" && <button className="nxa-btn sm" onClick={() => goTab("emulation")}>What each console needs</button>}</span>
+      </Note>
+    </div>
+  );
+}
+
 export function TabGate({ tab }) {
+  const inner = <TabGateInner tab={tab} />;
+  if (!GAMES_TABS.has(tab)) return inner;
+  return <><GameHint tab={tab} />{inner}</>;
+}
+
+function TabGateInner({ tab }) {
   useStyles();
   const me = useEntitlements();
   if (!me || me.isAdmin) return null;

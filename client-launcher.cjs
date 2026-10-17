@@ -43,7 +43,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 
 const PORT = 17373;
 const IS_WIN = process.platform === 'win32';
@@ -1015,7 +1015,141 @@ function ensureEmulationRoot(cfg) {
   return root;
 }
 
-async function performCloneHostSetup(hostUrl, token) {
+// ── Guided game setup helpers ────────────────────────────────────────────
+let setupJob = null;
+
+// Consoles the web app's setup wizard can ask for, and how each is set up.
+// "core": a RetroArch core (RetroArch is installed first). "standalone":
+// its own emulator, from its official release, or copied from the host when
+// there is no public download (Switch, Dolphin). "manual": no automatic
+// install; the wizard links to the emulator's own site.
+const CONSOLE_SETUP = {
+  nes: { core: 'nes' }, snes: { core: 'snes' }, n64: { core: 'n64' }, gb: { core: 'gb' }, gba: { core: 'gba' },
+  nds: { core: 'nds' }, '3ds': { core: '3ds' }, ps1: { core: 'ps1' }, psp: { core: 'psp' },
+  genesis: { core: 'genesis' }, mastersystem: { core: 'mastersystem' }, segacd: { core: 'segacd' },
+  saturn: { core: 'saturn' }, dreamcast: { core: 'dreamcast' }, neogeo: { core: 'neogeo' }, mame: { core: 'mame' },
+  pce: { core: 'pce' }, atari: { core: 'atari2600' }, lynx: { core: 'lynx' },
+  ps2: { standalone: 'pcsx2', install: () => ensurePCSX2Installed() },
+  ps3: { standalone: 'rpcs3', install: () => ensureRPCS3Installed() },
+  wiiu: { standalone: 'cemu', install: () => ensureCemuInstalled() },
+  gamecube: { standalone: 'dolphin', core: 'gamecube' },
+  wii: { standalone: 'dolphin', core: 'wii' },
+  switch: { standalone: 'switch' },
+  xbox: { manual: 'xemu (xemu.app)' }, xbox360: { manual: 'Xenia (xenia.jp)' },
+};
+
+async function runConsoleSetup(job, platforms, hostUrl, token) {
+  const step = (platform) => job.steps.find((s) => s.platform === platform);
+  const set = (platform, status, detail) => { const s = step(platform); if (s) { s.status = status; s.detail = detail || ''; } };
+  // RetroArch once, if any chosen console runs on a core.
+  let retroarch = null;
+  const needsCore = platforms.some((p) => CONSOLE_SETUP[p] && CONSOLE_SETUP[p].core && !(CONSOLE_SETUP[p].standalone && getEmulatorPath(p)));
+  if (needsCore) {
+    retroarch = getEmulatorPath('nes');
+    if (!retroarch || !isRetroArch(retroarch)) {
+      for (const p of platforms) if (CONSOLE_SETUP[p] && CONSOLE_SETUP[p].core) set(p, 'working', 'Installing RetroArch (once for all consoles)…');
+      const r = await ensureRetroArchInstalled().catch((e) => ({ ok: false, detail: String(e && e.message ? e.message : e) }));
+      retroarch = r && r.ok ? getEmulatorPath('nes') : null;
+    }
+  }
+  for (const platform of platforms) {
+    const spec = CONSOLE_SETUP[platform];
+    if (!spec) { set(platform, 'failed', 'This console has no automatic setup yet.'); continue; }
+    set(platform, 'working', 'Setting up…');
+    try {
+      if (spec.manual) { set(platform, 'manual', `Install ${spec.manual} yourself; SaveState finds it once it is installed.`); continue; }
+      if (spec.standalone) {
+        if (getEmulatorPath(platform) && !(spec.core && isRetroArch(getEmulatorPath(platform)))) { set(platform, 'done', `Already installed: ${path.basename(getEmulatorPath(platform))}`); continue; }
+        let done = false;
+        if (spec.install) {
+          const r = await spec.install().catch((e) => ({ ok: false, detail: String(e && e.message ? e.message : e) }));
+          if (r && r.ok) { set(platform, 'done', r.detail || 'Installed'); done = true; }
+        }
+        if (!done && hostUrl) {
+          const r = await performCloneHostSetup(hostUrl, token, { only: [spec.standalone] }).catch(() => null);
+          const s = r && r.steps && r.steps.find((x) => x.ok);
+          if (s && getEmulatorPath(platform)) { set(platform, 'done', `Installed from the host: ${s.detail}`); done = true; }
+        }
+        if (done) continue;
+        if (!spec.core) { set(platform, 'failed', 'Could not install its emulator automatically. Its card in Emulation Setup links to the download.'); continue; }
+      }
+      if (spec.core) {
+        if (!retroarch) { set(platform, 'failed', 'RetroArch could not be installed. Check the internet connection and try again.'); continue; }
+        const r = await ensureRetroArchCore(retroarch, spec.core);
+        if (r.ok) {
+          const coreId = PLATFORM_CORES[spec.core];
+          if (coreId) await ensureCoreSystemFiles(retroarch, coreId).catch(() => null);
+          set(platform, 'done', r.installed ? 'Installed' : 'Ready');
+        } else set(platform, 'failed', r.detail || 'The core could not be downloaded.');
+      }
+    } catch (e) {
+      set(platform, 'failed', String(e && e.message ? e.message : e));
+    }
+  }
+}
+
+// Only plain file names a console really uses: no folders, no executables.
+function safeBiosName(n) {
+  const name = path.basename(String(n || '').trim());
+  if (!name || name.length > 80 || /[\\/:*?"<>|]/.test(name)) return '';
+  return /\.(bin|rom|zip|pup|keys|bios|img|dat|nvm|cfg|hex|7z)$/i.test(name) ? name : '';
+}
+function existsCaseInsensitive(file) {
+  if (fs.existsSync(file)) return true;
+  try { const want = path.basename(file).toLowerCase(); return fs.readdirSync(path.dirname(file)).some((f) => f.toLowerCase() === want); } catch { return false; }
+}
+// Where a console looks for its system files on this PC.
+function biosDirsFor(system, forWriting) {
+  const cfg = loadConfig();
+  const dirs = [];
+  const emuDir = (p) => { const e = getEmulatorPath(p); return e ? path.dirname(e) : null; };
+  if (system === 'ps2') { const d = emuDir('ps2'); if (d && !isRetroArch(getEmulatorPath('ps2'))) dirs.push(path.join(d, 'bios')); }
+  else if (system === 'switch') {
+    const d = emuDir('switch');
+    if (d) dirs.push(path.join(d, fs.existsSync(path.join(d, 'portable')) || forWriting ? 'portable' : '', 'system'));
+    if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'Ryujinx', 'system'));
+  } else if (system === 'ps3') {
+    dirs.push(path.join(cfg.emulationRoot || clientRoot, 'firmware'));
+  } else {
+    const ra = getEmulatorPath('nes');
+    if (ra && isRetroArch(ra)) dirs.push(path.join(path.dirname(ra), 'system'));
+  }
+  dirs.push(path.join(cfg.emulationRoot || clientRoot, 'bios'));
+  return Array.from(new Set(dirs.filter(Boolean)));
+}
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0;
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('That file is too big to be a system file.')); req.destroy(); return; } chunks.push(c); });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+// The node launcher has no window of its own: Windows' folder picker, opened
+// on this PC's desktop, on top of the browser.
+function pickFolderNative(title) {
+  return new Promise((resolve) => {
+    if (!IS_WIN) { resolve({ ok: false, unsupported: true, error: 'Type the folder path instead (the folder picker is Windows-only).' }); return; }
+    const t = String(title || 'Choose a folder').replace(/'/g, "''");
+    const ps = [
+      'Add-Type -AssemblyName System.Windows.Forms',
+      '$f = New-Object System.Windows.Forms.FolderBrowserDialog',
+      `$f.Description = '${t}'`,
+      '$f.ShowNewFolderButton = $true',
+      '$w = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; WindowState = "Minimized" }',
+      'if ($f.ShowDialog($w) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($f.SelectedPath) }',
+    ].join('; ');
+    execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: false, timeout: 10 * 60_000 }, (err, stdout) => {
+      const picked = String(stdout || '').trim();
+      if (picked) resolve({ ok: true, path: picked });
+      else resolve({ ok: false, canceled: true });
+    });
+  });
+}
+
+async function performCloneHostSetup(hostUrl, token, opts = {}) {
+  // opts.only: just these standalone emulators (the setup wizard), no cores or BIOS.
+  const only = Array.isArray(opts.only) && opts.only.length ? new Set(opts.only) : null;
   const cfg = loadConfig();
   ensureEmulationRoot(cfg);
 
@@ -1068,9 +1202,11 @@ async function performCloneHostSetup(hostUrl, token) {
   // itself doesn't depend on this either way — it fetches the correct
   // per-platform core straight from RetroArch's buildbot the moment a game
   // actually needs one (see ensureRetroArchCore).
-  const hostCoreFiles = manifest.cores?.files || [];
+  const hostCoreFiles = only ? [] : (manifest.cores?.files || []);
   const crossPlatformCores = manifest.cores?.available && hostCoreFiles.length > 0 && !hostCoreFiles.some((f) => f.endsWith(CORE_EXT));
-  if (crossPlatformCores) {
+  if (only) {
+    // Cores come from RetroArch's own buildbot in the wizard.
+  } else if (crossPlatformCores) {
     steps.push({ name: 'Cores', ok: true, detail: `Host's cores are for a different OS (not ${CORE_EXT}) — skipped copying unusable files. Play fetches the right core automatically instead.` });
   } else if (manifest.cores?.available) {
     try {
@@ -1090,7 +1226,10 @@ async function performCloneHostSetup(hostUrl, token) {
     steps.push({ name: 'Cores', ok: false, detail: 'Host has no cores installed' });
   }
 
-  if (manifest.bios?.available) {
+  if (only) {
+    // Not part of a single-emulator setup.
+  } else if (false && manifest.bios?.available) {
+    // System files are never copied from the host: each person adds their own.
     try {
       const { attempt, bad, skipped } = await fetchExtractAndVerify(
         `${hostUrl}/api/emulator/export/bios`, path.join(cfg.emulationRoot, 'bios'), manifest.bios.hashes
@@ -1105,14 +1244,16 @@ async function performCloneHostSetup(hostUrl, token) {
       steps.push({ name: 'BIOS', ok: false, detail: String(e && e.message ? e.message : e) });
     }
   } else {
-    steps.push({ name: 'BIOS', ok: false, detail: 'Host has no BIOS files configured' });
+    steps.push({ name: 'BIOS', ok: true, detail: 'Add your own system files in Set up games (they are never copied from the host).' });
   }
 
   // RetroArch itself isn't cloned from the host binary-for-binary (wrong
   // platform half the time) — reuse the portable installer instead, which
   // already picks the right build for this machine.
   const existingEmu = getEmulatorPath('nes');
-  if (!existingEmu) {
+  if (only) {
+    // RetroArch is set up separately by the wizard.
+  } else if (!existingEmu) {
     try {
       const installed = await ensureRetroArchInstalled();
       steps.push({ name: 'RetroArch', ok: !!installed.ok, detail: installed.detail || (installed.ok ? 'Installed' : 'Install failed') });
@@ -1146,6 +1287,7 @@ async function performCloneHostSetup(hostUrl, token) {
       ];
       for (const target of STANDALONE_TARGETS) {
         const info = standaloneManifest[target.key];
+        if (only && !only.has(target.key)) continue;
         if (!info?.available) continue; // host doesn't have a clonable copy — nothing to do
         if (getEmulatorPath(target.platform)) continue; // client already has one of its own
         try {
@@ -2761,7 +2903,9 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 6,
+    version: 7,
+    // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
+    features: ['setup-consoles', 'bios', 'rom-folder'],
     native: true,
     embedded: 'electron',
     canPickFolder: true,
@@ -3165,6 +3309,83 @@ function startEmbeddedLauncher(opts = {}) {
         return;
       }
 
+      // ── Guided game setup (web app: Games > Set up games) ──────────────
+      // POST /setup-consoles { platforms, hostUrl, token }: sets up every
+      // chosen console in one go (RetroArch and its cores, PCSX2, RPCS3,
+      // Cemu, or the host's own copy of an emulator that has no public
+      // download), one after the other, in the background.
+      // GET /setup-consoles/progress: what is done so far.
+      if (req.method === 'POST' && p === '/setup-consoles') {
+        const body = await readBody(req);
+        const platforms = (Array.isArray(body.platforms) ? body.platforms : []).map((x) => String(x).toLowerCase()).filter(Boolean);
+        if (!platforms.length) { send({ ok: false, error: 'Choose at least one console.' }, 400); return; }
+        if (setupJob && setupJob.running) { send({ ok: true, alreadyRunning: true, job: setupJob }); return; }
+        setupJob = { running: true, startedAt: Date.now(), steps: platforms.map((platform) => ({ platform, status: 'waiting', detail: '' })) };
+        runConsoleSetup(setupJob, platforms, String(body.hostUrl || '').replace(/\/+$/, ''), String(body.token || ''))
+          .catch((e) => { setupJob.error = String(e && e.message ? e.message : e); })
+          .finally(() => { setupJob.running = false; setupJob.finishedAt = Date.now(); });
+        send({ ok: true, job: setupJob });
+        return;
+      }
+      if (req.method === 'GET' && p === '/setup-consoles/progress') {
+        send({ ok: true, job: setupJob });
+        return;
+      }
+
+      // POST /bios-check { files: [{ name, system }] }: which of the system
+      // files a console needs are already on this PC, and where.
+      if (req.method === 'POST' && p === '/bios-check') {
+        const body = await readBody(req);
+        const files = Array.isArray(body.files) ? body.files.slice(0, 200) : [];
+        send({ ok: true, files: files.map((f) => {
+          const name = safeBiosName(f && f.name);
+          if (!name) return { name: String((f && f.name) || ''), found: null };
+          const hit = biosDirsFor(String((f && f.system) || '')).map((d) => path.join(d, name)).find((x) => existsCaseInsensitive(x));
+          return { name, system: f.system, found: hit || null };
+        }) });
+        return;
+      }
+
+      // POST /bios-add?name=scph5501.bin&system=ps1 with the file as the
+      // body: the person's own system file, put where that console looks.
+      if (req.method === 'POST' && p === '/bios-add') {
+        const name = safeBiosName(url.searchParams.get('name'));
+        const system = String(url.searchParams.get('system') || '');
+        if (!name) { send({ ok: false, error: 'That file name is not a system file this setup knows.' }, 400); return; }
+        let buf;
+        try { buf = await readRawBody(req, 96 * 1024 * 1024); } catch (e) { send({ ok: false, error: String(e && e.message ? e.message : e) }, 413); return; }
+        if (!buf.length) { send({ ok: false, error: 'The file is empty.' }, 400); return; }
+        const dirs = biosDirsFor(system, true);
+        const written = [];
+        for (const d of dirs) {
+          try { ensureDirSync(d); fs.writeFileSync(path.join(d, name), buf); written.push(path.join(d, name)); } catch { /* next */ }
+        }
+        if (!written.length) { send({ ok: false, error: 'Could not save the file on this PC.' }, 500); return; }
+        const md5 = require('crypto').createHash('md5').update(buf).digest('hex');
+        send({ ok: true, name, md5, written });
+        return;
+      }
+
+      // POST /add-rom-folder { path? }: the person's own games folder. With
+      // no path, a Windows folder picker opens on this PC.
+      if (req.method === 'POST' && p === '/add-rom-folder') {
+        const body = await readBody(req).catch(() => ({}));
+        let dir = String((body && body.path) || '').trim();
+        if (!dir) {
+          const picked = await pickFolderNative('Choose the folder with your games');
+          if (!picked.ok) { send(picked, picked.canceled ? 200 : 400); return; }
+          dir = picked.path;
+        }
+        if (!fs.existsSync(dir)) { send({ ok: false, error: `That folder doesn't exist: ${dir}` }, 400); return; }
+        const cfg = loadConfig();
+        cfg.extraRomDirs = Array.from(new Set([...(Array.isArray(cfg.extraRomDirs) ? cfg.extraRomDirs : []), dir]));
+        saveConfig(cfg);
+        invalidateRomIndexes();
+        const found = getRomIndex(dir, true).length;
+        send({ ok: true, path: dir, filesFound: found, extraRomDirs: cfg.extraRomDirs });
+        return;
+      }
+
       if (req.method === 'POST' && p === '/launch') {
         const body = await readBody(req);
         const result = await dedupeLaunch(body, () => handleLaunch(body));
@@ -3190,6 +3411,11 @@ function startEmbeddedLauncher(opts = {}) {
           const body = await readBody(req);
           let dialog = null;
           try { ({ dialog } = require('electron')); } catch { /* Tauri build: no electron */ }
+          if (!dialog && IS_WIN) {
+            const picked = await pickFolderNative((body && body.title) || 'Select a folder');
+            send(picked.ok ? { ok: true, path: picked.path } : picked);
+            return;
+          }
           if (!dialog) {
             // This build has no native picker of its own (the app migrated from
             // Electron to Tauri). Previously the require() threw and this
