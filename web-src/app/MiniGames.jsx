@@ -66,7 +66,7 @@ function send(method, url, file, onProgress) {
     x.upload.onprogress = (e) => e.lengthComputable && onProgress?.(e.loaded / e.total);
     x.onload = () => {
       let data = null; try { data = JSON.parse(x.responseText); } catch { /* not json */ }
-      x.status >= 200 && x.status < 300 ? resolve(data) : reject(new Error(data?.error ?? `Upload failed (${x.status})`));
+      x.status >= 200 && x.status < 300 ? resolve(data) : reject(new Error(data?.error ?? window.__nxHttpText?.(x.status) ?? `Upload failed (${x.status})`));
     };
     x.onerror = () => reject(new Error("The upload was interrupted. Check your connection and try again."));
     x.send(file);

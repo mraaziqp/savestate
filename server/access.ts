@@ -43,6 +43,10 @@ export type Caller = {
   /** Raw users.user_tier; tiers.ts decides what it is worth. */
   tier: string | null;
   tierExpiresAt: number | null;
+  /** When the account was made (ms), for a plan's welcome allowance. */
+  createdAt?: number | null;
+  /** A household profile of an admin's account: the plan's limits don't apply to it either. */
+  ownerAdmin?: boolean;
   /** Set when the token is valid but the account is gone or the token predates a password change. */
   stale?: "deleted" | "password-changed" | "profile-ended";
   /** A household profile of the account (household.ts): never an admin, limited to its sections. */
@@ -233,7 +237,7 @@ export function createAccess(deps: AccessDeps) {
   type Row = {
     id: string; username: string; role: string | null; media_access: boolean | null; games_access: boolean | null;
     can_upload_media: boolean | null; user_tier: string | null; tier_expires_at: string | Date | null;
-    password_changed_at: string | Date | null;
+    password_changed_at: string | Date | null; created_at?: string | Date | null;
   };
   const cache = new Map<string, { at: number; row: Row | null }>();
   const TTL_MS = 30_000;
@@ -243,7 +247,7 @@ export function createAccess(deps: AccessDeps) {
     if (hit && Date.now() - hit.at < TTL_MS) return { row: hit.row, known: true };
     if (deps.dbUp()) {
       const rows = await deps.query<Row>(
-        `SELECT id, username, role, media_access, games_access, can_upload_media, user_tier, tier_expires_at, password_changed_at
+        `SELECT id, username, role, media_access, games_access, can_upload_media, user_tier, tier_expires_at, password_changed_at, created_at
            FROM users WHERE id::text = $1`, [userId]);
       if (rows) {
         const row = rows[0] ?? null;
@@ -304,6 +308,7 @@ export function createAccess(deps: AccessDeps) {
       upload: admin || !!row.can_upload_media,
       tier: row.user_tier,
       tierExpiresAt: row.tier_expires_at ? new Date(row.tier_expires_at).getTime() : null,
+      createdAt: row.created_at ? new Date(row.created_at).getTime() : null,
     };
     if (!payload.profileId) return done(account);
 
@@ -314,7 +319,7 @@ export function createAccess(deps: AccessDeps) {
     if (!profile || profile.ownerId !== userId || profile.version !== Number(payload.pv ?? 1)) return done({ ...ANON, stale: "profile-ended" });
     const via = payload.via === "link" ? "link" : "picker";
     return done({
-      ...account, admin: false, upload: false, role: "profile",
+      ...account, admin: false, upload: false, role: "profile", ownerAdmin: account.admin,
       media: account.media && profile.sections.includes("media"),
       games: account.games && profile.sections.includes("games"),
       profile: { ...profile, via },

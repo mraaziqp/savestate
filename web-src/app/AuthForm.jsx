@@ -122,6 +122,8 @@ export function AuthForm({ onLogin, onSuccess, defaultMode = "login", variant = 
         if (password.length < config.minPassword) return setError({ text: `Use a password of at least ${config.minPassword} characters.`, field: "password" });
         setBusy(true);
         await api("/api/auth/register", { method: "POST", anon: true, body: { username: name, password, display_name: displayName.trim() || undefined, email: mail || undefined } });
+        // The app opens on Get started (GetStarted.jsx) for a new account.
+        store.set("nx_get_started", "1");
         await signIn(name, password);
       } else if (mode === "forgot") {
         const name = identifier.trim();

@@ -334,6 +334,9 @@ function TierEditor({ tier, count, onSaved, onCancel, onDelete }) {
   const [error, setError] = useState("");
   const set = (k) => (e) => setF((old) => ({ ...old, [k]: e?.target ? e.target.value : e }));
 
+  const num = (v) => (String(v ?? "").trim() === "" ? null : Number(v));
+  const digits = (k, n) => (e) => set(k)(e.target.value.replace(/\D/g, "").slice(0, n));
+
   async function save(e) {
     e.preventDefault();
     const price = Number(String(f.price).replace(",", "."));
@@ -345,6 +348,7 @@ function TierEditor({ tier, count, onSaved, onCancel, onDelete }) {
       period: price === 0 && f.period !== "once" ? "free" : f.period === "free" ? "month" : f.period,
       color: f.color, badge: f.badge, isPublic: f.isPublic, checkoutUrl: f.checkoutUrl,
       maxProfiles: String(f.maxProfiles ?? "").trim() === "" ? null : Number(f.maxProfiles),
+      maxStreams: num(f.maxStreams), introStreams: num(f.introStreams), introDays: num(f.introDays),
       perks: f.perksText.split("\n").map((p) => p.trim()).filter(Boolean),
     };
     try {
@@ -370,6 +374,9 @@ function TierEditor({ tier, count, onSaved, onCancel, onDelete }) {
         </div>
         <div className="nxa-field"><label>Badge <i>(optional)</i></label><input className="nxa-input sm" value={f.badge} onChange={set("badge")} maxLength={24} placeholder="Most popular" /></div>
         <div className="nxa-field"><label>Household profiles <i>(blank: no limit)</i></label><input className="nxa-input sm" value={f.maxProfiles ?? ""} onChange={(e) => set("maxProfiles")(e.target.value.replace(/\D/g, "").slice(0, 2))} inputMode="numeric" placeholder="No limit" /></div>
+        <div className="nxa-field"><label>Screens at once <i>(blank: no limit)</i></label><input className="nxa-input sm" value={f.maxStreams ?? ""} onChange={digits("maxStreams", 2)} inputMode="numeric" placeholder="No limit" /></div>
+        <div className="nxa-field"><label>Welcome screens <i>(optional: more screens for new members)</i></label><input className="nxa-input sm" value={f.introStreams ?? ""} onChange={digits("introStreams", 2)} inputMode="numeric" placeholder="None" /></div>
+        <div className="nxa-field"><label>…for the first <i>(days after sign-up)</i></label><input className="nxa-input sm" value={f.introDays ?? ""} onChange={digits("introDays", 4)} inputMode="numeric" placeholder="90" /></div>
         <div className="nxa-field"><label>Colour</label><input className="nxa-input sm" type="color" value={f.color} onChange={set("color")} style={{ padding: 3, height: 36 }} /></div>
         <div className="nxa-field wide"><label>Tagline <i>(optional)</i></label><input className="nxa-input sm" value={f.tagline} onChange={set("tagline")} maxLength={120} placeholder="For households that watch every day" /></div>
         <div className="nxa-field wide"><label>Payment link <i>(optional, only used when PayFast is off: Yoco, PayPal.me... shown after a member asks for this tier)</i></label>

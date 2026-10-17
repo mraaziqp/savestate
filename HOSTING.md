@@ -440,6 +440,46 @@ game being downloaded to play counts as a stream (copies at 40%).
 `/?tab=help&guide=<id>`). Members see the everyday guides; admins also see
 host setup. Keep it in step when a screen changes.
 
+## Plans: screens at once and games (server/planlimits.ts)
+
+- **Screens.** A tier's `maxStreams` is how many devices of one account (with
+  its household profiles) may play films and shows at once. `introStreams` for
+  the first `introDays` after sign-up is the welcome allowance (Free: 2 screens
+  for 90 days, then 1). A device is address + browser; one that keeps watching
+  or changes title keeps its place, and a place frees itself 2 minutes after
+  the last video request. Music, pictures and subtitles never count. Over the
+  limit the video request gets `409 stream_limit`; boot.js spots it (fetch,
+  hls.js XHR or a failed `<video>`) and the app shows "All your screens are in
+  use" (ScreensInUse.jsx) with a Stop button per device
+  (`POST /api/plans/streams/stop`). `GET /api/plans/streams` lists them.
+- **Games.** Feature `games.full` ("Every console, on any screen"): when gated,
+  other plans can't download PS2, GameCube/Wii, PS3, Switch, PSP, 3DS, Vita or
+  Xbox games (`402`), launch on the host PC or start a host stream. The retro
+  systems keep playing in the browser. Big Picture and game details say so
+  before anything downloads.
+- Admins and their household profiles are never limited, and plans never
+  grant the host's library (still per-person grants).
+- Set up on 2026-10-17: Free (1 screen, 2 for the first 90 days, 2 profiles,
+  retro games), **Plus** (id `pro`, 3 screens, every console, 4 profiles) and
+  **Family** (5 screens, every console, 8 profiles) are drafts until they
+  have prices; Unlimited stays private for the household. `games.full` is
+  gated to Plus, Family and Unlimited.
+
+## Local cache (server/hotcache.ts)
+
+The library is on Google Drive, so a first play fetches from Google (7 s for
+the first MB of an episode, measured). The hot cache keeps a copy on a fast
+local disk of each film or episode someone starts (after its first 45 s, so
+it never competes with the start of playback), the next episode in the same
+folder, each game downloaded to play, and each game added through Add games.
+Reads use the copy when its size and modified time still match the original
+(a seek into a cached episode: 0.22 s). LRU eviction at the size limit, never
+one file over a third of it, always 10 GB free on its disk. Settings in
+`hot-cache.json` (persist dir): on this host `H:\SaveStateCache`, 30 GB
+(H: is an SSD). Admin panel: Cloud Drives > Local cache; API
+`/api/admin/hot-cache` (GET, PUT `{dir,maxGb,enabled}`, POST `/clear`).
+Files on a local disk (or a NAS's own disks) are never copied.
+
 ## Changing the frontend
 
 `build.mjs` ends by parsing every chunk; a patch that breaks one stops the

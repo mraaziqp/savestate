@@ -24,6 +24,8 @@ import { registerFilesLibrary, mediaRootsFor } from "./server/files-library.ts";
 import { registerWatch } from "./server/watch.ts";
 import { createAccess } from "./server/access.ts";
 import { createTiers } from "./server/tiers.ts";
+import { createPlanLimits } from "./server/planlimits.ts";
+import { createHotCache } from "./server/hotcache.ts";
 import { createGameMode } from "./server/game-mode.ts";
 import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
@@ -5827,6 +5829,32 @@ async function startServer() {
   // Roles, library grants and plan gates, for every route (server/access.ts).
   app.use(access.guard);
   tiers.register(app);
+
+  // Screens at once and which games download, per plan (server/planlimits.ts).
+  const planLimits = createPlanLimits({
+    callerOf: (req) => access.callerOf(req),
+    tierOf: (c) => tiers.tierOf(c), allowed: (c, k) => tiers.allowed(c, k),
+    tiersWith: (k) => tiers.tiersWith(k), moreScreens: (n) => tiers.moreScreens(n),
+    gamePlatform: async (id) => {
+      let g: any = null;
+      if (dbConnected && pool) {
+        try { g = (await pool.query("SELECT platform, relative_path, title, core_id FROM games WHERE id::text=$1", [id])).rows[0] ?? null; } catch { /* memory copy below */ }
+      }
+      if (!g) {
+        const m: any = mem.games.find((x: any) => x.id === id);
+        if (m) g = { platform: m.platform, relative_path: m.relativePath, title: m.title, core_id: m.coreId };
+      }
+      return g ? inferPlatformFromRecord(g.platform, g.relative_path, g.title, g.core_id) : null;
+    },
+    log: (level, msg) => log(level, msg, "plans"),
+  });
+  app.use(planLimits.streamGuard);
+  app.use(planLimits.gameGuard);
+  planLimits.register(app);
+
+  // Local copies of films and games played from Google Drive (server/hotcache.ts).
+  const hotCache = createHotCache({ persistDir: PERSIST_DIR, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "hot-cache") });
+  hotCache.register(app);
 
   // Receipts for everything that finishes, and live progress (server/receipts.ts).
   initReceipts({ query: dbRows, dbUp: () => !!pool && dbConnected, callerOf: (req) => access.callerOf(req), log: (level, msg) => log(level, msg, "activity") }).register(app);
@@ -19960,7 +19988,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     try {
       await mkdir(path.dirname(u.dest), { recursive: true });
       // The library is usually on another drive (the Google Drive folder): copy, then remove the temp file.
-      try { await renameFile(u.tmp, u.dest); } catch { await copyFile(u.tmp, u.dest); await unlink(u.tmp).catch(() => {}); }
+      try { await renameFile(u.tmp, u.dest); } catch {
+        await copyFile(u.tmp, u.dest);
+        // Still on this PC: keep it as the local copy, so the first play doesn't fetch it back from Drive.
+        if (hotCache.isCloud(u.dest)) await hotCache.adopt(u.tmp, u.dest, "added game");
+        await unlink(u.tmp).catch(() => {});
+      }
       intakes.delete(req.params.id);
       const config = await getVaultConfig();
       const g = await addRomToLibrary(u.dest, u.filename, config.root_path || path.dirname(path.dirname(u.dest)), u.platform);
@@ -20146,7 +20179,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // Content-Length larger than the body for ranges past EOF, which stalls
     // or corrupts a download that resumes. It also adds ETag/Last-Modified,
     // so a device that already has the ROM gets a 304 instead of all of it.
-    res.sendFile(resolvedRom.absolutePath, {
+    // A game on Google Drive is kept on this PC after its first download.
+    const romSource = hotCache.pick(resolvedRom.absolutePath);
+    if (romSource === resolvedRom.absolutePath) hotCache.warm(resolvedRom.absolutePath, "game");
+    res.sendFile(romSource, {
       dotfiles: "allow",
       cacheControl: false,
       headers: {
@@ -20381,6 +20417,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     let romStat: Awaited<ReturnType<typeof stat>>;
     try { romStat = await stat(resolved.absolutePath); } catch { return res.status(404).json({ error: "ROM file missing" }); }
     const fileSize = romStat.size;
+    const romSource = hotCache.pick(resolved.absolutePath, romStat);
+    if (romSource === resolved.absolutePath) hotCache.warm(resolved.absolutePath, "game");
 
     const disposition = `attachment; filename="${fileName.replace(/[^\x20-\x7E]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
 
@@ -20400,7 +20438,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         "Cache-Control":       "no-cache, no-store",
         "X-Accel-Buffering":   "no",
       });
-      createReadStream(resolved.absolutePath, { start, end, highWaterMark: 4 * 1024 * 1024 }).pipe(res);
+      createReadStream(romSource, { start, end, highWaterMark: 4 * 1024 * 1024 }).pipe(res);
     } else {
       res.setHeader("Content-Disposition", disposition);
       res.setHeader("Content-Type",        "application/octet-stream");
@@ -20408,7 +20446,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       res.setHeader("Accept-Ranges",       "bytes");
       res.setHeader("Cache-Control",       "no-cache, no-store");
       res.setHeader("X-Accel-Buffering",   "no");
-      createReadStream(resolved.absolutePath, { highWaterMark: 4 * 1024 * 1024 }).pipe(res);
+      createReadStream(romSource, { highWaterMark: 4 * 1024 * 1024 }).pipe(res);
     }
 
     log("INFO", `ROM download started: ${fileName} (${(fileSize / 1024 / 1024).toFixed(1)} MB)`, "client-download");
@@ -21505,7 +21543,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         "Content-Type": mime,
         "Cache-Control": "public, max-age=0, no-transform",
       });
-      createReadStream(target, { start, end, highWaterMark: 2 * 1024 * 1024 }).pipe(res);
+      if (start === 0) void hotCache.played(target);
+      createReadStream(hotCache.pick(target, s), { start, end, highWaterMark: 2 * 1024 * 1024 }).pipe(res);
       return;
     }
 
@@ -21514,8 +21553,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.setHeader("Accept-Ranges", "bytes");
     if (VIDEO_EXT.has(ext)) {
       res.setHeader("Cache-Control", "public, max-age=0, no-transform");
+      void hotCache.played(target);
     }
-    createReadStream(target, { highWaterMark: 2 * 1024 * 1024 }).pipe(res);
+    createReadStream(VIDEO_EXT.has(ext) ? hotCache.pick(target, s) : target, { highWaterMark: 2 * 1024 * 1024 }).pipe(res);
   });
 
   // ── Video format & capability probing ────────────────────────────────────
@@ -21647,7 +21687,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "-hide_banner", "-loglevel", "error",
       ...(needsVideoTranscode ? encA.pre : []),
       ...(startSec > 0 ? ["-ss", String(startSec)] : []),
-      "-i", target,
+      "-i", hotCache.pick(target),
       "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
     ];
 
@@ -22271,7 +22311,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         "-hide_banner", "-loglevel", "error",
         ...encB.pre,
         "-ss", String(segStart),
-        "-i", target,
+        "-i", hotCache.pick(target),
         "-t", String(sb.dur),
         "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
         ...encB.post,
@@ -22374,7 +22414,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "-hide_banner", "-loglevel", "error",
       ...enc.pre,
       "-ss", String(startSec),
-      "-i", target,
+      "-i", hotCache.pick(target),
       "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
       ...post,
       "-force_key_frames", `expr:gte(t,n_forced*${HLS_SEGMENT_SECONDS})`,
@@ -22558,6 +22598,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const st = await stat(target);
       if (!st.isFile()) return res.status(400).json({ error: "Not a file" });
     } catch { return res.status(404).json({ error: "Media file not found" }); }
+    void hotCache.played(target);
 
     const fmt = await probeVideoFormat(target);
     const duration = fmt.duration > 0 ? fmt.duration : (_mediaDurationCache.get(target)?.duration || 0);
@@ -23536,7 +23577,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const ff = spawn(FFMPEG_BIN, [
           "-hide_banner", "-loglevel", "error", "-y",
           "-vn", "-an", "-dn",
-          "-i", target,
+          "-i", hotCache.pick(target),
           "-map", `0:s:${track}`,
           "-c:s", "webvtt", "-f", "webvtt", tmp,
         ], { stdio: ["ignore", "ignore", "pipe"] });

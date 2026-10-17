@@ -62,7 +62,7 @@ async function robust(url, init, ctl) {
     try {
       const r = await fetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token()}` } });
       if (r.ok || (r.status >= 400 && r.status < 500 && r.status !== 408 && r.status !== 429)) return r;
-      throw new Error(`HTTP ${r.status}`);
+      throw new Error(window.__nxHttpText?.(r.status) ?? `HTTP ${r.status}`);
     } catch (e) {
       if (e.paused) throw e;
       const wait = Math.min(60, 2 ** Math.min(attempt, 6));

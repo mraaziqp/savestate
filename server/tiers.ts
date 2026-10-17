@@ -56,11 +56,15 @@ export const FEATURES: FeatureDef[] = [
   { key: "games.library", label: "Game library", category: "Games",
     description: "Browse and launch console games with art, playtime and saves.",
     tabs: ["library", "consoles"], api: [/^\/api\/games\/[^/]+\/(download|download-rom)/, "/api/games/launch"] },
+  { key: "games.full", label: "Every console, on any screen", category: "Games",
+    description: "PS2, GameCube, PS3, Switch and PSP games through the desktop app, and playing on the host PC from a phone or TV. Without it, the retro systems play in the browser.",
+    // Downloads of those games are checked per game (planlimits.ts); these are whole routes.
+    tabs: [], api: [/^\/api\/games\/launch$/, /^\/api\/stream\/(start|hls\/start)$/] },
   { key: "games.pc", label: "PC games", category: "Games",
     description: "Steam, Epic and GOG libraries in one place.",
     tabs: ["pcgames"], api: ["/api/pc-games/", "/api/steam/"] },
-  { key: "games.multiplayer", label: "Multiplayer & remote play", category: "Games",
-    description: "Netplay lobbies, co-op sessions and streaming a game to another device.",
+  { key: "games.multiplayer", label: "Multiplayer", category: "Games",
+    description: "Netplay lobbies and co-op sessions with friends.",
     tabs: ["handheld"], api: ["/api/multiplayer/", "/api/coop/", "/api/remote-play/", /^\/api\/stream\/(start|hls\/start)$/] },
   { key: "games.saves", label: "Cloud saves", category: "Games",
     description: "Save states and progress that follow you between devices.",
@@ -98,6 +102,8 @@ export type Tier = {
   storageLimitGb: number | null; maxStreams: number | null; maxQuality: string | null;
   /** Household profiles an account may add (null: no limit). */
   maxProfiles: number | null;
+  /** A welcome allowance: introStreams at once for the first introDays after sign-up. */
+  introStreams: number | null; introDays: number | null;
   checkoutUrl: string; perks: string[];
 };
 type Gate = { gated: boolean; tiers: string[] };
@@ -132,6 +138,8 @@ const SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS idx_plan_upgrade_requests_status ON plan_upgrade_requests(status, created_at DESC);
   ALTER TABLE plan_tiers ADD COLUMN IF NOT EXISTS max_profiles INTEGER;
+  ALTER TABLE plan_tiers ADD COLUMN IF NOT EXISTS intro_streams INTEGER;
+  ALTER TABLE plan_tiers ADD COLUMN IF NOT EXISTS intro_days INTEGER;
 `;
 
 // users.user_tier already holds free / pro / unlimited for the existing
@@ -140,13 +148,13 @@ const SCHEMA = `
 const SEED: Tier[] = [
   { id: "free", name: "Free", tagline: "Everything you need to get started", priceCents: 0, currency: "ZAR", period: "free",
     color: "#94a3b8", badge: "", sortOrder: 0, isDefault: true, isPublic: true, storageLimitGb: null, maxStreams: null,
-    maxQuality: null, maxProfiles: null, checkoutUrl: "", perks: [] },
+    maxQuality: null, maxProfiles: null, introStreams: null, introDays: null, checkoutUrl: "", perks: [] },
   { id: "pro", name: "Pro", tagline: "", priceCents: 0, currency: "ZAR", period: "month",
     color: "#22d3ee", badge: "", sortOrder: 1, isDefault: false, isPublic: false, storageLimitGb: null, maxStreams: null,
-    maxQuality: null, maxProfiles: null, checkoutUrl: "", perks: [] },
+    maxQuality: null, maxProfiles: null, introStreams: null, introDays: null, checkoutUrl: "", perks: [] },
   { id: "unlimited", name: "Unlimited", tagline: "", priceCents: 0, currency: "ZAR", period: "month",
     color: "#a855f7", badge: "", sortOrder: 2, isDefault: false, isPublic: false, storageLimitGb: null, maxStreams: null,
-    maxQuality: null, maxProfiles: null, checkoutUrl: "", perks: [] },
+    maxQuality: null, maxProfiles: null, introStreams: null, introDays: null, checkoutUrl: "", perks: [] },
 ];
 
 const rowToTier = (r: any): Tier => ({
@@ -158,6 +166,8 @@ const rowToTier = (r: any): Tier => ({
   maxStreams: r.max_streams == null ? null : Number(r.max_streams),
   maxQuality: r.max_quality || null, checkoutUrl: r.checkout_url ?? "",
   maxProfiles: r.max_profiles == null ? null : Number(r.max_profiles),
+  introStreams: r.intro_streams == null ? null : Number(r.intro_streams),
+  introDays: r.intro_days == null ? null : Number(r.intro_days),
   perks: Array.isArray(r.perks) ? r.perks.map(String) : [],
 });
 
@@ -362,6 +372,8 @@ export function createTiers(deps: TiersDeps) {
       intOrNull("storageLimitGb", "storage_limit_gb", 1_000_000);
       intOrNull("maxStreams", "max_streams", 100);
       intOrNull("maxProfiles", "max_profiles", 50);
+      intOrNull("introStreams", "intro_streams", 100);
+      intOrNull("introDays", "intro_days", 3650);
       if (b.maxQuality === null || b.maxQuality === "") out.max_quality = null;
       else if (["480p", "720p", "1080p", "4k"].includes(b.maxQuality)) out.max_quality = b.maxQuality;
       if (typeof b.checkoutUrl === "string") {
@@ -498,5 +510,15 @@ export function createTiers(deps: TiersDeps) {
     });
   }
 
-  return { register, featureGate, allowed, tierOf, load, tierIds: () => state.tiers.map((t) => t.id), tierById: (id: string) => state.tiers.find((t) => t.id === id), ensureSchema };
+  /** Names of the plans on offer that include a feature. */
+  const tiersWith = (key: string) => {
+    const g = state.gates[key];
+    const ids = g?.gated ? g.tiers : state.tiers.map((t) => t.id);
+    return state.tiers.filter((t) => ids.includes(t.id) && t.isPublic && !t.isDefault).map((t) => t.name);
+  };
+  /** Names of the plans on offer that play on more than this many screens. */
+  const moreScreens = (limit: number) =>
+    state.tiers.filter((t) => t.isPublic && !t.isDefault && (t.maxStreams == null || t.maxStreams > limit)).map((t) => t.name);
+
+  return { register, featureGate, allowed, tierOf, tiersWith, moreScreens, load, tierIds: () => state.tiers.map((t) => t.id), tierById: (id: string) => state.tiers.find((t) => t.id === id), ensureSchema };
 }

@@ -47,6 +47,7 @@ const GUIDES = [
         <div className="nxg-sec"><h4>3. Find your way around</h4>
           <p>The menu on the left (or <b>More</b> at the bottom on a phone) has three parts: <b>Media</b> (films, music, books, photos), <b>Games</b> and <b>System &amp; tools</b>. Search is at the top of most pages.</p></div>
         <div className="nxg-tip">Something not working? See <b>Troubleshooting</b> at the bottom of this list.</div>
+        <button className="nxa-btn sm" style={{ marginTop: 10 }} onClick={() => { try { localStorage.setItem("nx_get_started", "1"); } catch { /* private mode */ } location.reload(); }}><Icon name="star" size={13} /> Show the Get started steps again</button>
       </>
     ),
   },
@@ -198,7 +199,13 @@ const GUIDES = [
             <li>A Bluetooth controller paired with your device works as the console's controller; on a phone, Moonlight also has on-screen controls.</li>
           </ol></div>
         <div className="nxg-sec"><h4>Away from home</h4>
-          <p>Moonlight reaches the host directly. Outside the host's Wi-Fi the host has to allow it once (see <b>Streaming with Sunshine</b> for the host); then it works anywhere with a steady connection. 15 Mbps or more gives a sharp picture.</p></div>
+          <p>Moonlight reaches the host directly, so away from the host's Wi-Fi both ends join the same private network with <b>Tailscale</b> (free):</p>
+          <ol>
+            <li>Install <b>Tailscale</b> on your phone, tablet or PC (Google Play, the App Store or <C>tailscale.com</C>).</li>
+            <li>Sign in with your own account, then accept the invite the host sends you from Tailscale (they share the host PC with you once).</li>
+            <li>In Moonlight, tap <b>+</b> and enter the host PC's Tailscale address (the host can tell you; it starts with 100.).</li>
+          </ol>
+          <p>Then it works anywhere with a steady connection. 15 Mbps or more gives a sharp picture.</p></div>
       </>
     ),
   },
@@ -267,10 +274,14 @@ const GUIDES = [
   },
   {
     id: "plans", group: "Your account", title: "Plans & access", icon: "star",
-    words: "plans pricing upgrade payment payfast access request library",
+    words: "plans pricing upgrade payment payfast access request library screens streams devices limit stop watching free family plus",
     body: (
       <>
-        <p className="lead">Your plan decides which sections you can use. Pay securely with PayFast in <b>Plans &amp; Pricing</b>.</p>
+        <p className="lead">Your plan decides how many screens can watch at once and which games you can play. Pay securely with PayFast in <b>Plans &amp; Pricing</b>.</p>
+        <div className="nxg-sec"><h4>Screens</h4>
+          <p>Each plan plays films and shows on a set number of devices at the same time (music doesn't count). New members get an extra screen for their first three months. When every screen is taken, SaveState shows which devices are watching and lets you stop one of them from where you are.</p></div>
+        <div className="nxg-sec"><h4>Games</h4>
+          <p>Every plan plays the retro systems (NES, SNES, Game Boy, Mega Drive, PlayStation 1 and more) right in the browser, on any device. PS2, GameCube, PS3, Switch and PSP need the desktop app or the host PC, which come with the paid plans.</p></div>
         <p className="nxg-sec">The host's own films and games library is shared person by person by an admin; ask for access from the page that tells you it's private.</p>
         <Go tab="plans">Open Plans &amp; Pricing</Go>
       </>
@@ -368,8 +379,8 @@ const GUIDES = [
     ),
   },
   {
-    id: "host-drive", group: "Running the host", admin: true, title: "Google Drive backups & upload speed", icon: "cloud",
-    words: "cloud drives google drive upload backup offload free space speed bandwidth limit verify",
+    id: "host-drive", group: "Running the host", admin: true, title: "Google Drive, upload speed & the local cache", icon: "cloud",
+    words: "cloud drives google drive upload backup offload free space speed bandwidth limit verify cache local ssd nas linux install",
     body: (
       <>
         <ol className="nxg-sec">
@@ -379,6 +390,10 @@ const GUIDES = [
         </ol>
         <div className="nxg-sec"><h4>Upload speed</h4>
           <p>Uploads go flat out when nobody is using the site and from 01:00 to 07:00. While someone browses they use 70% of the line (learned from its real speed); while someone watches or listens they use 40%, leaving the rest for the stream; during a game on the host, almost paused. Activity log &gt; Happening now shows the current limit and an honest time left.</p></div>
+        <div className="nxg-sec"><h4>Local cache</h4>
+          <p>Films and games on Google Drive are fetched from Google the first time, which can take a few seconds to start. <b>Local cache</b> (at the bottom of Cloud Drives) keeps a copy of each film, episode and game someone plays on a fast disk of this PC, copies the next episode ahead, and keeps games added through Add games. The next play starts at once. Choose its folder (an SSD is best) and size there; the oldest copies make room when it's full, and it always leaves 10 GB free on its disk.</p></div>
+        <div className="nxg-sec"><h4>Hosting on a NAS</h4>
+          <p>SaveState also runs on a NAS or Linux box: run <C>curl -fsSL https://savestate.co.za/install.sh | bash</C> on it and follow the prompts. Point the library at the NAS's own folders (they're local there, so they need no cache). Games that need the host PC's screen (Stream from the host, Sunshine) still need a Windows PC; everything in the browser works from the NAS.</p></div>
         <Go tab="cloud">Open Cloud Drives</Go>
       </>
     ),

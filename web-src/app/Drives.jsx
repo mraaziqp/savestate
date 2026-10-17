@@ -5,6 +5,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef, Suspense, laz
 import { useStyles, api, Icon, Note, when } from "./lib.jsx";
 import { loadOldCloudHub } from "old-cloud";
 import { uploadToDrive } from "./uploader.js";
+import { HotCache } from "./HotCache.jsx";
 
 const OldCloudHub = lazy(loadOldCloudHub);
 const gb = (n) => (n == null ? "?" : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round((n || 0) / 1024))} KB`);
@@ -606,6 +607,8 @@ export function DrivesPage() {
           </tbody></table>
         </div>
       )}
+
+      <HotCache />
 
       <div className="nxa-card">
         <button className="nxa-link" onClick={() => setShowOld((v) => !v)}>{showOld ? "Hide" : "Show"} advanced cloud tools (storage autopilot, reclaim, categories)</button>

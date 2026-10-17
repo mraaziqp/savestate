@@ -78,10 +78,19 @@
     if (!t) return showAdmin(false);
     try {
       const r = await fetch("/api/plans/me", { headers: { Authorization: `Bearer ${t}` } });
-      if (r.ok) showAdmin(!!(await r.json()).isAdmin);
+      if (r.ok) {
+        const me = await r.json();
+        showAdmin(!!me.isAdmin);
+        // What this plan includes, for screens that check before they start
+        // something (Big Picture won't download a PS2 game a plan can't play).
+        window.__nxPlanFeatures = me.features ?? null;
+        try { localStorage.setItem("nx_plan_features", JSON.stringify(me.features ?? {})); } catch { /* private mode */ }
+      }
       else if (r.status === 401) showAdmin(false);
     } catch { /* offline: keep the last answer */ }
   }
+
+  try { window.__nxPlanFeatures = JSON.parse(localStorage.getItem("nx_plan_features") || "null"); } catch { /* private mode */ }
 
   // ── Household profiles ──────────────────────────────────────────────────
   // Inside a profile the menu offers only the tabs it may open (the shell
@@ -196,6 +205,18 @@
 
   // Other parts of the app (the music player) show notices the same way.
   window.__nxNotice = (id, text) => notice(id, text);
+  // Plain words for an HTTP status. Screens used to show "HTTP 403" or
+  // "Server returned 500"; build.mjs swaps those for this.
+  window.__nxHttpText = (s) => (s === 0 ? "Can't reach the server. Check your connection and try again."
+    : s === 401 ? "Your sign-in has expired. Please sign in again."
+    : s === 402 ? "That's part of a paid plan. See Plans & Pricing."
+    : s === 403 ? "You don't have access to that yet. Ask the host, or check your plan."
+    : s === 404 ? "That isn't available any more. Refresh the page and try again."
+    : s === 409 ? "That changed while you were working. Refresh and try again."
+    : s === 413 ? "That file is too big to send."
+    : s === 429 ? "Too many tries in a row. Wait a moment and try again."
+    : s >= 500 ? "The server had a problem. Please try again in a moment."
+    : `That didn't work (code ${s}). Please try again.`);
 
   // ── Refusals ────────────────────────────────────────────────────────────
   // Wraps whatever fetch is current when the app starts calling it; the app's
@@ -203,7 +224,7 @@
   const inner = window.fetch.bind(window);
   window.fetch = async function (input, init) {
     const res = await inner(input, init);
-    if (res.status !== 402 && res.status !== 401 && res.status !== 403) return res;
+    if (res.status !== 402 && res.status !== 401 && res.status !== 403 && res.status !== 409) return res;
     try {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (!url || !url.includes("/api/")) return res;
@@ -214,6 +235,8 @@
           label: "See plans",
           run: () => window.dispatchEvent(new CustomEvent("nexus:navigate-tab", { detail: { tab: "plans" } })),
         });
+      } else if (res.status === 409 && body?.code === "stream_limit") {
+        screensTaken(body);
       } else if (res.status === 403 && body?.error === "time_up") {
         window.dispatchEvent(new CustomEvent("nexus:time-up", { detail: { timeUp: true, message: body.message } }));
       } else if (res.status === 401 && body?.code === "session_expired" && read()) {
@@ -224,6 +247,65 @@
     } catch { /* never break the request over a notice */ }
     return res;
   };
+
+  // ── Screens in use ──────────────────────────────────────────────────────
+  // A film that won't start because the plan's screens are taken: the server
+  // answers 409 stream_limit. The player asks through hls.js (XHR) or a plain
+  // <video> (which only reports "error"), so both are watched here and the
+  // app's "All your screens are in use" panel (ScreensInUse.jsx) opens.
+  let screensAt = 0;
+  function screensTaken(body) {
+    if (Date.now() - screensAt < 4000) return;
+    screensAt = Date.now();
+    window.dispatchEvent(new CustomEvent("nexus:stream-limit", { detail: body ?? {} }));
+  }
+  const VIDEO = /\/api\/(media\/(stream|file|hls\/)|stream\/(gdrive|media)\/)/;
+  try {
+    const open = XMLHttpRequest.prototype.open;
+    const send = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (method, url) { this.__nxUrl = String(url ?? ""); return open.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function () {
+      if (this.__nxUrl && VIDEO.test(this.__nxUrl)) {
+        this.addEventListener("loadend", () => {
+          if (this.status !== 409) return;
+          let body = null;
+          try { if (!this.responseType || this.responseType === "text") body = JSON.parse(this.responseText); } catch { /* binary */ }
+          screensTaken(body);
+        });
+      }
+      return send.apply(this, arguments);
+    };
+  } catch { /* no XHR */ }
+  // A <video> that fails: ask whether this device was refused a screen.
+  document.addEventListener("error", async (e) => {
+    const v = e.target;
+    if (!(v instanceof HTMLVideoElement) || !VIDEO.test(v.currentSrc || v.src || "")) return;
+    const t = read();
+    if (!t) return;
+    try {
+      const r = await fetch("/api/plans/streams", { headers: { Authorization: `Bearer ${t}` } });
+      if (!r.ok) return;
+      const s = await r.json();
+      const others = (s.active ?? []).filter((x) => !x.thisDevice);
+      if (s.limit != null && others.length >= s.limit && !(s.active ?? []).some((x) => x.thisDevice)) screensTaken({ limit: s.limit });
+    } catch { /* offline */ }
+  }, true);
+
+  // ── Games kept for offline play ─────────────────────────────────────────
+  // Big Picture keeps downloaded games in this browser's private storage
+  // (OPFS "nexus-roms"). Unless the site's storage is marked persistent the
+  // browser may delete it when the disk runs low, and a game that played
+  // offline yesterday would download again. Asked only once games are kept,
+  // so nobody is asked for storage they don't use.
+  setTimeout(async () => {
+    try {
+      if (!navigator.storage?.persist || !navigator.storage.getDirectory || await navigator.storage.persisted()) return;
+      const root = await navigator.storage.getDirectory();
+      const roms = await root.getDirectoryHandle("nexus-roms").catch(() => null);
+      if (!roms) return;
+      for await (const _ of roms.keys()) { await navigator.storage.persist(); break; }
+    } catch { /* no OPFS */ }
+  }, 15_000);
 
   mirror();
   refresh();

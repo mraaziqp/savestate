@@ -8,6 +8,8 @@
 //   MiniGames     Games > Mini Games: agent-builder games, upload and publish keys
 //   Guides        Help & guides: how to set up and use everything
 //   AddGames      Games > Add games (admins): ROM files and folders into the library
+//   GetStarted    after sign-up: profile, then join / connect / host / explore
+//   ScreensInUse  "all your screens are in use" / "part of a paid plan", over the app
 export { Welcome } from "./Welcome.jsx";
 export { AuthForm } from "./AuthForm.jsx";
 export { PlansPage } from "./Plans.jsx";
@@ -22,3 +24,5 @@ export { ActivityLog } from "./ActivityLog.jsx";
 export { MiniGames } from "./MiniGames.jsx";
 export { Guides } from "./Guides.jsx";
 export { AddGames } from "./AddGames.jsx";
+export { GetStarted } from "./GetStarted.jsx";
+export { ScreensInUse } from "./ScreensInUse.jsx";

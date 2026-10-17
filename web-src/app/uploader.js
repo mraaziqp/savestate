@@ -49,7 +49,7 @@ async function withRetry(run, signal) {
     if (r.status >= 200 && r.status < 300) return r;
     const temporary = r.status === 0 || r.status === 408 || r.status === 429 || r.status >= 500;
     if (!temporary || i >= TRIES) {
-      throw new Error(r.data?.error || r.data?.message || (r.status === 0 ? "The connection kept dropping. Try again when it's steadier." : `Upload failed (${r.status})`));
+      throw new Error(r.data?.error || r.data?.message || (r.status === 0 ? "The connection kept dropping. Try again when it's steadier." : (window.__nxHttpText?.(r.status) ?? `Upload failed (${r.status})`)));
     }
     await pause(wait, signal);
     wait = Math.min(30_000, wait * 2);

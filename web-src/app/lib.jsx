@@ -36,7 +36,11 @@ export async function api(url, opts = {}) {
   if (!r.ok) {
     const fallback = r.status === 429 ? "Too many attempts. Wait a few minutes and try again."
       : r.status >= 500 ? "The server had a problem. Please try again."
-      : `Request failed (${r.status})`;
+      : r.status === 401 ? "Your sign-in has expired. Please sign in again."
+      : r.status === 402 ? "That's part of a paid plan. See Plans & Pricing."
+      : r.status === 403 ? "You don't have access to that yet. Ask the host, or check your plan."
+      : r.status === 404 ? "That isn't available any more. Refresh the page and try again."
+      : `That didn't work (code ${r.status}). Please try again.`;
     throw Object.assign(new Error(data?.message ?? data?.error ?? fallback), { status: r.status, field: data?.field, data });
   }
   return data;

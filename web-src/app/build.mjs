@@ -130,13 +130,15 @@ const before = shell;
     `NxMiniGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MiniGames}))),` +
     `NxGuides=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Guides}))),` +
     `NxAddGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AddGames}))),` +
+    `NxGetStarted=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GetStarted}))),` +
+    `NxScreens=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ScreensInUse}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
@@ -530,6 +532,11 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ch = patch(ch, "big picture heavy games need the app", "!nxCanBrowser(d.platform)",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);d&&(R?",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!R&&!re.has(d.id)&&!nxCanBrowser(d.platform)&&!await _())throw new Error(`${String(d.platform).toUpperCase()} can't run in a browser. On a PC, install the SaveState desktop app once (Get the App); on a phone, open the game in Games and choose Stream from the host PC.`);d&&(R?");
+  // A plan without "every console" plays the retro systems; for a PS2 game
+  // it said nothing until the download was refused. Now it says so first.
+  ch = patch(ch, "big picture checks the plan", "nexus:plan-needed",
+    "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!R&&",
+    'onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!R&&!nxCanBrowser(d.platform)&&window.__nxPlanFeatures?.["games.full"]===!1){window.dispatchEvent(new CustomEvent("nexus:plan-needed",{detail:{message:`${String(d.platform).toUpperCase()} games play through the SaveState desktop app, which is part of a paid plan. Your plan plays the retro systems (NES, SNES, Game Boy, Mega Drive, PlayStation 1 and more) right in the browser.`}}));return}if(d&&!R&&');
   // Big Picture knew each game only by id, so a downloaded ROM was saved as
   // roms/<platform>/<id> (no name, no extension) and handed to the player
   // without one. Arcade emulators find the game by its file name (mslugx.zip)
@@ -574,6 +581,10 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   gd = patch(gd, "game details play options order", '"nx-playopts rounded-2xl',
     '"rounded-2xl border border-white/10 bg-white/[0.03] p-3 space-y-2",children:[(0,e.jsx)("p",{className:"text-[10px] font-black uppercase tracking-widest text-nexus-muted px-0.5",children:"How do you want to play?"})',
     '"nx-playopts rounded-2xl border border-white/10 bg-white/[0.03] p-3 space-y-2",children:[(0,e.jsx)("p",{className:"text-[10px] font-black uppercase tracking-widest text-nexus-muted px-0.5",children:"How do you want to play?"})');
+  // Members whose plan plays only the retro systems hear it before choosing.
+  gd = patch(gd, "game details plan note", "nx-plan-note",
+    'children:"How do you want to play?"})',
+    'children:"How do you want to play?"}),window.__nxPlanFeatures?.["games.full"]===!1&&!be(t.platform)&&(0,e.jsx)("p",{className:"nx-plan-note text-[11.5px] leading-snug text-amber-200/90 px-0.5",children:`${(t.platform??"This system").toUpperCase()} games are part of a paid plan (see Plans & Pricing). Your plan plays the retro systems right in the browser.`})');
   gd = patch(gd, "game details recommends what works (PC)", `&&!(${BROWSER_FIRST})&&(0,e.jsx)("span",{className:"text-[8.5px]`,
     '!(f&&!be(t.platform))&&(0,e.jsx)("span",{className:"text-[8.5px]',
     `!(f&&!be(t.platform))&&!(${BROWSER_FIRST})&&(0,e.jsx)("span",{className:"text-[8.5px]`);
@@ -716,6 +727,34 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   if (at < 0) throw new Error("index.html: no module script to load the boot script ahead of");
   html = html.slice(0, at) + tag + "\n    " + html.slice(at);
   writeFileSync(file, html);
+}
+
+// 4b. Error messages people can read. Screens built their errors from the
+//     status code ("HTTP 403", "Server returned 500", "Server 404"); each of
+//     those now asks window.__nxHttpText (boot.js) for a sentence.
+{
+  const RAW = /`(?:Server returned|Server|HTTP|Download failed:) ?\$\{([A-Za-z_$][\w$]*)\.status\}`/g;
+  let swapped = 0;
+  for (const f of readdirSync(assets).filter((n) => n.endsWith(".js") && !/^Nexus(App|Boot)-/.test(n))) {
+    const file = path.join(assets, f);
+    const text = readFileSync(file, "utf8");
+    if (!RAW.test(text)) continue;
+    RAW.lastIndex = 0;
+    const next = text.replace(RAW, (_m, v) => { swapped++; return `(window.__nxHttpText?window.__nxHttpText(${v}.status):"Error "+${v}.status)`; });
+    writeFileSync(file, next);
+  }
+  // "Launch failed (HTTP 500)", "Update check failed: HTTP 404": the same
+  // sentence, with the old wording kept for when boot.js isn't there.
+  const LABELLED = /`((?:Chunk \$\{[\w$]+\} )?[A-Za-z][^`$\\]*?)(?: \(|: )HTTP \$\{([A-Za-z_$][\w$]*)\.status\}(\)?\.?)`/g;
+  for (const f of readdirSync(assets).filter((n) => n.endsWith(".js") && !/^NexusBoot-/.test(n))) {
+    const file = path.join(assets, f);
+    const text = readFileSync(file, "utf8");
+    if (!LABELLED.test(text)) continue;
+    LABELLED.lastIndex = 0;
+    const next = text.replace(LABELLED, (_m, words, v) => { swapped++; return `(window.__nxHttpText?window.__nxHttpText(${v}.status):\`${words} (\${${v}.status})\`)`; });
+    writeFileSync(file, next);
+  }
+  if (swapped) console.log(`plain error messages: ${swapped} replaced`);
 }
 
 // 5. Every chunk must still parse. A patch that lands mid-expression (a
