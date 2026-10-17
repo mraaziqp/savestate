@@ -40,8 +40,13 @@ $apps += [pscustomobject]@{
   'image-path'  = $icon
 }
 $cfg.apps = $apps
-$cfg | ConvertTo-Json -Depth 6 | Set-Content $appsFile -Encoding UTF8
-Restart-Service SunshineService
+# Without a byte-order mark: Windows PowerShell's "UTF8" adds one, and
+# Sunshine then failed to read its app list and didn't start.
+[IO.File]::WriteAllText($appsFile, ($cfg | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+Restart-Service SunshineService -ErrorAction SilentlyContinue
+Start-Sleep 3
+if ((Get-Service SunshineService).Status -ne 'Running') { Start-Service SunshineService }
+Write-Host ("Sunshine service: " + (Get-Service SunshineService).Status)
 Write-Host ''
 Write-Host 'Done. In Moonlight, pick this PC and then "SaveState".'
 Write-Host 'The first time, sign in to SaveState in the window that opens (once).'

@@ -139,6 +139,10 @@ const RULES: Rule[] = [
   ["GET", /^\/api\/profiles\/[^/]+\/saves/, "self"],
 
   // ── The host's games, BIOS files and PC ────────────────────────────────
+  // Adding files to the host's library is for its admins (any signed-in
+  // user could write into it through upload-rom until 2026-10-17).
+  ["*", "/api/games/intake/", "admin"],
+  ["MUT", "/api/games/upload-rom", "admin"],
   ["MUT", "/api/games/request-setup", "member"],
   ["MUT", "/api/roms/request", "member"],
   ["*", "/api/games/recommendations", "member"],

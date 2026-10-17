@@ -7,6 +7,7 @@
 //   EmulationTab  Games > Emulation Setup: the setup guide, plus host tools for admins
 //   MiniGames     Games > Mini Games: agent-builder games, upload and publish keys
 //   Guides        Help & guides: how to set up and use everything
+//   AddGames      Games > Add games (admins): ROM files and folders into the library
 export { Welcome } from "./Welcome.jsx";
 export { AuthForm } from "./AuthForm.jsx";
 export { PlansPage } from "./Plans.jsx";
@@ -20,3 +21,4 @@ export { MediaUploader } from "./MediaUpload.jsx";
 export { ActivityLog } from "./ActivityLog.jsx";
 export { MiniGames } from "./MiniGames.jsx";
 export { Guides } from "./Guides.jsx";
+export { AddGames } from "./AddGames.jsx";

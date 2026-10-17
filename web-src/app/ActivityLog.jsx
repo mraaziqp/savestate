@@ -89,7 +89,7 @@ function Completed() {
       {error && <Note kind="bad">{error}</Note>}
       {!items && !error && <p className="nxa-dim"><Icon name="spinner" /> Loading…</p>}
       {items && shown.length === 0 && <p className="nxa-faint" style={{ fontSize: 13 }}>Nothing finished here yet.</p>}
-      <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "minmax(0,1fr)" }}>
         {list.map((i) => {
           const r = RESULT[i.result] ?? RESULT.verified;
           const isOpen = open === i.id;

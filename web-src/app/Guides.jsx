@@ -228,6 +228,7 @@ const GUIDES = [
         <ol className="nxg-sec">
           <li>Open <b>Mini Games</b> and press <b>Play</b>.</li>
           <li>Use <b>Full screen</b> for the best view, <b>Restart</b> to start over. High scores are kept on your device.</li>
+          <li>On a phone or tablet, an on-screen pad appears under the game (arrows, <b>Start</b> and <b>A</b>) for games made for a keyboard. <b>Hide pad</b> if the game has its own touch controls.</li>
         </ol>
         <Go tab="minigames">Open Mini Games</Go>
       </>
@@ -313,6 +314,23 @@ const GUIDES = [
         </ul>
         <div className="nxg-tip">Only use BIOS files, keys and games dumped from consoles and discs you own.</div>
         <Go tab="emulation">Open Emulation Setup</Go>
+      </>
+    ),
+  },
+  {
+    id: "host-addgames", group: "Running the host", admin: true, title: "Adding games to the library", icon: "plus",
+    words: "add games roms upload library import folder drop restore rebuild systems detect",
+    body: (
+      <>
+        <p className="lead">Put your games into the library from any PC or phone. They're playable for everyone with library access the moment each one finishes.</p>
+        <ol className="nxg-sec">
+          <li>Open <b>Add games</b> (under Games in the menu).</li>
+          <li>Drop ROM files or whole folders, or press <b>Choose files</b> / <b>Choose a folder</b>. On a phone, choose files.</li>
+          <li>Each game's system is recognised from the file and its folder name. Anything it can't be sure of is marked: pick the system on that row, or for all of them at once. Games already in the library are left out.</li>
+          <li>Press <b>Add</b>. Uploads run several at a time and carry on through dropped connections. The Activity log gets a receipt.</li>
+        </ol>
+        <div className="nxg-tip">Keep a disc game's files together (a <C>.cue</C> with its <C>.bin</C> files). Arcade and Neo Geo sets stay zipped with their MAME names, like <C>mslug.zip</C>.</div>
+        <Go tab="addgames">Open Add games</Go>
       </>
     ),
   },

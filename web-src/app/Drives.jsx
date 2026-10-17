@@ -1,13 +1,15 @@
 // Cloud Drives (admins): both Google accounts and this PC's disks side by
 // side, plus "upload this folder to Drive" jobs that verify every file and
 // then ask before anything is deleted from the PC. See server/drives.ts.
-import React, { useState, useEffect, useCallback, useMemo, Suspense, lazy } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef, Suspense, lazy } from "react";
 import { useStyles, api, Icon, Note, when } from "./lib.jsx";
 import { loadOldCloudHub } from "old-cloud";
+import { uploadToDrive } from "./uploader.js";
 
 const OldCloudHub = lazy(loadOldCloudHub);
 const gb = (n) => (n == null ? "?" : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round((n || 0) / 1024))} KB`);
 // rclone limits read "650k" or "17528k" (KiB/s); people read MB/s.
+const fmtLeft = (s) => (s > 86400 ? `${Math.round(s / 86400)} d` : s > 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.max(1, Math.round(s))} s`);
 const rateText = (r) => { const m = /^(\d+(?:\.\d+)?)([kKmM])$/.exec(String(r)); if (!m) return `${r}/s`; const kib = Number(m[1]) * (/m/i.test(m[2]) ? 1024 : 1); return kib >= 1024 ? `${(kib / 1024).toFixed(1)} MB/s` : `${Math.round(kib)} KB/s`; };
 const isLocal = (fs) => /^[A-Za-z]:$/.test(fs);
 const joinPath = (a, b) => [a, b].filter(Boolean).join("/");
@@ -67,23 +69,54 @@ export function Pane({ side, sources, state, setState, other, onChanged, onOfflo
       notice(`${move ? "Moving" : "Copying"} ${picked.length} item(s). Progress is under Transfers below.`);
     });
   };
+  // Uploads: files, whole folders (keeping their sub-folders) or a drop onto
+  // the pane; see uploader.js for how parts travel and are retried.
+  const [up, setUp] = useState(null);
+  const [drop, setDrop] = useState(false);
+  const stopUp = useRef(null);
+  const startUpload = async (items) => {
+    if (!items.length || local || up) return;
+    const ctl = new AbortController();
+    stopUp.current = ctl;
+    setError("");
+    setUp({ sent: 0, total: items.reduce((n, it) => n + it.file.size, 0), speed: 0, eta: null, filesDone: 0, filesTotal: items.length, current: [], failed: [] });
+    try {
+      const r = await uploadToDrive({ base, fs, path, items, signal: ctl.signal, onProgress: setUp });
+      const later = r.results.filter((x) => x.background).length;
+      notice?.(r.failed.length ? `${r.filesDone} uploaded, ${r.failed.length} couldn't be: ${r.failed.slice(0, 3).map((f) => `${f.name} (${f.error})`).join("; ")}`
+        : later ? `${r.filesDone} file${r.filesDone === 1 ? "" : "s"} uploaded. ${later} big one${later === 1 ? " is" : "s are"} being saved to Drive in the background (Activity log shows it); ${later === 1 ? "it appears" : "they appear"} here when done.`
+        : `${r.filesDone} file${r.filesDone === 1 ? "" : "s"} uploaded to Drive and checked.`);
+      if (r.failed.length) setError(`${r.failed.length} file(s) didn't upload: ${r.failed.slice(0, 3).map((f) => `${f.name}: ${f.error}`).join("; ")}`);
+    } catch (e) {
+      if (e?.name !== "AbortError") setError(e.message); else notice?.("Upload cancelled.");
+    } finally {
+      setUp(null); stopUp.current = null; load(); onChanged?.();
+    }
+  };
   const upload = (e) => {
     const files = [...(e.target.files ?? [])];
     e.target.value = "";
-    if (!files.length) return;
-    act("upload", async () => {
-      for (const f of files) {
-        const { id } = await api(`${base}/upload/init`, { method: "POST", body: { fs, path, name: f.name, size: f.size } });
-        for (let off = 0; off < f.size || off === 0; off += 8 * 1024 * 1024) {
-          setBusy(`upload ${f.name} ${f.size ? Math.round((off / f.size) * 100) : 0}%`);
-          const r = await fetch(`${base}/upload/${id}`, { method: "PUT", body: f.slice(off, off + 8 * 1024 * 1024), headers: { "Content-Type": "application/octet-stream" } });
-          if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `Upload failed (${r.status})`);
-          if (!f.size) break;
-        }
-        setBusy(`saving ${f.name} to Drive`);
-        await api(`${base}/upload/${id}/complete`, { method: "POST", body: {} });
-      }
+    // A folder pick gives each file its path inside the folder: keep it.
+    startUpload(files.map((file) => ({ file, dir: (file.webkitRelativePath || "").split("/").slice(0, -1).join("/") })));
+  };
+  // Dropped folders are walked, keeping their structure.
+  const onDrop = async (e) => {
+    e.preventDefault(); setDrop(false);
+    if (local) return;
+    const walk = (entry, dir) => new Promise((resolve) => {
+      if (entry.isFile) entry.file((file) => resolve([{ file, dir }]), () => resolve([]));
+      else if (entry.isDirectory) {
+        const reader = entry.createReader(); const all = [];
+        const more = () => reader.readEntries(async (batch) => {
+          if (!batch.length) { const nested = await Promise.all(all.map((c) => walk(c, [dir, entry.name].filter(Boolean).join("/")))); resolve(nested.flat()); return; }
+          all.push(...batch); more();
+        }, () => resolve([]));
+        more();
+      } else resolve([]);
     });
+    const entries = [...(e.dataTransfer.items ?? [])].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+    const items = entries.length ? (await Promise.all(entries.map((en) => walk(en, "")))).flat() : [...(e.dataTransfer.files ?? [])].map((file) => ({ file, dir: "" }));
+    startUpload(items);
   };
   const src = sources.find((s) => s.id === fs);
   return (
@@ -95,7 +128,8 @@ export function Pane({ side, sources, state, setState, other, onChanged, onOfflo
         <div className="nxa-row">
           <button className="nxa-btn sm" onClick={load} title="Refresh"><Icon name="refresh" size={13} /></button>
           {!local && <button className="nxa-btn sm" onClick={mkdir}><Icon name="folder" size={13} /> New folder</button>}
-          {!local && <label className="nxa-btn sm" style={{ cursor: "pointer" }}><Icon name="down" size={13} /> Upload<input type="file" multiple hidden onChange={upload} /></label>}
+          {!local && <label className="nxa-btn sm" style={{ cursor: up ? "default" : "pointer", opacity: up ? 0.5 : 1 }}><Icon name="cloud" size={13} /> Upload files<input type="file" multiple hidden disabled={!!up} onChange={upload} /></label>}
+          {!local && <label className="nxa-btn sm" style={{ cursor: up ? "default" : "pointer", opacity: up ? 0.5 : 1 }}><Icon name="folder" size={13} /> Upload a folder<input type="file" multiple hidden disabled={!!up} webkitdirectory="" directory="" onChange={upload} /></label>}
         </div>
       </div>
       {src?.space && <div className="nxa-faint" style={{ fontSize: 12 }}>{gb(src.space.free)} free of {gb(src.space.total)}<SpaceBar used={src.space.used} total={src.space.total} /></div>}
@@ -117,8 +151,21 @@ export function Pane({ side, sources, state, setState, other, onChanged, onOfflo
         </div>
       )}
       {busy && <p className="nxa-dim" style={{ fontSize: 13 }}><Icon name="spinner" size={13} /> {busy}…</p>}
+      {up && (
+        <div className="nxa-file" style={{ display: "block" }}>
+          <div className="nxa-row" style={{ justifyContent: "space-between", gap: 8 }}>
+            <b style={{ fontSize: 13 }}>Uploading {up.filesDone} of {up.filesTotal} file{up.filesTotal === 1 ? "" : "s"}</b>
+            <button className="nxa-btn sm" onClick={() => stopUp.current?.abort()}>Cancel</button>
+          </div>
+          <div className="nxa-progress" style={{ marginTop: 6 }} role="progressbar" aria-valuenow={up.total ? Math.round((up.sent / up.total) * 100) : 0} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${up.total ? Math.min(100, (up.sent / up.total) * 100) : 0}%` }} /></div>
+          <small>{gb(up.sent)} of {gb(up.total)}{up.speed > 0 ? ` · ${gb(up.speed)}/s` : ""}{up.eta != null && up.speed > 0 ? ` · ${fmtLeft(up.eta)} left` : " · working out the speed…"}</small>
+          {up.current.length > 0 && <small style={{ display: "block", overflowWrap: "anywhere" }}>Now: {up.current.slice(0, 3).join(", ")}</small>}
+          {up.failed.length > 0 && <small style={{ display: "block", color: "var(--bad)" }}>{up.failed.length} couldn't be uploaded (listed when the rest finish)</small>}
+        </div>
+      )}
       {error && <Note kind="bad">{error}</Note>}
-      <div style={{ overflow: "auto", maxHeight: 460, border: "1px solid rgba(255,255,255,.07)", borderRadius: 12 }}>
+      <div style={{ overflow: "auto", maxHeight: 460, border: `1px ${drop ? "dashed rgba(34,211,238,.6)" : "solid rgba(255,255,255,.07)"}`, borderRadius: 12, background: drop ? "rgba(34,211,238,.05)" : undefined }}
+        onDragOver={(e) => { if (!local && !up) { e.preventDefault(); setDrop(true); } }} onDragLeave={() => setDrop(false)} onDrop={onDrop}>
         <table className="nxa-table">
           <tbody>
             {path && <tr><td colSpan={4}><button className="nxa-link" onClick={() => go(parentOf(path))}>.. (up)</button></td></tr>}

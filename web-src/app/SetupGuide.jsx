@@ -121,7 +121,10 @@ export function SetupGuide({ isAdmin = false }) {
             <a className="nxa-btn sm" style={{ marginTop: 8 }} href="/api/downloads/desktop?platform=windows" download><Icon name="down" size={14} /> Get SaveState for Windows</a></div></div>
           <div className="nxa-step"><div><b>Add your games</b>
             <p>Keep one folder per system (for example <span className="nxa-code">PS1</span>, <span className="nxa-code">SNES</span>, <span className="nxa-code">GBA</span>) inside one games folder. Then open Games, choose Library Setup and pick that folder. Each system's card lists the file types that work.</p>
-            <button className="nxa-btn sm" style={{ marginTop: 8 }} onClick={() => goTab("library")}><Icon name="game" size={14} /> Open Games</button></div></div>
+            <div className="nxa-row nxa-wrap" style={{ marginTop: 8 }}>
+              <button className="nxa-btn sm" onClick={() => goTab("library")}><Icon name="game" size={14} /> Open Games</button>
+              {me?.isAdmin && <button className="nxa-btn sm primary" onClick={() => goTab("addgames")}><Icon name="plus" size={14} /> Add games to the host's library</button>}
+            </div></div></div>
           <div className="nxa-step"><div><b>Add system files where a system needs them</b>
             <p>Check the system below. If it says "BIOS required", copy the exact file named there into the folder shown. File names matter: a wrong name is the most common reason a game will not start.</p></div></div>
         </div>

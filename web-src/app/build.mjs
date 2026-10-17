@@ -129,6 +129,7 @@ const before = shell;
     `NxActivity=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ActivityLog}))),` +
     `NxMiniGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.MiniGames}))),` +
     `NxGuides=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Guides}))),` +
+    `NxAddGames=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AddGames}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -183,7 +184,7 @@ shell = patch(shell, "emulation is not admin-only", `"users","access","cloud"])`
 // only rendered for admins (an empty page for members); it is admin-only now.
 shell = patch(shell, "cloud drives", `x==="cloud"&&Pe("manage_system")&&(0,e.jsx)(NxDrives,{})`,
   `x==="cloud"&&Pe("manage_system")&&(0,e.jsx)(La,{})`, `x==="cloud"&&Pe("manage_system")&&(0,e.jsx)(NxDrives,{})`);
-shell = patch(shell, "cloud is admin-only in the menu", `brain:"manage_system",cloud:"manage_system"}`,
+shell = patch(shell, "cloud is admin-only in the menu", `brain:"manage_system",cloud:"manage_system"`,
   `brain:"manage_system"}`, `brain:"manage_system",cloud:"manage_system"}`);
 
 shell = patch(shell, "cloud drives label", `{id:"cloud",icon:Xa,label:"Cloud Drives"`, `{id:"cloud",icon:Xa,label:"Cloud"`, `{id:"cloud",icon:Xa,label:"Cloud Drives"`);
@@ -285,7 +286,18 @@ shell = patch(shell, "guides menu", `{id:"help",icon:xs,label:"Help & guides"`,
   `{id:"receipts",icon:xs,label:"Activity log",color:"#22d3ee",glow:"rgba(34,211,238,0.25)"}`,
   `{id:"receipts",icon:xs,label:"Activity log",color:"#22d3ee",glow:"rgba(34,211,238,0.25)"},{id:"help",icon:xs,label:"Help & guides",color:"#a3e635",glow:"rgba(163,230,53,0.25)"}`);
 shell = patch(shell, "guides title", `help:"Help & guides",`, `ql={minigames:"Mini Games",`, `ql={help:"Help & guides",minigames:"Mini Games",`);
-shell = patch(shell, "guides is known", `"receipts","minigames","help"]`, `"household","receipts","minigames"]`, `"household","receipts","minigames","help"]`);
+shell = patch(shell, "guides is known", `"receipts","minigames","help"`, `"household","receipts","minigames"]`, `"household","receipts","minigames","help"]`);
+// Add games (admins): ROM files and folders into the library (AddGames.jsx).
+shell = patch(shell, "add games tab", `x==="addgames"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxAddGames,{})}),`,
+  `x==="help"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGuides,{})}),`,
+  `x==="addgames"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxAddGames,{})}),x==="help"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGuides,{})}),`);
+shell = patch(shell, "add games menu", `{id:"addgames",icon:be,label:"Add games"`,
+  `{id:"minigames",icon:be,label:"Mini Games",color:"#f472b6",glow:"rgba(244,114,182,0.25)"}`,
+  `{id:"minigames",icon:be,label:"Mini Games",color:"#f472b6",glow:"rgba(244,114,182,0.25)"},{id:"addgames",icon:be,label:"Add games",color:"#34d399",glow:"rgba(52,211,153,0.25)"}`);
+shell = patch(shell, "add games is admin-only in the menu", `cloud:"manage_system",addgames:"manage_system"}`,
+  `cloud:"manage_system"}`, `cloud:"manage_system",addgames:"manage_system"}`);
+shell = patch(shell, "add games title", `addgames:"Add games",`, `ql={help:"Help & guides",`, `ql={addgames:"Add games",help:"Help & guides",`);
+shell = patch(shell, "add games is known", `"minigames","help","addgames"]`, `"household","receipts","minigames","help"]`, `"household","receipts","minigames","help","addgames"]`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
@@ -553,6 +565,10 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   gd = patch(gd, "game details explains a missing launcher", "Ready to play in this browser.",
     'detail:"Client launcher not running on this machine."',
     'detail:be(t.platform)?"Ready to play in this browser. For full speed and offline play, install the SaveState desktop app once (Get the App).":"Full-speed play on this PC needs the SaveState desktop app (Get the App, a one-time install). Until then, stream it from the host."');
+  // On a phone that note talked about "this PC" and the desktop app.
+  gd = patch(gd, "game details note on phones", "Plays right here on this phone",
+    'detail:be(t.platform)?"Ready to play in this browser.',
+    'detail:f?(be(t.platform)?"Plays right here on this phone, with touch controls.":`${(t.platform??"This system").toUpperCase()} is too heavy for a phone: choose Stream from the host PC and play it in Moonlight.`):be(t.platform)?"Ready to play in this browser.');
   gd = patch(gd, "game details hides host core status", '!f&&!y&&K&&K!=="unknown"&&', '!f&&K&&K!=="unknown"&&', '!f&&!y&&K&&K!=="unknown"&&');
   gd = patch(gd, "game details hides host core install", '!f&&!y&&K==="missing"&&!P&&', '!f&&K==="missing"&&!P&&', '!f&&!y&&K==="missing"&&!P&&');
   gd = patch(gd, "game details play options order", '"nx-playopts rounded-2xl',

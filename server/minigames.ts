@@ -105,7 +105,17 @@ const TYPES: Record<string, string> = {
  * their first high-score write. This gives them working stand-ins and sends
  * localStorage to the player page (which saves it for that game).
  */
-const SHIM = `<script>(function(){try{window.localStorage.length;return}catch(e){}
+// Also: on a touch screen the player shows a D-pad and buttons; their
+// presses arrive by postMessage and become key events here, so keyboard
+// games (arrows, WASD, Space, Enter) play on a phone.
+const KEYS = `<script>(function(){var C={ArrowUp:38,ArrowDown:40,ArrowLeft:37,ArrowRight:39," ":32,Enter:13,Escape:27,w:87,a:65,s:83,d:68};
+var CODE={ArrowUp:"ArrowUp",ArrowDown:"ArrowDown",ArrowLeft:"ArrowLeft",ArrowRight:"ArrowRight"," ":"Space",Enter:"Enter",Escape:"Escape",w:"KeyW",a:"KeyA",s:"KeyS",d:"KeyD"};
+window.addEventListener("message",function(e){var m=e.data;if(!m||typeof m.nxKey!=="string")return;var k=m.nxKey;
+var ev=new KeyboardEvent(m.up?"keyup":"keydown",{key:k,code:CODE[k]||k,bubbles:true,cancelable:true});
+try{Object.defineProperty(ev,"keyCode",{get:function(){return C[k]||0}});Object.defineProperty(ev,"which",{get:function(){return C[k]||0}})}catch(_){}
+(document.activeElement&&document.activeElement!==document.body?document.activeElement:document).dispatchEvent(ev);});})();</script>`;
+
+const SHIM = KEYS + `<script>(function(){try{window.localStorage.length;return}catch(e){}
 var id=(location.pathname.split("/")[2]||"");
 function store(seed,onChange){var d=Object.create(null);if(seed)for(var k in seed)d[k]=String(seed[k]);
 var api={getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v);onChange&&onChange(d)},

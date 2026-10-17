@@ -42,6 +42,14 @@ const CSS = `
 .nxmg-bar{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(10,12,22,.95)}
 .nxmg-bar b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px}
 .nxmg-frame{flex:1;border:0;width:100%;background:#000;display:block}
+@media (max-width:560px){.nxmg-bar{flex-wrap:wrap;row-gap:6px}.nxmg-bar b{flex-basis:calc(100% - 40px)}}
+.nxmg-pad{flex:none;display:flex;justify-content:space-between;align-items:center;padding:10px 18px calc(10px + env(safe-area-inset-bottom));background:rgba(10,12,22,.95);border-top:1px solid rgba(255,255,255,.08);user-select:none;-webkit-user-select:none;touch-action:none}
+.nxmg-dpad{display:grid;grid-template-areas:". u ." "l . r" ". d .";grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:4px}
+.nxmg-actions{display:flex;gap:14px;align-items:center}
+.nxmg-key{width:100%;height:100%;min-width:52px;min-height:52px;border-radius:14px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.08);color:#fff;font-size:20px;font-weight:800;touch-action:none}
+.nxmg-actions .nxmg-key{width:68px;height:68px;border-radius:50%}
+.nxmg-key:active{background:rgba(34,211,238,.35)}
+@media (orientation:landscape) and (max-height:500px){.nxmg-pad{position:absolute;left:0;right:0;bottom:0;background:transparent;border:0;pointer-events:none}.nxmg-pad>*{pointer-events:auto}.nxmg-key{background:rgba(255,255,255,.12)}}
 .nxmg-code{display:block;font:12px ui-monospace,Consolas,monospace;background:rgba(0,0,0,.4);border:1px solid var(--line);border-radius:10px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;color:#cbd5e1}
 @media (max-width:640px){.nxmg-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.nxmg-art .nxmg-initial{font-size:38px}.nxmg-play{opacity:1!important;transform:none!important;width:36px!important;height:36px!important}}
 `;
@@ -102,6 +110,16 @@ function Player({ game, onClose }) {
   }, [game.id]);
 
   const full = () => (document.fullscreenElement ? document.exitFullscreen() : box.current?.requestFullscreen?.())?.catch?.(() => {});
+  // Touch screens get a D-pad and buttons; each press is sent into the game
+  // as a key (the page inside turns it into a real key event).
+  const touch = typeof window !== "undefined" && window.matchMedia?.("(pointer: coarse)").matches;
+  const [pad, setPad] = useState(touch);
+  const press = (k, up) => frame.current?.contentWindow?.postMessage({ nxKey: k, up }, "*");
+  const Btn = ({ k, label, style }) => (
+    <button className="nxmg-key" style={style} aria-label={label}
+      onPointerDown={(e) => { e.preventDefault(); e.currentTarget.setPointerCapture?.(e.pointerId); press(k, false); }}
+      onPointerUp={() => press(k, true)} onPointerCancel={() => press(k, true)} onContextMenu={(e) => e.preventDefault()}>{label}</button>
+  );
   return (
     <div className="nxmg-player" ref={box} role="dialog" aria-label={game.title}>
       <div className="nxmg-bar">
@@ -109,10 +127,25 @@ function Player({ game, onClose }) {
         <b>{game.title}</b>
         <button className="nxa-btn sm" onClick={() => setRun((n) => n + 1)} title="Start again"><Icon name="refresh" size={14} /> Restart</button>
         <button className="nxa-btn sm" onClick={full} title="Full screen"><Icon name="ext" size={14} /> Full screen</button>
+        {touch && <button className="nxa-btn sm" onClick={() => setPad((v) => !v)} title="On-screen controls"><Icon name="game" size={14} /> {pad ? "Hide pad" : "Pad"}</button>}
         <button className="nxa-btn sm" onClick={onClose}>Close</button>
       </div>
       <iframe key={run} ref={frame} className="nxmg-frame" src={src} title={game.title} sandbox={SANDBOX}
         allow="fullscreen; gamepad; autoplay; clipboard-write; accelerometer; gyroscope" allowFullScreen referrerPolicy="no-referrer" />
+      {pad && (
+        <div className="nxmg-pad">
+          <div className="nxmg-dpad">
+            <Btn k="ArrowUp" label="▲" style={{ gridArea: "u" }} />
+            <Btn k="ArrowLeft" label="◀" style={{ gridArea: "l" }} />
+            <Btn k="ArrowRight" label="▶" style={{ gridArea: "r" }} />
+            <Btn k="ArrowDown" label="▼" style={{ gridArea: "d" }} />
+          </div>
+          <div className="nxmg-actions">
+            <Btn k="Enter" label="Start" style={{ fontSize: 13 }} />
+            <Btn k=" " label="A" />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -243,7 +276,7 @@ function AgentBuilder({ onChanged }) {
       </div>
       {!data && !error && <p className="nxa-dim"><Icon name="spinner" /> Looking in the Agent Builder…</p>}
       {data && rows.length === 0 && <p className="nxa-dim" style={{ fontSize: 13 }}>No games from the Agent Builder yet.</p>}
-      <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ display: "grid", gap: 8, gridTemplateColumns: "minmax(0,1fr)" }}>
         {rows.map((c) => (
           <div key={c.key} className="nxa-file" style={{ display: "flex", alignItems: "center", gap: 10, justifyContent: "space-between" }}>
             <div style={{ minWidth: 0, flex: 1 }}>

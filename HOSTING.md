@@ -49,8 +49,9 @@ installed (the installer file is in `%APPDATA%\NexusEmuHost\firmware`).
 Ryujinx isn't installed: its official server (ryujinx.app / update.ryujinx.app)
 refused connections from this network; unzip it to `E:\Ryujinx` (or leave
 it in Downloads) and add your own `prod.keys` and firmware. Sunshine is
-installed; run `scripts\windows\Add SaveState to Sunshine.cmd` once (it
-needs admin) so Moonlight lists SaveState. Back up `.env` and the Android signing key
+installed and lists SaveState (added 2026-10-17 with
+`scripts\windows\Add SaveState to Sunshine.cmd`, which needs admin; rerun it
+after reinstalling Sunshine). Back up `.env` and the Android signing key
 (`%APPDATA%\NexusEmuHost\android-release.keystore`) somewhere off this PC:
 without the key, installed Android apps can never be updated.
 
@@ -408,6 +409,30 @@ uncapped runs and kept in `%APPDATA%\NexusEmuHost\upload-capacity.json`
 default 4, slow first reads from the Drive folder made the page itself take
 up to 5 s to serve. It is read at start-up, so changing it means reloading
 the host task (see Moving to another machine > Windows hosts).
+
+## Adding games (Add games page)
+
+`web-src/app/AddGames.jsx` + `/api/games/intake/*` in server.ts (admins
+only, as is the old `/api/games/upload-rom`). `classify` runs the library's
+own `inferPlatformFromRecord` on each file name and path (a bare `.iso` over
+1.4 GB is guessed PS2; bare `.zip`/`.iso` otherwise need a choice) and marks
+files already in the library (same name and size). Parts are written at
+their offsets into `<persist>/tmp/rom-intake` and moved into
+`<library>/<SYSTEM>/` only when every byte is there (never a half file in
+the Drive folder), then `addRomToLibrary` adds the row, puts the file in the
+name index (playable at once) and fetches art. The folder watcher may add
+the same file first, with an AI-cleaned title; both use the same id.
+
+## Browser uploads (Drive panes, Add games, uploader.js)
+
+One engine (`web-src/app/uploader.js`): 8 MB parts, six in flight, three
+files at once, retries with back-off, overall progress with speed and time
+left. Drive panes upload files, whole folders (keeping sub-folders) or a
+drop. Until 2026-10-17 the parts went without the sign-in and every upload
+failed. The move onto Drive uses rclone with 64M chunks; files over 100 MB
+finish in the background (Activity log). While someone's own upload is
+going onto Drive, background folder copies drop to 30% of the line, and a
+game being downloaded to play counts as a stream (copies at 40%).
 
 ## Help & guides
 

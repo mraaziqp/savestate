@@ -5905,7 +5905,9 @@ async function startServer() {
   // Watching, listening, playing or opening the app counts; a background tab
   // polling for status does not. Long single-request streams count while open.
   let siteActiveAt = 0, openStreams = 0, lastActivity = "";
-  const STREAM_PATHS = /^\/api\/(media\/(stream|file|hls\/)|music\/stream|stream\/(feed|hls\/|gdrive\/|media\/)|emulator\/(native-core|bios\/serve)|roms\/)/;
+  // A game being fetched to play counts too: someone is waiting on it, and a
+  // 16 MB game took over a minute behind a folder copy using the line.
+  const STREAM_PATHS = /^\/api\/(media\/(stream|file|hls\/)|music\/stream|stream\/(feed|hls\/|gdrive\/|media\/)|emulator\/(native-core|bios\/serve)|roms\/|games\/[^/]+\/(download|download-rom|stream|rom))/;
   const siteBusy = () => openStreams > 0 || Date.now() - siteActiveAt < 3 * 60_000;
   app.use((req, res, next) => {
     const page = req.method === "GET" && !req.path.startsWith("/api/") && !req.path.startsWith("/assets/") && (req.path === "/" || req.path.endsWith(".html"))
@@ -19834,6 +19836,160 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         try { res.status(500).json({ error: (e as Error).message }); } catch {}
       });
   });
+
+  // ── Add games (admins): drop ROM files or folders into the library ────────
+  // The library lost most of its games with a drive (2026-09-20). Adding
+  // them back has to be quick and safe from any PC or phone:
+  //   classify  the server's own platform detection names each file's system
+  //             (extension, then folder names like "SNES/" or "PS2 games/");
+  //   init/PUT  parts in any order and in parallel, written at their offset
+  //             into a local temp file (never a half file in the Drive folder,
+  //             which would sync it), retried by the page;
+  //   complete  every byte checked, moved into <library>/<SYSTEM>/, added to
+  //             the library and the file index at once, art looked up.
+  // A file already in the library under the same name and size is skipped.
+  const intakeDir = path.join(PERSIST_DIR, "tmp", "rom-intake");
+  const intakes = new Map<string, { tmp: string; dest: string; size: number; parts: Map<number, number>; platform: string; filename: string; startedAt: number; lastAt: number }>();
+  const intakeFolder = (platform: string) => (platform === "unknown" ? "Unsorted" : platform.toUpperCase());
+  const cleanRomName = (n: string) => path.basename(String(n ?? "").replace(/\\/g, "/")).replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 200);
+
+  /** Put a finished ROM file into the library (DB or memory), the file index and, in the background, art. */
+  async function addRomToLibrary(dest: string, filename: string, rootPath: string, platformHint: string) {
+    const relPath = path.relative(rootPath, dest);
+    const canonicalRelPath = "./" + relPath.replace(/\\/g, "/");
+    const gameId = crypto.createHash("md5").update(canonicalRelPath).digest("hex");
+    const ext = path.extname(filename).toLowerCase();
+    let platform = await detectPlatformWithHeader(filename, canonicalRelPath, dest).catch(() => "unknown");
+    if (!platform || platform === "unknown") platform = platformHint || "unknown";
+    const core = PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown;
+    const title = path.basename(filename, ext).replace(/[_()\[\]]/g, " ").replace(/[_\-.]+/g, " ").replace(/\s+/g, " ").trim();
+    const game: Record<string, any> = {
+      id: gameId, title, platform, core_id: core.coreId, relative_path: canonicalRelPath, box_art: "", hero_image: "",
+      playtime: 0, sync_status: "synced", dominant_color: "#1a1a2e", description: "", developer: "", publisher: "",
+      release_date: "", genre: [], players: "1", rating: 0, file_hash: "",
+    };
+    if (pool && dbConnected) {
+      await pool.query(
+        `INSERT INTO games (id,title,platform,relative_path,box_art,hero_image,playtime,sync_status,dominant_color,description,developer,publisher,release_date,genre,players,rating)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         ON CONFLICT (id) DO UPDATE SET relative_path=EXCLUDED.relative_path, platform=EXCLUDED.platform, sync_status='synced', updated_at=NOW()`,
+        [game.id, game.title, game.platform, game.relative_path, game.box_art, game.hero_image, game.playtime, game.sync_status,
+         game.dominant_color, game.description, game.developer, game.publisher, game.release_date, game.genre, game.players, game.rating],
+      ).catch((e) => log("ERROR", `DB insert for added game: ${e}`, "database"));
+    } else {
+      mem.games = mem.games.filter((g) => g.id !== gameId);
+      mem.games.push(rowToGame(game));
+      persistHostStateNow().catch(() => {});
+    }
+    // Playable straight away: the list finds files through this index.
+    romIndex?.names.set(path.basename(dest).toLowerCase(), dest);
+    const ssePayload = JSON.stringify({ type: "new-rom-detected", game: rowToGame(game) });
+    sseClients.forEach((c) => { try { c.write(`data: ${ssePayload}\n\n`); } catch { sseClients.delete(c); } });
+    void (async () => {
+      const art = (await findLocalGameArt(dest, gameId).catch(() => null)) || (await fetchAndSaveArt(gameId, title, platform).catch(() => null));
+      if (!art) return;
+      if (dbConnected && pool) await pool.query("UPDATE games SET box_art=$1, updated_at=NOW() WHERE id=$2", [art, gameId]).catch(() => {});
+      else { const g = mem.games.find((x) => x.id === gameId); if (g) (g as any).boxArt = art; }
+    })();
+    return { id: gameId, title, platform };
+  }
+
+  // What system is each file? The same detection the library uses.
+  app.post("/api/games/intake/classify", express.json({ limit: "2mb" }), async (req, res) => {
+    const files = Array.isArray(req.body?.files) ? req.body.files.slice(0, 5000) : [];
+    const config = await getVaultConfig();
+    const index = await romFileIndex([config.root_path, ...getExtraRoots(config)].filter(Boolean)).catch(() => null);
+    const out = [];
+    for (const f of files) {
+      const name = cleanRomName(f?.name);
+      const rel = String(f?.rel ?? name).replace(/\\/g, "/");
+      const size = Number(f?.size) || 0;
+      let platform = inferPlatformFromRecord("unknown", rel, name);
+      let sure = platform !== "unknown";
+      // A bare .iso/.bin/.chd/.zip says little: size tells PS2 discs apart.
+      if (!sure && /\.(iso|cso|chd)$/i.test(name) && size > 1_400_000_000) { platform = "ps2"; sure = false; }
+      const have = index?.get(name.toLowerCase());
+      const existing = have ? await stat(have).then((s) => s.size === size).catch(() => false) : false;
+      out.push({ name, rel, size, platform, sure, existing });
+    }
+    res.json({ files: out });
+  });
+
+  app.post("/api/games/intake/init", express.json(), async (req, res) => {
+    const filename = cleanRomName(req.body?.filename);
+    const platform = canonicalPlatformKey(String(req.body?.platform ?? "unknown").replace(/[^a-z0-9]/gi, "").toLowerCase() || "unknown");
+    const size = Math.max(0, Number(req.body?.size) || 0);
+    if (!filename) return res.status(400).json({ error: "No file name." });
+    const config = await getVaultConfig();
+    const { root } = await romWriteRoot(config.root_path);
+    const dest = path.join(root, intakeFolder(platform), filename);
+    const already = await stat(dest).catch(() => null);
+    if (already?.isFile() && already.size === size) {
+      const g = await addRomToLibrary(dest, filename, config.root_path || root, platform);
+      return res.json({ skip: true, game: g });
+    }
+    await mkdir(intakeDir, { recursive: true });
+    const id = crypto.randomBytes(12).toString("hex");
+    const tmp = path.join(intakeDir, `${id}.partial`);
+    await writeFile(tmp, "");
+    intakes.set(id, { tmp, dest, size, parts: new Map(), platform, filename, startedAt: Date.now(), lastAt: Date.now() });
+    res.json({ id });
+  });
+
+  app.put("/api/games/intake/:id", async (req, res) => {
+    const u = intakes.get(req.params.id);
+    if (!u) return res.status(404).json({ error: "Upload not found; start again." });
+    const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+    let len = 0;
+    const out = createWriteStream(u.tmp, { flags: "r+", start: offset });
+    req.on("data", (c: Buffer) => { len += c.length; });
+    req.on("aborted", () => out.destroy());
+    pipeline(req, out).then(() => {
+      u.parts.set(offset, len); u.lastAt = Date.now();
+      res.json({ ok: true, received: [...u.parts.values()].reduce((a, b) => a + b, 0) });
+    }).catch((e) => { try { res.status(500).json({ error: (e as Error).message }); } catch { /* gone */ } });
+  });
+
+  app.post("/api/games/intake/:id/complete", async (req, res) => {
+    const u = intakes.get(req.params.id);
+    if (!u) return res.status(404).json({ error: "Upload not found; start again." });
+    let end = 0;
+    for (const [off, len] of [...u.parts.entries()].sort((a, b) => a[0] - b[0])) { if (off > end) break; end = Math.max(end, off + len); }
+    const onDisk = (await stat(u.tmp).catch(() => null))?.size ?? -1;
+    if (end < u.size || onDisk !== u.size) return res.status(409).json({ error: `Only ${end} of ${u.size} bytes arrived; the page will resend the rest.` });
+    try {
+      await mkdir(path.dirname(u.dest), { recursive: true });
+      // The library is usually on another drive (the Google Drive folder): copy, then remove the temp file.
+      try { await renameFile(u.tmp, u.dest); } catch { await copyFile(u.tmp, u.dest); await unlink(u.tmp).catch(() => {}); }
+      intakes.delete(req.params.id);
+      const config = await getVaultConfig();
+      const g = await addRomToLibrary(u.dest, u.filename, config.root_path || path.dirname(path.dirname(u.dest)), u.platform);
+      log("INFO", `Game added: "${g.title}" [${g.platform}] -> ${u.dest}`, "watcher");
+      res.json({ ok: true, game: g });
+    } catch (e) {
+      await unlink(u.tmp).catch(() => {}); intakes.delete(req.params.id);
+      res.status(500).json({ error: (e as Error).message });
+    }
+  });
+
+  app.delete("/api/games/intake/:id", async (req, res) => {
+    const u = intakes.get(req.params.id);
+    if (u) { intakes.delete(req.params.id); await unlink(u.tmp).catch(() => {}); }
+    res.json({ ok: true });
+  });
+
+  // A batch that finished: one receipt for the Activity log.
+  app.post("/api/games/intake/done", express.json(), async (req, res) => {
+    const c = await access.callerOf(req);
+    const added = Number(req.body?.added) || 0, skipped = Number(req.body?.skipped) || 0, failed = Number(req.body?.failed) || 0;
+    const bytes = Number(req.body?.bytes) || 0;
+    const systems = Array.isArray(req.body?.systems) ? req.body.systems.slice(0, 20).map(String) : [];
+    if (added || failed) receipt({ kind: "library", status: failed ? "warn" : "ok", title: `Games added: ${added}${failed ? `, ${failed} failed` : ""}`, detail: `${added} game(s)${systems.length ? ` (${systems.join(", ")})` : ""}, ${(bytes / 1024 ** 3).toFixed(2)} GB${skipped ? `; ${skipped} already in the library` : ""}`, bytes, userId: c.userId, actor: c.username });
+    res.json({ ok: true });
+  });
+  setInterval(() => {
+    for (const [id, u] of intakes) if (Date.now() - u.lastAt > 24 * 3600_000) { intakes.delete(id); void unlink(u.tmp).catch(() => {}); }
+  }, 3600_000).unref();
 
   // ── Save State Cloud Sync ──────────────────────────────────────────────────
   app.get("/api/emulator/savestates/:gameId", async (req, res) => {

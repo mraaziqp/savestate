@@ -123,8 +123,10 @@ export function createDrives(deps: DrivesDeps) {
       if (!bin) throw new Error("rclone is not installed on the host (winget install Rclone.Rclone)");
       const port = 5572 + Math.floor(Math.random() * 400);
       const pass = crypto.randomBytes(18).toString("hex");
+      // 64M chunks: a browser upload's last step (onto Drive) took 34 s for
+      // 20 MB with the default 8M, 7 s with these.
       const proc = spawn(bin, ["rcd", `--rc-addr=127.0.0.1:${port}`, "--rc-user=nx", `--rc-pass=${pass}`, "--rc-job-expire-duration=6h",
-        "--log-level=ERROR"], { windowsHide: true, stdio: "ignore" });
+        "--drive-chunk-size=64M", "--log-level=ERROR"], { windowsHide: true, stdio: "ignore" });
       const next = { proc, url: `http://127.0.0.1:${port}`, auth: "Basic " + Buffer.from(`nx:${pass}`).toString("base64") };
       proc.on("exit", () => { if (rcd === next) rcd = null; });
       for (let i = 0; i < 40; i++) {
@@ -259,6 +261,7 @@ export function createDrives(deps: DrivesDeps) {
   //   (31 GB took 8 h at 1.1 MB/s). Now the 650k cap is for streaming; while
   //   someone browses, uploads take 70% of the line's speed, learned from
   //   uncapped runs (NEXUS_UPLOAD_BROWSING_SHARE to change the share).
+  let handovers = 0; // browser uploads being moved onto Drive right now
   const capacityFile = path.join(deps.persistDir, "upload-capacity.json");
   let capacity = 0; // bytes/s the line managed uncapped (slowly forgets peaks)
   readFile(capacityFile, "utf8").then((t) => { capacity = Number(JSON.parse(t).bytesPerSecond) || 0; }).catch(() => {});
@@ -276,6 +279,10 @@ export function createDrives(deps: DrivesDeps) {
     const h = new Date().getHours();
     const full = from <= to ? h >= from && h < to : h >= from || h < to;
     if (full) return "off";
+    // Someone's own upload is going onto Drive: they are waiting for it, the
+    // background copies are not. Measured: 20 MB took 99 s behind a running
+    // folder copy, 7 s on its own.
+    if (handovers > 0) return capacity > 0 ? `${Math.max(650, Math.round((capacity * 0.3) / 1024))}k` : "650k";
     if (deps.siteBusy && !deps.siteBusy()) return process.env.NEXUS_UPLOAD_BWLIMIT_IDLE?.trim() || "off";
     // While someone streams: leave 60% of the measured line for them (a
     // film needs ~1 MB/s; this line measured ~24 MB/s, where a flat 650k
@@ -562,7 +569,28 @@ export function createDrives(deps: DrivesDeps) {
     // route below names its drive(s) in fs / fromFs / toFs, and the
     // middleware checks them all before the route runs.
     const transfers: Array<{ owner: string; id: number; label: string; startedAt: number }> = [];
-    const uploads = new Map<string, { owner: string; file: string; fs: string; dest: string; size: number; got: number }>();
+    // A browser upload in progress: parts arrive in any order (several at
+    // once, some retried), each written at its own offset, so a retried part
+    // simply overwrites itself. `parts` maps offset -> length.
+    const uploads = new Map<string, { owner: string; file: string; fs: string; dest: string; size: number; got: number; parts: Map<number, number>; name: string; startedAt: number; lastAt: number }>();
+    // Parts of uploads that were abandoned (tab closed, connection lost for
+    // good) are removed after a day.
+    const sweepUploads = async () => {
+      const now = Date.now();
+      for (const [id, u] of uploads) if (now - u.lastAt > 24 * 3600_000) { uploads.delete(id); await rm(u.file, { force: true }).catch(() => {}); }
+      for (const f of await readdir(uploadDir).catch(() => [] as string[])) {
+        if ([...uploads.values()].some((u) => path.basename(u.file) === f)) continue;
+        const st = await stat(path.join(uploadDir, f)).catch(() => null);
+        if (st && now - st.mtimeMs > 24 * 3600_000) await rm(path.join(uploadDir, f), { force: true }).catch(() => {});
+      }
+    };
+    setInterval(() => { void sweepUploads(); }, 3600_000).unref();
+    // Browser uploads that arrived and are now going on to Drive.
+    const savingToDrive = new Set<{ name: string; size: number; fs: string; dest: string; startedAt: number }>();
+    addLiveSource(() => [...savingToDrive].map((u) => ({
+      kind: "upload", title: `Saving ${u.name} to Drive`, progress: null, status: "copying",
+      detail: `${humanBytes(u.size)} uploaded from a browser; now going to ${u.fs}:${u.dest}`,
+    })));
     const registerBrowse = (base: string, allow: (req: express.Request, fs: string) => Promise<boolean>, ownerOf: (req: express.Request) => Promise<string>) => {
       app.use(base, async (req, res, next) => {
         try {
@@ -660,8 +688,12 @@ export function createDrives(deps: DrivesDeps) {
         } catch (e) { fail(res, e); }
       });
   
-      // Browser uploads: 8 MB chunks (under Cloudflare's request limit) into a
-      // temp file, then one move onto Drive.
+      // Browser uploads: 8 MB parts (under Cloudflare's request limit), sent
+      // several at a time and retried by the page, each written at its offset
+      // into a temp file; then one move onto Drive, which rclone checks by
+      // hash. Until 2026-10-16 the page sent parts without the sign-in, so
+      // every upload was refused, and parts were appended blindly, so a
+      // retried part would have corrupted the file.
       app.post(`${base}/upload/init`, async (req, res) => {
         try {
           const fs_ = String(req.body?.fs);
@@ -669,27 +701,71 @@ export function createDrives(deps: DrivesDeps) {
           const name = String(req.body?.name ?? "").replace(/[\\/:*?"<>|]/g, "_").slice(0, 200);
           if (!name) return res.status(400).json({ error: "No file name" });
           await mkdir(uploadDir, { recursive: true });
+          void sweepUploads();
           const id = crypto.randomBytes(12).toString("hex");
-          uploads.set(id, { owner: await ownerOf(req), file: path.join(uploadDir, id), fs: fs_, dest: joinRemote(cleanRel(req.body?.path), name), size: Number(req.body?.size) || 0, got: 0 });
-          res.json({ id });
+          const file = path.join(uploadDir, id);
+          await writeFile(file, "");
+          uploads.set(id, { owner: await ownerOf(req), file, fs: fs_, dest: joinRemote(cleanRel(req.body?.path), name), size: Math.max(0, Number(req.body?.size) || 0), got: 0, parts: new Map(), name, startedAt: Date.now(), lastAt: Date.now() });
+          res.json({ id, partSize: 8 * 1024 * 1024 });
         } catch (e) { fail(res, e); }
       });
-      app.put(`${base}/upload/:id`, (req, res) => {
+      app.put(`${base}/upload/:id`, async (req, res) => {
         const u = uploads.get(req.params.id);
         if (!u) return res.status(404).json({ error: "Upload not found; start again." });
-        const out = createWriteStream(u.file, { flags: "a" });
+        if (u.owner !== await ownerOf(req)) return res.status(403).json({ error: "Not your upload." });
+        const offset = Math.max(0, Math.floor(Number(req.query.offset) || 0));
+        if (u.size && offset >= u.size && !(offset === 0 && u.size === 0)) return res.status(400).json({ error: "That part is past the end of the file." });
+        let len = 0;
+        const out = createWriteStream(u.file, { flags: "r+", start: offset });
+        req.on("data", (c: Buffer) => { len += c.length; });
         req.pipe(out);
-        out.on("finish", async () => { u.got = (await stat(u.file).catch(() => null))?.size ?? u.got; res.json({ ok: true, received: u.got }); });
+        out.on("finish", () => {
+          u.parts.set(offset, len);
+          u.got = [...u.parts.values()].reduce((a, b) => a + b, 0);
+          u.lastAt = Date.now();
+          res.json({ ok: true, received: u.got });
+        });
         out.on("error", (e) => fail(res, e));
+        req.on("aborted", () => out.destroy());
       });
       app.post(`${base}/upload/:id/complete`, async (req, res) => {
         const u = uploads.get(req.params.id);
         if (!u) return res.status(404).json({ error: "Upload not found; start again." });
+        if (u.owner !== await ownerOf(req)) return res.status(403).json({ error: "Not your upload." });
+        // Every byte must be here, with no gaps, before it goes to Drive.
+        const ordered = [...u.parts.entries()].sort((a, b) => a[0] - b[0]);
+        let end = 0;
+        for (const [off, len] of ordered) { if (off > end) break; end = Math.max(end, off + len); }
+        const onDisk = (await stat(u.file).catch(() => null))?.size ?? -1;
+        if (end < u.size || onDisk !== u.size) return res.status(409).json({ error: `Only ${end} of ${u.size} bytes arrived; the page will resend the rest.`, received: end });
+        uploads.delete(req.params.id);
+        const toDrive = async () => {
+          handovers++; applyRate();
+          try {
+            await rc("operations/movefile", { srcFs: `${uploadDir}${path.sep}`, srcRemote: path.basename(u.file), dstFs: fsSpec(u.fs), dstRemote: u.dest }, 6 * 3600_000);
+          } finally { handovers--; applyRate(); }
+          const secs = Math.max(1, (Date.now() - u.startedAt) / 1000);
+          receipt({ kind: "upload", title: `Uploaded to Drive: ${u.name}`, detail: `${humanBytes(u.size)} to ${u.fs}:${u.dest} in ${secs >= 90 ? `${Math.round(secs / 60)} min` : `${Math.round(secs)} s`} (checked by Drive's hash)`, bytes: u.size, userId: u.owner === "admin" ? null : u.owner, data: { fs: u.fs, path: u.dest } });
+        };
+        // Big files go on to Drive in the background (Activity log > Happening
+        // now), so the page isn't left at 100% while gigabytes cross the line.
+        if (u.size > 100 * 1024 * 1024) {
+          savingToDrive.add(u);
+          toDrive().catch(async (e) => {
+            receipt({ kind: "upload", status: "failed", title: `Couldn't save to Drive: ${u.name}`, detail: String(e?.message ?? e).slice(0, 300), bytes: u.size, userId: u.owner === "admin" ? null : u.owner });
+            await rm(u.file, { force: true }).catch(() => {});
+          }).finally(() => savingToDrive.delete(u));
+          return res.json({ ok: true, background: true });
+        }
         try {
-          await rc("operations/movefile", { srcFs: `${uploadDir}${path.sep}`, srcRemote: path.basename(u.file), dstFs: fsSpec(u.fs), dstRemote: u.dest }, 6 * 3600_000);
-          uploads.delete(req.params.id);
+          await toDrive();
           res.json({ ok: true });
-        } catch (e) { await rm(u.file, { force: true }).catch(() => {}); uploads.delete(req.params.id); fail(res, e); }
+        } catch (e) { await rm(u.file, { force: true }).catch(() => {}); fail(res, e); }
+      });
+      app.delete(`${base}/upload/:id`, async (req, res) => {
+        const u = uploads.get(req.params.id);
+        if (u && u.owner === await ownerOf(req)) { uploads.delete(req.params.id); await rm(u.file, { force: true }).catch(() => {}); }
+        res.json({ ok: true });
       });
   
       };
