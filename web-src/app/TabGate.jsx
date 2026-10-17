@@ -122,7 +122,7 @@ function GameHint({ tab }) {
     if (!windows) return undefined;
     let live = true;
     fetch("http://127.0.0.1:17373/health", { signal: AbortSignal.timeout(2500) }).then((r) => r.json())
-      .then((h) => { if (live) setApp((h.version ?? 0) >= 7 ? "ready" : "old"); })
+      .then((h) => { if (live) setApp((h.version ?? 0) >= 8 ? "ready" : "old"); })
       .catch(() => { if (live) setApp("missing"); });
     return () => { live = false; };
   }, [windows]);

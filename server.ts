@@ -18658,7 +18658,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const all = (await readdir(coresDir)).filter((f) => f.endsWith('_libretro.so') || f.endsWith('_libretro.dll'));
       if (all.length === 0) return res.status(404).json({ error: "No cores installed on this host" });
       const skip = parseSkipParam(req.query.skip);
-      const entries = all.filter((f) => !skip.has(f));
+      // ?only=fceumm_libretro.dll,...: just the cores a member's setup asked for.
+      const only = parseSkipParam(req.query.only);
+      const entries = all.filter((f) => !skip.has(f) && (!only.size || only.has(f)));
       // Everything the client asked for is already correct on its side — 204 so
       // it doesn't spend time unpacking an empty archive.
       if (entries.length === 0) return res.status(204).end();
@@ -18713,7 +18715,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // emulators, which have no portable auto-installer of their own
   // (installStandaloneEmulatorPortable only covers some), making cloning the
   // host's working copy the ONLY way a client ever gets them.
-  const STANDALONE_EMULATOR_KEYS = ['pcsx2', 'dolphin', 'rpcs3', 'switch'] as const;
+  // retroarch: the program itself, so a member's PC gets the same working
+  // RetroArch as the host (cores come separately, one at a time).
+  const STANDALONE_EMULATOR_KEYS = ['pcsx2', 'dolphin', 'rpcs3', 'switch', 'retroarch'] as const;
+  // RetroArch's own state and the big optional parts: the client's launcher
+  // writes its own config, and fetches each core it needs on its own.
+  const RETROARCH_EXCLUDE_DIRS = new Set(['cores', 'database', 'shaders', 'overlays', 'system', 'saves', 'states', 'playlists',
+    'thumbnails', 'downloads', 'recordings', 'cheats', 'screenshots', 'logs']);
+  const RETROARCH_EXCLUDE_FILES = new Set(['retroarch.cfg', 'retroarch-core-options.cfg', 'retroarch.cfg.bak']);
 
   // Local state and caches: large, machine-specific, and useless (sometimes
   // actively harmful) on another machine. Note "bios" is deliberately NOT here
@@ -18742,6 +18751,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       case 'dolphin': return await detectDolphinPath().catch(() => null);
       case 'rpcs3':   return await detectRpcs3Path().catch(() => null);
       case 'switch':  return (await detectSwitchEmuPath().catch(() => null))?.path ?? null;
+      case 'retroarch': return await detectRetroArchPath().catch(() => null);
       default:        return null;
     }
   }
@@ -18767,8 +18777,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return dir;
   }
 
-  async function listEmulatorDirFiles(rootDir: string): Promise<string[]> {
+  async function listEmulatorDirFiles(rootDir: string, key = ''): Promise<string[]> {
     const out: string[] = [];
+    const ra = key === 'retroarch';
     async function walk(rel: string, depth: number) {
       if (depth > 12) return; // cycle/symlink-loop guard
       let entries;
@@ -18778,9 +18789,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const childRel = rel ? `${rel}/${e.name}` : e.name;
         if (e.isDirectory()) {
           if (STANDALONE_EMULATOR_EXCLUDE_DIRS.has(e.name.toLowerCase())) continue;
+          if (ra && !rel && RETROARCH_EXCLUDE_DIRS.has(e.name.toLowerCase())) continue;
           await walk(childRel, depth + 1);
         } else if (e.isFile()) {
           if (/\.(keys|pup)$/i.test(e.name)) continue;
+          if (ra && !rel && RETROARCH_EXCLUDE_FILES.has(e.name.toLowerCase())) continue;
           out.push(childRel);
         }
       }
@@ -18828,7 +18841,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const dir = await getStandaloneEmulatorDir(key).catch(() => null);
       if (!dir) { result[key] = { available: false, count: 0, bytes: 0, hashes: {} }; continue; }
       try {
-        const files = await listEmulatorDirFiles(dir);
+        const files = await listEmulatorDirFiles(dir, key);
         const { sig } = await standaloneDirSignature(dir, files);
         const cached = standaloneManifestCache.get(`${key}:${dir}`);
         if (cached && cached.sig === sig) {
@@ -18892,7 +18905,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!dir) return res.status(404).json({ error: `No clonable ${name} install on this host` });
     try {
       const skip = parseSkipParam(req.query.skip);
-      const files = (await listEmulatorDirFiles(dir)).filter((f) => !skip.has(f));
+      const files = (await listEmulatorDirFiles(dir, name)).filter((f) => !skip.has(f));
       if (files.length === 0) return res.status(204).end();
       let bytes = 0;
       for (const rel of files) {
@@ -20381,11 +20394,23 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const meta = artMetaCache.get(id) ?? await (async () => {
       let m = { title: "", platform: "" };
       if (dbConnected && pool) {
-        const r = await pool.query("SELECT title, platform FROM games WHERE id=$1", [id]).catch(() => null);
-        if (r?.rows[0]) m = { title: r.rows[0].title, platform: r.rows[0].platform };
+        // The console as the library shows it (worked out from the file and
+        // folder): the stored column says "unknown" for many PS2 games, and
+        // the drawn cover read UNKNOWN under a PS2 label.
+        const r = await pool.query("SELECT title, platform, relative_path, core_id FROM games WHERE id=$1", [id]).catch(() => null);
+        const g = r?.rows[0];
+        if (g) m = { title: displayGameTitle(g.title, g.relative_path), platform: inferPlatformFromRecord(g.platform, g.relative_path, g.title, g.core_id) };
+        // A bare "./Clock Tower 3.iso" says nothing; the folder the file is in does
+        // (as the games list works it out).
+        if (g && m.platform === "unknown") {
+          const vc = await getVaultConfig().catch(() => null);
+          const present = vc?.root_path ? await romFileIndex([vc.root_path, ...getExtraRoots(vc)]).catch(() => null) : null;
+          const found = present?.get(romBasename(g.relative_path ?? ""));
+          if (found) m.platform = inferPlatformFromRecord("unknown", found, g.title);
+        }
       } else {
-        const g = mem.games.find((g) => g.id === id);
-        if (g) m = { title: g.title, platform: g.platform };
+        const g: any = mem.games.find((g) => g.id === id);
+        if (g) m = { title: g.title, platform: inferPlatformFromRecord(g.platform, g.relativePath, g.title, g.coreId) };
       }
       artMetaCache.set(id, m);
       if (artMetaCache.size > 5000) artMetaCache.clear();

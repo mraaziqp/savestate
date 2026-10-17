@@ -13,7 +13,8 @@ import { useStyles, api, token, Icon, Note, goTab } from "./lib.jsx";
 import { SYSTEMS, EMULATORS } from "./systems.js";
 
 const LAUNCHER = "http://127.0.0.1:17373";
-const NEEDS_VERSION = 7;
+// v8 unpacks downloads without extra modules (v7 stopped at "Cannot find module 'adm-zip'").
+const NEEDS_VERSION = 8;
 const MAKERS = ["Sony", "Nintendo", "Sega", "SNK", "Arcade", "NEC", "Atari", "Microsoft"];
 // Systems that need a paid plan's "every console" (planlimits.ts HEAVY_SYSTEMS).
 const HEAVY = new Set(["ps2", "ps3", "gamecube", "wii", "wiiu", "switch", "psp", "3ds", "xbox", "xbox360"]);
@@ -33,6 +34,8 @@ const CSS = `
 .nxgset-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:11px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.03)}
 .nxgset-row b{font-size:14px}.nxgset-row small{display:block;color:var(--dim);font-size:12.5px;overflow-wrap:anywhere}
 .nxgset-foot{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.nxgset-drop{border:2px dashed var(--line);border-radius:14px;padding:18px;text-align:center;color:var(--dim);display:grid;gap:8px;justify-items:center}
+.nxgset-drop.on{border-color:var(--acc);background:rgba(34,211,238,.08);color:var(--text)}
 @media (max-width:520px){.nxgset-row{grid-template-columns:1fr}}
 `;
 
@@ -192,8 +195,14 @@ function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
     } catch (e) { setError(e.message); }
   }, [chosen]);
 
+  // Nothing to press: once SaveState for Windows answers, set up what was chosen.
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (desktop && app.status === "ready" && !job && !autoStarted.current) { autoStarted.current = true; start(); }
+  }, [desktop, app.status, job, start]);
   const browserOnes = chosen.filter((s) => s.play === "browser");
   const done = job && !job.running;
+  const failed = job ? job.steps.filter((s) => s.status === "failed") : [];
   return (
     <div className="nxa-card" style={{ display: "grid", gap: 14 }}>
       <h3 style={{ fontSize: 18 }}>{desktop ? "Install what these consoles need" : "Where these consoles play"}</h3>
@@ -237,11 +246,12 @@ function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
                     <div><b><Icon name={icon} /> {sys?.name ?? s.platform}</b>
                       <small>{s.status === "waiting" ? "Waiting…" : s.detail || s.status}
                         {s.status === "manual" && sys?.emu && EMULATORS[sys.emu] && <> <a href={EMULATORS[sys.emu].url} target="_blank" rel="noopener noreferrer">Download {EMULATORS[sys.emu].name}</a></>}</small></div>
-                    <span className={`nxa-pill ${s.status === "done" ? "ok" : s.status === "failed" ? "bad" : ""}`}>{s.status === "done" ? "Ready" : s.status === "failed" ? "Needs attention" : s.status === "manual" ? "Install yourself" : s.status === "working" ? "Working" : "Waiting"}</span>
+                    <span className={`nxa-pill ${s.status === "done" ? "ok" : s.status === "failed" ? "warn" : ""}`}>{s.status === "done" ? "Ready" : s.status === "failed" ? "Didn't finish" : s.status === "manual" ? "Install yourself" : s.status === "working" ? "Working…" : "Waiting"}</span>
                   </div>
                 );
               })}
-              {done && job.steps.some((s) => s.status === "failed") && <button className="nxa-btn sm" onClick={start}><Icon name="refresh" /> Try the failed ones again</button>}
+              {done && !failed.length && <Note kind="ok">All set. Next, add any system files these consoles need.</Note>}
+              {done && failed.length > 0 && <button className="nxa-btn sm primary" onClick={start}><Icon name="refresh" /> Try {failed.length === 1 ? "it" : `those ${failed.length}`} again</button>}
             </div>
           )}
           {error && <Note kind="bad">{error}</Note>}
@@ -271,7 +281,19 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
   const [found, setFound] = useState({});
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState(null);
+  const [over, setOver] = useState(false);
   const ready = desktop && app.status === "ready";
+  // Every file name these consoles use, to match dropped files to.
+  const wanted = need.flatMap((sys) => (sys.bios.files ?? []).filter((f) => /\./.test(f.name)).map((f) => ({ sys, file: f })));
+  async function dropped(list) {
+    const files = [...(list ?? [])];
+    const unknown = [];
+    for (const fl of files) {
+      const hit = wanted.find((w) => w.file.name.toLowerCase() === fl.name.toLowerCase());
+      if (hit) await add(hit.sys, hit.file, fl); else unknown.push(fl.name);
+    }
+    if (unknown.length) setMsg({ kind: "warn", text: `${unknown.join(", ")}: not a file these consoles use by that name. Use the Add file button next to the file it is, and it will be saved under the right name.` });
+  }
 
   const refresh = useCallback(async () => {
     if (!ready) return;
@@ -292,7 +314,8 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
       const r = await launcher(`/bios-add?name=${encodeURIComponent(file.name)}&system=${encodeURIComponent(sys.id)}`,
         { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: picked, timeout: 120000 });
       const bad = file.md5 && r.md5 && r.md5 !== file.md5;
-      setMsg(bad ? { kind: "warn", text: `${file.name} is saved, but it isn't the usual ${file.name} (checksum differs). If ${sys.name} games don't start, dump it again from your console.` }
+      setMsg(r.opened === "rpcs3" ? { kind: "ok", text: "RPCS3 opened to install the PS3 system software: confirm there, and PS3 games are ready." }
+        : bad ? { kind: "warn", text: `${file.name} is saved, but it isn't the usual ${file.name} (checksum differs). If ${sys.name} games don't start, dump it again from your console.` }
         : { kind: "ok", text: `${file.name} is in place for ${sys.name}.` });
       await refresh();
     } catch (e) { setMsg({ kind: "bad", text: e.message }); }
@@ -308,6 +331,15 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
       </p>
       {!need.length && <Note kind="ok">None of the consoles you chose need system files. Nothing to do here.</Note>}
       {need.length > 0 && !ready && desktop && <Note>Finish the install step first (SaveState for Windows), then the files you add here go straight into place.</Note>}
+      {ready && wanted.length > 0 && (
+        <label className={`nxgset-drop ${over ? "on" : ""}`} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
+          onDrop={(e) => { e.preventDefault(); setOver(false); dropped(e.dataTransfer.files); }}>
+          <Icon name="down" size={22} />
+          <b>Drop your system files here</b>
+          <span>or click to choose them. Each one is matched by its name and put where its console looks.</span>
+          <input type="file" multiple hidden onChange={(e) => { const fl = e.target.files; dropped(fl); e.target.value = ""; }} />
+        </label>
+      )}
       {need.map((sys) => (
         <div key={sys.id} style={{ display: "grid", gap: 6 }}>
           <p className="nxa-label">{sys.name.toUpperCase()}{sys.bios.anyOne ? " · any one of these" : ""}{sys.bios.need === "optional" ? " · optional" : ""}</p>

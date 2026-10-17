@@ -152,6 +152,16 @@ shell = patch(shell, "admin pages wait for the account", "(0,s.useEffect)(()=>{!
 shell = patch(shell, "admin pages wait for the account (deps)", "},[x,Ue,kt,Ee,re.loading])",
   "},[x,Ue,kt,Ee])", "},[x,Ue,kt,Ee,re.loading])");
 
+// Play on a game card refused outright on https ("Open Nexus at
+// http://your-host:3000 ... HTTPS blocks local launcher connections"), from
+// before browsers could reach the launcher from https. They can (Set up games
+// does), so it now asks the launcher like everything else does.
+shell = patch(shell, "card play asks the launcher on https", "if(!1&&oo&&!Fe())return{ok:!1,error:",
+  "if(oo&&!Fe())return{ok:!1,error:", "if(!1&&oo&&!Fe())return{ok:!1,error:");
+for (const old of ['"Client launcher not running"', '"Client launcher not installed/running"']) {
+  if (shell.includes(old)) shell = shell.split(old).join('"SaveState for Windows isn\u2019t answering on this PC. Open Games > Set up games to install or update it, and choose Allow if the browser asks to connect to apps on this computer."');
+}
+
 // Admin > Manage Users: every account and every group (AdminUsers.jsx). The
 // old panel listed accounts only, and groups showed only to whoever made them.
 shell = patch(shell, "manage users is the new screen", "NxAdminUsers,{})",
@@ -565,6 +575,26 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
     "relativePath:`roms/${t.platform}/${t.id}`", "relativePath:`roms/${t.platform}/${t.fileName||t.id}`");
   ch = patch(ch, "big picture launches the named file", "relativePath:`roms/${a.platform}/${a.fileName||a.id}`,fileName:a.fileName",
     "relativePath:`roms/${a.platform}/${a.id}`", "relativePath:`roms/${a.platform}/${a.fileName||a.id}`,fileName:a.fileName");
+  // Play / Get on a Play Offline card always saved the game in the browser
+  // first when the browser could store files, even with SaveState for Windows
+  // running: a 4 GB PS2 disc went into the browser (which can't run it) and
+  // nothing started. Consoles a browser can't run now go to the launcher;
+  // without it the card says what to install instead of downloading.
+  ch = patch(ch, "play offline: heavy games go to the launcher", "nxHeavyNeedsApp",
+    "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;",
+    'b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){const nxHeavyNeedsApp=`${String(t.platform).toUpperCase()} games play through SaveState for Windows. Open Games > Set up games to install it (a one-time step), then press Play again.`;f(M=>new Map(M).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:nxHeavyNeedsApp}));o?.(`Couldn\'t play ${t.title}: ${nxHeavyNeedsApp}`,"error",void 0,1e4);return}');
+  ch = patch(ch, "play offline: browser storage only for browser games", "if(y.isSupported&&nxCanBrowser(t.platform)){try{const M=x(t),k=await y.downloadRomToDevice(",
+    "if(y.isSupported){try{const M=x(t),k=await y.downloadRomToDevice(", "if(y.isSupported&&nxCanBrowser(t.platform)){try{const M=x(t),k=await y.downloadRomToDevice(");
+  ch = patch(ch, "play offline: play heavy games through the launcher", "c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){",
+    "c=(0,s.useCallback)(async t=>{if(y.isSupported){", "c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){");
+  // A game card's error overlay: "Retry" wrapped to "Ret / ry" on a wide
+  // screen, and "Manual Setup" opened the old folder form. It now opens Set
+  // up games, which installs what's missing.
+  ch = patch(ch, "game card retry stays on one line", 'whitespace-nowrap text-[9px] px-2 py-1 rounded-lg bg-red-500/20',
+    'className:"text-[9px] px-2 py-1 rounded-lg bg-red-500/20', 'className:"whitespace-nowrap text-[9px] px-2 py-1 rounded-lg bg-red-500/20');
+  ch = patch(ch, "game card error opens set up games", 'children:"Set up games"})]})]}),w==="error"',
+    'i&&(0,e.jsx)("button",{onClick:g=>{g.stopPropagation(),i()},className:"text-[9px] px-2 py-1 rounded-lg bg-white/10 border border-white/20 text-white/70 hover:bg-white/20 transition-colors",children:"Manual Setup"})]})]}),w==="idle"',
+    '(0,e.jsx)("button",{onClick:g=>{g.stopPropagation(),window.dispatchEvent(new CustomEvent("nexus:game-setup"))},className:"whitespace-nowrap text-[9px] px-2 py-1 rounded-lg bg-white/10 border border-white/20 text-white/70 hover:bg-white/20 transition-colors",children:"Set up games"})]})]}),w==="error"&&!1&&(0,e.jsx)("i",{}),w==="idle"');
   if (ch !== before) writeFileSync(file, ch);
 }
 
@@ -755,6 +785,39 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
     '{id:"mac",label:"macOS",note:".dmg installer"},{id:"linux",label:"Linux",note:".AppImage"}',
     '{id:"mac",label:"macOS",note:"Use the web app (Install App)"},{id:"linux",label:"Linux",note:"Use the web app (Install App)"}');
   if (dl !== before) writeFileSync(file, dl);
+}
+
+// 4a1. Games tab cards (LocalLibraryPanel): Play fetched the whole game into
+//      the browser's memory and opened the browser player, for every console.
+//      A 4 GB PS2 disc never started. Consoles a browser can't run now go to
+//      SaveState for Windows (the same launch as everywhere else), or say what
+//      to install.
+{
+  const file = path.join(assets, find("LocalLibraryPanel-"));
+  let ll = readFileSync(file, "utf8");
+  const before = ll;
+  const touchFile = find("touchLayouts-");
+  ll = patch(ll, "games tab knows the launcher", "nxLaunchNative",
+    'import{L as M,d as K,h as A}from"./index-', 'import{L as M,d as K,h as A,S as nxLaunchNative,y as nxLauncherUp}from"./index-');
+  ll = patch(ll, "games tab knows browser systems", "nxCanBrowser}from",
+    'import{t as W}from"./EmulatorPlayer-', `import{s as nxCanBrowser}from"./${touchFile}";import{t as W}from"./EmulatorPlayer-`);
+  ll = patch(ll, "games tab heavy games use the launcher", "nxHeavyLaunch",
+    "const X=(0,l.useCallback)(async t=>{if(!g.has(t.id)){",
+    'const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=await nxLauncherUp(1500).catch(()=>!1);if(!nxHeavyLaunch){x(`${String(t.platform).toUpperCase()} games play through SaveState for Windows. Open Games > Set up games to install it, then press Play again.`);return}const r0=await nxLaunchNative({id:t.id,title:t.title,platform:t.platform,relativePath:t.relativePath}).catch(e0=>({ok:!1,error:e0?.message}));if(!r0?.ok)x(`Couldn\'t start ${t.title}: ${r0?.error??"SaveState for Windows didn\'t answer"}`);return}if(!g.has(t.id)){');
+  if (ll !== before) writeFileSync(file, ll);
+}
+
+// 4a2. Windows Defender's machine-learning rule (Trojan:Script/ObfusScript.A!ml)
+//      took the minified invite page for an obfuscated script and deleted it
+//      from dist (2026-10-17), so invite links broke. The same code written out
+//      readably passes; it is kept that way.
+{
+  const file = path.join(assets, find("InviteRedeemer-"));
+  const text = readFileSync(file, "utf8");
+  if (!text.startsWith("// SaveState: the invite page")) {
+    const pretty = esbuild.transformSync(text, { format: "esm", loader: "js", minify: false }).code;
+    writeFileSync(file, `// SaveState: the invite page (opened from an invite link).\n${pretty}`);
+  }
 }
 
 // 4b. Error messages people can read. Screens built their errors from the

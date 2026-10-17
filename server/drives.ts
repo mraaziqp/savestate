@@ -72,10 +72,17 @@ type OffloadJob = {
   carriedBytes?: number;
   /** Files already on Drive somewhere else in the archive (same name and size): not sent again. */
   dupes?: { count: number; bytes: number; at: number; file: string; examples: string[] } | null;
+  /** Files changed in the last half hour (still downloading): left for a later run. */
+  stillChanging?: { count: number; bytes: number; at: number } | null;
 };
 
 const EXCLUDES = ["desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**", "*.partial", "*.!qB", "*.crdownload", "*.tmp"];
-const excludeArgs = () => EXCLUDES.flatMap((e) => ["--exclude", e]);
+// A file changed in the last 30 minutes is probably still being written (a
+// torrent still downloading into the folder): copying it would send half a
+// game. It waits for a later run instead.
+const SETTLE = "30m";
+const SETTLE_MS = 30 * 60_000;
+const excludeArgs = () => [...EXCLUDES.flatMap((e) => ["--exclude", e]), `--min-age=${SETTLE}`];
 const LOCAL_DRIVES = "CDEFGH".split("").map((d) => `${d}:`);
 const isLocalFs = (fs_: string) => /^[A-Za-z]:$/.test(fs_);
 /** A member's own connected drive: "u_<user id without dashes>_<n>". */
@@ -211,7 +218,7 @@ export function createDrives(deps: DrivesDeps) {
     for (const j of jobs) {
       if (j.status === "failed" && j.retryAt && now >= j.retryAt) { j.status = "queued"; j.retryAt = null; save(); }
       // Kept-up-to-date folders are copied again once a day for anything new.
-      if (j.keepSynced && j.nextSyncAt && now >= j.nextSyncAt && ["verified", "kept", "done"].includes(j.status) && existsSync(j.source)) {
+      if ((j.keepSynced || j.stillChanging?.count) && j.nextSyncAt && now >= j.nextSyncAt && ["verified", "kept", "done", "incomplete"].includes(j.status) && existsSync(j.source)) {
         j.status = "queued"; j.nextSyncAt = null; j.stats = newStats(); save();
       }
     }
@@ -384,14 +391,14 @@ export function createDrives(deps: DrivesDeps) {
     driveListing.set(key, { at: Date.now(), files });
     return files;
   }
-  async function walkLocal(root: string): Promise<Array<{ rel: string; name: string; size: number }>> {
-    const out: Array<{ rel: string; name: string; size: number }> = [];
+  async function walkLocal(root: string): Promise<Array<{ rel: string; name: string; size: number; mtimeMs: number }>> {
+    const out: Array<{ rel: string; name: string; size: number; mtimeMs: number }> = [];
     const visit = async (dir: string, rel: string) => {
       for (const d of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
         if (/^(\$RECYCLE\.BIN|System Volume Information)$/i.test(d.name)) continue;
         const r = rel ? `${rel}/${d.name}` : d.name;
         if (d.isDirectory()) await visit(path.join(dir, d.name), r);
-        else if (d.isFile()) { const st = await stat(path.join(dir, d.name)).catch(() => null); if (st) out.push({ rel: r, name: d.name, size: st.size }); }
+        else if (d.isFile()) { const st = await stat(path.join(dir, d.name)).catch(() => null); if (st) out.push({ rel: r, name: d.name, size: st.size, mtimeMs: st.mtimeMs }); }
       }
     };
     await visit(root, "");
@@ -399,12 +406,14 @@ export function createDrives(deps: DrivesDeps) {
   }
   const globEscape = (p: string) => p.replace(/[\\*?[\]{}]/g, (c) => `\\${c}`);
   async function findDupes(job: OffloadJob, bin: string) {
-    if (job.dupes && Date.now() - job.dupes.at < 6 * 3600_000 && existsSync(job.dupes.file)) return;
     const root = job.dest.split("/")[0] || job.dest;
     const [onDrive, here] = await Promise.all([listDrive(bin, job.remote, root), walkLocal(job.source)]);
     const dest = job.dest.replace(/\/+$/, "");
     const skip: string[] = []; const examples: string[] = [];
     let bytes = 0;
+    const recent = here.filter((f) => Date.now() - f.mtimeMs < SETTLE_MS);
+    job.stillChanging = recent.length ? { count: recent.length, bytes: recent.reduce((n, f) => n + f.size, 0), at: Date.now() } : null;
+    if (recent.length) deps.log("INFO", `Upload ${job.id}: ${recent.length} file(s) changed in the last half hour (still downloading?); they go in a later run`);
     for (const f of here) {
       if (f.size < 5 * 1024 * 1024) continue;
       const there = onDrive.get(`${f.name.toLowerCase()}|${f.size}`);
@@ -511,6 +520,8 @@ export function createDrives(deps: DrivesDeps) {
       }
       if (job.status === "incomplete") failed(job, `${v.missing + v.differ + v.errors} file(s) not confirmed on Drive yet`);
       if (job.keepSynced) job.nextSyncAt = Date.now() + 24 * 3600_000;
+      // Files that were still downloading: back in a few hours for them.
+      if (job.stillChanging?.count) job.nextSyncAt = Math.min(job.nextSyncAt ?? Infinity, Date.now() + 3 * 3600_000);
       pump();
     });
   }
@@ -552,7 +563,7 @@ export function createDrives(deps: DrivesDeps) {
   addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued"].includes(j.status)).map((j) => ({
     kind: "upload", title: j.label, status: j.status,
     progress: j.status === "copying" && j.stats.totalBytes ? ((j.carriedBytes ?? 0) + j.stats.bytes) / ((j.carriedBytes ?? 0) + j.stats.totalBytes) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
-    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs((j.carriedBytes ?? 0) + j.stats.bytes)} of ${gbs((j.carriedBytes ?? 0) + j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs((j.carriedBytes ?? 0) + j.stats.bytes)} of ${gbs((j.carriedBytes ?? 0) + j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
       : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : "Waiting for its turn",
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
   })));
@@ -575,6 +586,7 @@ export function createDrives(deps: DrivesDeps) {
       if (v.errors) facts.push(["Couldn't check", `${v.errors}`]);
       facts.push(["Checked", new Date(v.at).toLocaleString("en-ZA")]);
     }
+    if (j.stillChanging?.count) facts.push(["Still downloading", `${j.stillChanging.count} file(s), ${humanBytes(j.stillChanging.bytes)}: copied in a later run once they stop changing${j.nextSyncAt ? ` (next ${new Date(j.nextSyncAt).toLocaleString("en-ZA")})` : ""}`]);
     if (j.dupes?.count) facts.push(["Already on Drive elsewhere", `${j.dupes.count} file(s), ${humanBytes(j.dupes.bytes)}, not sent again (kept on this PC)`]);
     if (dur) facts.push(["Took", `${dur}${took && v ? ` (about ${humanBytes(v.matchedBytes / (took / 1000))}/s)` : ""}`]);
     if (j.deleted) facts.push(["Freed on this PC", `${j.deleted.files} file(s), ${humanBytes(j.deleted.bytes)}${j.deleted.skipped ? `, ${j.deleted.skipped} left (changed or in use)` : ""}`]);

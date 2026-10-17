@@ -256,6 +256,23 @@ const ROM_EXTENSIONS = new Set([
   '.wua', '.xci', '.nsp', '.cso', '.gcz', '.ciso',
 ]);
 
+// PCSX2 that can actually start a game: with two copies on a PC (an
+// installed one in Program Files, a set-up portable one on E:), the one with
+// a BIOS wins over the first one found.
+function pcsx2BiosDir(exe) {
+  const portable = path.join(path.dirname(exe), 'bios');
+  if (fs.existsSync(path.join(path.dirname(exe), 'portable.ini')) || fs.existsSync(path.join(path.dirname(exe), 'portable.txt'))) return portable;
+  if (dirHasFiles(portable)) return portable;
+  return path.join(os.homedir(), 'Documents', 'PCSX2', 'bios');
+}
+function dirHasFiles(dir) {
+  try { return fs.readdirSync(dir).some((n) => /\.(bin|rom\d?|mec|nvm)$/i.test(n) && fs.statSync(path.join(dir, n)).size > 100000); } catch { return false; }
+}
+function bestPcsx2(candidates) {
+  const found = candidates.filter((c) => c && fs.existsSync(c));
+  return found.find((c) => dirHasFiles(pcsx2BiosDir(c))) || found[0] || null;
+}
+
 function firstExisting(candidates) {
   for (const c of candidates) {
     if (c && fs.existsSync(c)) return c;
@@ -420,6 +437,77 @@ function startShareServer() {
   return server;
 }
 
+// ── Unpacking downloads ──────────────────────────────────────────────────────
+// The launcher installed on a PC is this one file: the adm-zip and 7zip-bin
+// modules it used are not there, so every core download and every copy of an
+// emulator from the host stopped with "Cannot find module 'adm-zip'" (seen
+// 2026-10-17 in Set up games). Now:
+//   .zip -> adm-zip if present, else Windows' own tar.exe (Windows 10 1803+),
+//           else PowerShell's Expand-Archive; `unzip` elsewhere.
+//   .7z  -> 7zip-bin if present, else 7-Zip's official standalone 7zr.exe,
+//           fetched once from 7-Zip's GitHub releases and checked by SHA-256.
+function tryRequire(name) { try { return require(name); } catch { return null; } }
+const SEVEN_ZR = {
+  url: 'https://github.com/ip7z/7zip/releases/download/24.09/7zr.exe',
+  sha256: 'd2c0045523cf053a6b43f9315e9672fc2535f06aeadd4ffa53c729cd8b2b6dfe',
+};
+async function extractZip(src, dest) {
+  ensureDirSync(dest);
+  const AdmZip = tryRequire('adm-zip');
+  if (AdmZip) { new AdmZip(src).extractAllTo(dest, true); return; }
+  let file = src;
+  let tmp = null;
+  if (Buffer.isBuffer(src)) {
+    tmp = path.join(os.tmpdir(), `nx-unpack-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.zip`);
+    await fsp.writeFile(tmp, src);
+    file = tmp;
+  }
+  try {
+    let r;
+    if (IS_WIN) {
+      r = await runProcess(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', file, '-C', dest], 600_000);
+      if (r.code !== 0) {
+        const q = (s) => String(s).replace(/'/g, "''");
+        r = await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Expand-Archive -LiteralPath '${q(file)}' -DestinationPath '${q(dest)}' -Force`], 600_000);
+      }
+    } else {
+      r = await runProcess('unzip', ['-o', '-q', file, '-d', dest], 600_000);
+    }
+    if (r.code !== 0) throw new Error(`Could not unpack the download${r.stderr ? `: ${String(r.stderr).slice(0, 200)}` : ''}`);
+  } finally {
+    if (tmp) fs.rmSync(tmp, { force: true });
+  }
+}
+let sevenZrReady = null;
+function get7z() {
+  const bin = tryRequire('7zip-bin');
+  if (bin && bin.path7za && fs.existsSync(bin.path7za)) return Promise.resolve(bin.path7za);
+  if (!IS_WIN) return Promise.resolve('7z');
+  sevenZrReady ??= (async () => {
+    const exe = path.join(clientRoot, 'tools', '7zr.exe');
+    const sha = (buf) => require('crypto').createHash('sha256').update(buf).digest('hex');
+    if (fs.existsSync(exe) && sha(fs.readFileSync(exe)) === SEVEN_ZR.sha256) return exe;
+    const res = await fetch(SEVEN_ZR.url, { signal: AbortSignal.timeout(120_000) });
+    if (!res.ok) throw new Error(`Could not get 7-Zip to unpack the download (HTTP ${res.status})`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (sha(buf) !== SEVEN_ZR.sha256) throw new Error('The 7-Zip download did not match its checksum; not using it.');
+    ensureDirSync(path.dirname(exe));
+    await fsp.writeFile(exe, buf);
+    return exe;
+  })().catch((e) => { sevenZrReady = null; throw e; });
+  return sevenZrReady;
+}
+async function extract7z(file, dest) {
+  ensureDirSync(dest);
+  const bin = await get7z();
+  const { code, stderr } = await runProcess(bin, ['x', file, `-o${dest}`, '-y'], 600_000);
+  if (code !== 0) throw new Error(`Could not unpack ${path.basename(file)} (exit ${code}${stderr ? `: ${String(stderr).slice(0, 200)}` : ''})`);
+}
+// Emulators people unpack themselves usually sit at the top of a drive
+// (E:\RPCS3, D:\PCSX2): look there too, not only in the default folders.
+const DRIVE_LETTERS = IS_WIN ? 'CDEFGHIJ'.split('') : [];
+const onDrives = (...rel) => DRIVE_LETTERS.flatMap((d) => [path.join(`${d}:\\`, ...rel), path.join(`${d}:\\`, 'Emulators', ...rel)]);
+
 function getEmulatorPath(platform) {
   const cfg = loadConfig();
   const p = String(platform || '').toLowerCase();
@@ -451,6 +539,7 @@ function getEmulatorPath(platform) {
     // Default of the official installer (and `winget install Libretro.RetroArch`).
     'C:\\RetroArch-Win64\\retroarch.exe',
     'C:\\RetroArch\\retroarch.exe',
+    ...onDrives('RetroArch-Win64', 'retroarch.exe'), ...onDrives('RetroArch', 'retroarch.exe'),
     'C:\\Program Files\\RetroArch-Win64\\retroarch.exe',
     'C:\\Program Files (x86)\\RetroArch-Win64\\retroarch.exe',
   ] : IS_MAC ? [
@@ -485,13 +574,14 @@ function getEmulatorPath(platform) {
     path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.DolphinEmu.dolphin-emu'),
   ]);
 
-  const pcsx2 = firstExisting(IS_WIN ? [
+  const pcsx2 = (IS_WIN ? bestPcsx2 : firstExisting)(IS_WIN ? [
     cfg.emulators?.pcsx2,
     ...inEmuDirs('PCSX2', 'pcsx2-qt.exe'),
     path.join(emuRoot, 'PCSX2', 'pcsx2-qt.exe'),
     ...inEmuDirs('PCSX2', 'pcsx2.exe'),
     path.join(emuRoot, 'PCSX2', 'pcsx2.exe'),
     'C:\\Program Files\\PCSX2\\pcsx2-qt.exe',
+    ...onDrives('PCSX2', 'pcsx2-qt.exe'),
   ] : IS_MAC ? [
     cfg.emulators?.pcsx2,
     '/Applications/PCSX2.app/Contents/MacOS/PCSX2',
@@ -522,6 +612,7 @@ function getEmulatorPath(platform) {
     path.join(emuRoot, 'RPCS3', 'rpcs3.exe'),
     path.join(emuRoot, 'RCPS3', 'rpcs3.exe'),
     'C:\\RPCS3\\rpcs3.exe',
+    ...onDrives('RPCS3', 'rpcs3.exe'),
     'C:\\Program Files\\RPCS3\\rpcs3.exe',
     path.join(process.env.LOCALAPPDATA || '', 'rpcs3', 'rpcs3.exe'),
   ] : [
@@ -546,6 +637,7 @@ function getEmulatorPath(platform) {
     path.join(emuRoot, 'Ryujinx', 'Ryujinx.exe'),
     path.join(process.env.LOCALAPPDATA || '', 'Eden', 'eden.exe'),
     path.join(process.env.LOCALAPPDATA || '', 'Ryujinx', 'Ryujinx.exe'),
+    ...onDrives('Ryujinx', 'Ryujinx.exe'), ...onDrives('Eden', 'eden.exe'),
   ] : [
     cfg.emulators?.eden, cfg.emulators?.ryujinx,
     '/usr/bin/eden', '/usr/bin/ryujinx',
@@ -803,9 +895,7 @@ async function installRetroArchWindowsPortable() {
   }
   if (!downloaded) throw new Error(`RetroArch download failed (${errors.join('; ') || 'no source succeeded'})`);
 
-  const { path7za } = require('7zip-bin');
-  const { code, stderr } = await runProcess(path7za, ['x', archivePath, `-o${downloadDir}`, '-y'], 180_000);
-  if (code !== 0) throw new Error(`RetroArch.7z extraction failed (exit ${code}${stderr ? ` — ${stderr}` : ''})`);
+  await extract7z(archivePath, downloadDir);
   fs.rmSync(archivePath, { force: true });
 
   const findExe = (dir) => {
@@ -881,9 +971,7 @@ async function installPCSX2WindowsPortable() {
   if (!res.ok) throw new Error(`PCSX2 download failed (HTTP ${res.status} at ${url})`);
   await fsp.writeFile(archivePath, Buffer.from(await res.arrayBuffer()));
 
-  const { path7za } = require('7zip-bin');
-  const { code, stderr } = await runProcess(path7za, ['x', archivePath, `-o${downloadDir}`, '-y'], 180_000);
-  if (code !== 0) throw new Error(`PCSX2.7z extraction failed (exit ${code}${stderr ? ` — ${stderr}` : ''})`);
+  await extract7z(archivePath, downloadDir);
   fs.rmSync(archivePath, { force: true });
 
   const findExe = (dir) => {
@@ -1041,49 +1129,72 @@ const CONSOLE_SETUP = {
 async function runConsoleSetup(job, platforms, hostUrl, token) {
   const step = (platform) => job.steps.find((s) => s.platform === platform);
   const set = (platform, status, detail) => { const s = step(platform); if (s) { s.status = status; s.detail = detail || ''; } };
+  const errText = (e) => String(e && e.message ? e.message : e);
+  // Twice before saying anything is wrong: a dropped connection or a busy
+  // mirror is the usual reason a download fails, and a second go fixes it.
+  const twice = async (fn) => { try { return await fn(); } catch { await new Promise((r) => setTimeout(r, 2000)); return fn(); } };
+  // The host's own copy first (the same working setup, over the fastest
+  // link), the official download if the host has none.
+  const fromHost = async (key) => {
+    if (!hostUrl) return false;
+    const r = await twice(() => performCloneHostSetup(hostUrl, token, { only: [key] })).catch(() => null);
+    return !!(r && r.steps && r.steps.some((x) => x.ok));
+  };
+
   // RetroArch once, if any chosen console runs on a core.
   let retroarch = null;
-  const needsCore = platforms.some((p) => CONSOLE_SETUP[p] && CONSOLE_SETUP[p].core && !(CONSOLE_SETUP[p].standalone && getEmulatorPath(p)));
+  const needsCore = platforms.some((p) => CONSOLE_SETUP[p] && CONSOLE_SETUP[p].core && !(CONSOLE_SETUP[p].standalone && getEmulatorPath(p) && !isRetroArch(getEmulatorPath(p))));
   if (needsCore) {
     retroarch = getEmulatorPath('nes');
     if (!retroarch || !isRetroArch(retroarch)) {
-      for (const p of platforms) if (CONSOLE_SETUP[p] && CONSOLE_SETUP[p].core) set(p, 'working', 'Installing RetroArch (once for all consoles)…');
-      const r = await ensureRetroArchInstalled().catch((e) => ({ ok: false, detail: String(e && e.message ? e.message : e) }));
-      retroarch = r && r.ok ? getEmulatorPath('nes') : null;
+      for (const p of platforms) if (CONSOLE_SETUP[p] && CONSOLE_SETUP[p].core) set(p, 'working', 'Getting RetroArch (once for all these consoles)…');
+      if (await fromHost('retroarch')) retroarch = getEmulatorPath('nes');
+      if (!retroarch || !isRetroArch(retroarch)) {
+        const r = await twice(() => ensureRetroArchInstalled()).catch((e) => ({ ok: false, detail: errText(e) }));
+        retroarch = r && r.ok ? getEmulatorPath('nes') : null;
+        if (!retroarch) job.retroarchError = (r && r.detail) || 'RetroArch could not be installed.';
+      }
+      for (const p of platforms) { const s = step(p); if (s && s.status === 'working') { s.status = 'waiting'; s.detail = ''; } }
     }
   }
+
   for (const platform of platforms) {
     const spec = CONSOLE_SETUP[platform];
     if (!spec) { set(platform, 'failed', 'This console has no automatic setup yet.'); continue; }
     set(platform, 'working', 'Setting up…');
     try {
       if (spec.manual) { set(platform, 'manual', `Install ${spec.manual} yourself; SaveState finds it once it is installed.`); continue; }
+      let lastError = '';
       if (spec.standalone) {
-        if (getEmulatorPath(platform) && !(spec.core && isRetroArch(getEmulatorPath(platform)))) { set(platform, 'done', `Already installed: ${path.basename(getEmulatorPath(platform))}`); continue; }
-        let done = false;
-        if (spec.install) {
-          const r = await spec.install().catch((e) => ({ ok: false, detail: String(e && e.message ? e.message : e) }));
-          if (r && r.ok) { set(platform, 'done', r.detail || 'Installed'); done = true; }
+        const have = getEmulatorPath(platform);
+        if (have && !isRetroArch(have)) { set(platform, 'done', `Ready (${path.basename(have)})`); continue; }
+        set(platform, 'working', 'Copying the emulator from the host…');
+        let done = await fromHost(spec.standalone) && !!getEmulatorPath(platform) && !isRetroArch(getEmulatorPath(platform));
+        if (!done && spec.install) {
+          set(platform, 'working', 'Downloading the emulator from its official site…');
+          const r = await twice(() => spec.install()).catch((e) => ({ ok: false, detail: errText(e) }));
+          done = !!(r && r.ok);
+          if (!done) lastError = (r && r.detail) || '';
         }
-        if (!done && hostUrl) {
-          const r = await performCloneHostSetup(hostUrl, token, { only: [spec.standalone] }).catch(() => null);
-          const s = r && r.steps && r.steps.find((x) => x.ok);
-          if (s && getEmulatorPath(platform)) { set(platform, 'done', `Installed from the host: ${s.detail}`); done = true; }
+        if (done) { set(platform, 'done', 'Ready'); continue; }
+        if (!spec.core) {
+          set(platform, 'failed', `Its emulator couldn't be installed automatically${lastError ? ` (${lastError})` : ''}. Try again, or install it from its card in Emulation Setup.`);
+          continue;
         }
-        if (done) continue;
-        if (!spec.core) { set(platform, 'failed', 'Could not install its emulator automatically. Its card in Emulation Setup links to the download.'); continue; }
       }
       if (spec.core) {
-        if (!retroarch) { set(platform, 'failed', 'RetroArch could not be installed. Check the internet connection and try again.'); continue; }
-        const r = await ensureRetroArchCore(retroarch, spec.core);
+        if (!retroarch) { set(platform, 'failed', `RetroArch couldn't be installed (${job.retroarchError || 'no connection'}). Try again in a moment.`); continue; }
+        set(platform, 'working', 'Getting its core…');
+        let r = await ensureRetroArchCore(retroarch, spec.core).catch((e) => ({ ok: false, detail: errText(e) }));
+        if (!r.ok) { await new Promise((res) => setTimeout(res, 2000)); r = await ensureRetroArchCore(retroarch, spec.core).catch((e) => ({ ok: false, detail: errText(e) })); }
         if (r.ok) {
           const coreId = PLATFORM_CORES[spec.core];
           if (coreId) await ensureCoreSystemFiles(retroarch, coreId).catch(() => null);
-          set(platform, 'done', r.installed ? 'Installed' : 'Ready');
-        } else set(platform, 'failed', r.detail || 'The core could not be downloaded.');
+          set(platform, 'done', 'Ready');
+        } else set(platform, 'failed', `${r.detail || 'The core could not be downloaded.'} Try again in a moment.`);
       }
     } catch (e) {
-      set(platform, 'failed', String(e && e.message ? e.message : e));
+      set(platform, 'failed', `${errText(e)}. Try again in a moment.`);
     }
   }
 }
@@ -1103,7 +1214,7 @@ function biosDirsFor(system, forWriting) {
   const cfg = loadConfig();
   const dirs = [];
   const emuDir = (p) => { const e = getEmulatorPath(p); return e ? path.dirname(e) : null; };
-  if (system === 'ps2') { const d = emuDir('ps2'); if (d && !isRetroArch(getEmulatorPath('ps2'))) dirs.push(path.join(d, 'bios')); }
+  if (system === 'ps2') { const e = getEmulatorPath('ps2'); if (e && !isRetroArch(e)) dirs.push(pcsx2BiosDir(e)); }
   else if (system === 'switch') {
     const d = emuDir('switch');
     if (d) dirs.push(path.join(d, fs.existsSync(path.join(d, 'portable')) || forWriting ? 'portable' : '', 'system'));
@@ -1163,7 +1274,6 @@ async function performCloneHostSetup(hostUrl, token, opts = {}) {
     return { ok: false, error: `Could not reach host: ${e && e.message ? e.message : e}` };
   }
 
-  const AdmZip = require('adm-zip');
   const steps = [];
 
   // Downloads+extracts the zip, verifies every file the manifest gave a hash
@@ -1182,7 +1292,7 @@ async function performCloneHostSetup(hostUrl, token, opts = {}) {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       if (r.status !== 204) {
         const buf = Buffer.from(await r.arrayBuffer());
-        if (buf.length > 0) new AdmZip(buf).extractAllTo(destDir, true);
+        if (buf.length > 0) await extractZip(buf, destDir);
       }
       const bad = await verifyClonedHashes(destDir, hashes);
       if (bad.length === 0) return { attempt, bad: [], skipped: skip.length };
@@ -1284,6 +1394,9 @@ async function performCloneHostSetup(hostUrl, token, opts = {}) {
         // own cfg.emulators slot, so which one gets written depends on
         // which exe name actually shows up after extraction.
         { key: 'switch', platform: 'switch', folder: 'Switch', label: 'Switch Emulator', exeMap: [['eden.exe', 'eden'], ['Ryujinx.exe', 'ryujinx']] },
+        // The host's own RetroArch (no cores, no system files): the same
+        // program that already works there, instead of a 300 MB download.
+        { key: 'retroarch', platform: 'nes', folder: 'RetroArch', label: 'RetroArch', exeMap: [['retroarch.exe', 'retroarch']] },
       ];
       for (const target of STANDALONE_TARGETS) {
         const info = standaloneManifest[target.key];
@@ -1382,14 +1495,8 @@ async function installStandaloneEmulatorPortable({ name, folderName, githubRepo,
   if (!dlRes.ok) throw new Error(`${name} download failed (HTTP ${dlRes.status} at ${asset.browser_download_url})`);
   await fsp.writeFile(archivePath, Buffer.from(await dlRes.arrayBuffer()));
 
-  if (archiveType === '7z') {
-    const { path7za } = require('7zip-bin');
-    const { code, stderr } = await runProcess(path7za, ['x', archivePath, `-o${downloadDir}`, '-y'], 180_000);
-    if (code !== 0) throw new Error(`${name} archive extraction failed (exit ${code}${stderr ? ` — ${stderr}` : ''})`);
-  } else {
-    const AdmZip = require('adm-zip');
-    new AdmZip(archivePath).extractAllTo(downloadDir, true);
-  }
+  if (archiveType === '7z') await extract7z(archivePath, downloadDir);
+  else await extractZip(archivePath, downloadDir);
   fs.rmSync(archivePath, { force: true });
 
   const findExe = (dir) => {
@@ -1519,8 +1626,7 @@ async function installRetroArchLinuxPortable() {
   if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
   await fsp.writeFile(archivePath, Buffer.from(await res.arrayBuffer()));
 
-  const { path7za } = require('7zip-bin');
-  await runProcess(path7za, ['x', archivePath, `-o${downloadDir}`, '-y'], 180_000);
+  await extract7z(archivePath, downloadDir);
 
   const findAppImage = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -1622,8 +1728,7 @@ async function ensureCoreSystemFiles(retroarchPath, coreId) {
     const res = await fetch(spec.url, { signal: AbortSignal.timeout(180_000) });
     if (!res.ok) return { ok: false, detail: `System files download failed: HTTP ${res.status}` };
     ensureDirSync(systemDir);
-    const AdmZip = require('adm-zip');
-    new AdmZip(Buffer.from(await res.arrayBuffer())).extractAllTo(systemDir, true);
+    await extractZip(Buffer.from(await res.arrayBuffer()), systemDir);
     const ok = fs.existsSync(path.join(systemDir, spec.marker));
     return ok
       ? { ok: true, installed: true, detail: 'System files installed' }
@@ -1659,10 +1764,8 @@ async function ensureRetroArchCore(retroarchPath, platform) {
       }
     }
     if (!buf) return { ok: false, coreId, detail: `Core download failed: ${lastDetail || 'no source reachable'}` };
-    const AdmZip = require('adm-zip');
-    const zip = new AdmZip(buf);
     const coresDir = pickWritableCoreDir(retroarchPath);
-    zip.extractAllTo(coresDir, true);
+    await extractZip(buf, coresDir);
     const after = firstExisting([path.join(coresDir, `${coreId}_libretro${CORE_EXT}`), getCorePath(retroarchPath, platform)]);
     if (after) return { ok: true, installed: true, coreId, path: after, detail: 'Core installed' };
     return { ok: false, coreId, detail: 'Core install attempted but not detected' };
@@ -2241,14 +2344,8 @@ async function extractRomIfArchived(romFile, platform) {
   if (cached) return cached;
 
   ensureDirSync(destDir);
-  if (ext === '.zip') {
-    const AdmZip = require('adm-zip');
-    new AdmZip(romFile).extractAllTo(destDir, true);
-  } else {
-    const { path7za } = require('7zip-bin');
-    const { code, stderr } = await runProcess(path7za, ['x', romFile, `-o${destDir}`, '-y'], 180_000);
-    if (code !== 0) throw new Error(`Failed to extract ${path.basename(romFile)} (exit ${code}${stderr ? ` — ${stderr}` : ''})`);
-  }
+  if (ext === '.zip') await extractZip(romFile, destDir);
+  else await extract7z(romFile, destDir);
   const discImage = findDiscImage(destDir);
   if (!discImage) throw new Error(`${path.basename(romFile)} was extracted but no disc image (.iso/.bin/.cue/etc.) was found inside it`);
   return discImage;
@@ -2903,8 +3000,9 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 7,
+    version: 8,
     // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
+    // v8: unpacks without bundled modules; copies RetroArch from the host.
     features: ['setup-consoles', 'bios', 'rom-folder'],
     native: true,
     embedded: 'electron',
@@ -3340,6 +3438,12 @@ function startEmbeddedLauncher(opts = {}) {
         send({ ok: true, files: files.map((f) => {
           const name = safeBiosName(f && f.name);
           if (!name) return { name: String((f && f.name) || ''), found: null };
+          // PS3 firmware counts once RPCS3 has installed it (its dev_flash).
+          if (String(f.system) === 'ps3') {
+            const rp = getEmulatorPath('ps3');
+            const flash = rp ? path.join(path.dirname(rp), 'dev_flash', 'vsh', 'module') : null;
+            if (flash && fs.existsSync(flash)) return { name, system: f.system, found: 'installed in RPCS3' };
+          }
           const hit = biosDirsFor(String((f && f.system) || '')).map((d) => path.join(d, name)).find((x) => existsCaseInsensitive(x));
           return { name, system: f.system, found: hit || null };
         }) });
@@ -3362,7 +3466,15 @@ function startEmbeddedLauncher(opts = {}) {
         }
         if (!written.length) { send({ ok: false, error: 'Could not save the file on this PC.' }, 500); return; }
         const md5 = require('crypto').createHash('md5').update(buf).digest('hex');
-        send({ ok: true, name, md5, written });
+        // PS3 system software goes inside RPCS3: open its own installer for it.
+        let opened = null;
+        if (system === 'ps3' && /\.pup$/i.test(name)) {
+          const rp = getEmulatorPath('ps3');
+          if (rp && !isRetroArch(rp)) {
+            try { const c = spawn(rp, ['--installfw', written[0]], { detached: true, stdio: 'ignore', cwd: path.dirname(rp) }); c.unref(); opened = 'rpcs3'; } catch { /* manual */ }
+          }
+        }
+        send({ ok: true, name, md5, written, opened });
         return;
       }
 

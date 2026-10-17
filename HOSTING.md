@@ -499,6 +499,16 @@ on the PC (`/add-rom-folder` opens Windows' folder picker). The launcher has
 no self-update: an installed one updates by running the installer again
 (the wizard says so when it finds an older version).
 
+Launcher v8 (2026-10-17): the installed launcher is one file, so it no
+longer needs `adm-zip`/`7zip-bin` (v7 failed every core download with
+"Cannot find module 'adm-zip'"): zips open with Windows' `tar.exe`, 7z with
+7-Zip's `7zr.exe` 24.09 from its GitHub release, pinned by SHA-256. Setup
+copies from the host first (RetroArch without cores/system/saves, PCSX2,
+RPCS3 without firmware, Ryujinx without keys; `/api/emulator/export/standalone?name=`
+and `/export/cores?only=`), then the official download, each tried twice.
+Emulators at the top of a drive (E:\RPCS3, E:\Ryujinx) are found, and the
+PCSX2 that has a BIOS wins. A fresh simulated PC set up 14 consoles in 60 s.
+
 **The host never hands out system files any more:** the export manifest's
 BIOS part is empty, `/api/emulator/export/bios` answers 410, and emulator
 exports skip `bios`, `portable`, `bis`, `nand`, `keys`, `firmware`, `user`
