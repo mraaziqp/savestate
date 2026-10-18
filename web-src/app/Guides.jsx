@@ -177,12 +177,35 @@ const GUIDES = [
         <p className="lead">Your whole library is playable on a phone.</p>
         <ul className="nxg-sec">
           <li><b>Older systems</b> play on the phone itself, with on-screen buttons. Choose <b>Play on this phone</b>.</li>
-          <li><b>PS2, GameCube and other big systems</b> are too heavy for a phone: choose <b>Stream from the host PC</b>.</li>
+          <li><b>PSP, PS2, GameCube and Wii</b> play on an Android phone in a free emulator app (PPSSPP, NetherSX2, Dolphin): <b>Play on this phone</b> downloads the game and opens it there. <b>Set up games</b> lists the apps.</li>
+          <li><b>PS3, Switch and PC games</b> are too heavy for a phone: choose <b>Stream from the host PC</b>.</li>
+          <li>On Games, <b>This phone</b> shows only what plays on the phone you're holding.</li>
           <li><b>Without signal:</b> in <b>Play Offline</b>, press <b>Get &amp; Play</b> on a game while you're online. It stays on the phone and plays later with no connection.</li>
           <li>A Bluetooth controller works: pair it with the phone, then press any button in the game.</li>
         </ul>
         <div className="nxg-tip">Turn the phone sideways for the biggest picture. Saves are kept on the device, and cloud saves follow you where the game supports them.</div>
         <Go tab="consoles">Open Play Offline</Go>
+      </>
+    ),
+  },
+  {
+    id: "vita", group: "Games", title: "SaveState on a PS Vita", icon: "game",
+    words: "ps vita psvita vpk vitashell retroarch adrenaline psp moonlight handheld homebrew",
+    body: (
+      <>
+        <p className="lead">SaveState for PS Vita is an app for a Vita with homebrew enabled (HENkaku / Ensō). It shows the host's games that a Vita runs, downloads one and starts it.</p>
+        <ol>
+          <li><b>Download the app:</b> <a href="/api/downloads/vita" download>SaveState.vpk</a>.</li>
+          <li><b>Copy it to the Vita</b> with VitaShell (USB, or FTP: press SELECT in VitaShell and open the address it shows in a file manager on your PC).</li>
+          <li><b>Install it:</b> in VitaShell, select the VPK and press X. A SaveState bubble appears on the home screen.</li>
+          <li><b>Sign in</b> with your SaveState account. At home, set the host address to the home-network one (for example <span className="nxg-code">http://192.168.31.201:3000</span>) in Settings: games download much faster.</li>
+        </ol>
+        <ul className="nxg-sec">
+          <li><b>NES, SNES, Game Boy, GBA, Mega Drive, Master System, PC Engine, Neo Geo, arcade, Atari and PS1</b> play in <b>RetroArch for PS Vita</b> (from retroarch.com). SaveState starts the game in it with the right core. Neo Geo games get the BIOS from the host by themselves.</li>
+          <li><b>PSP</b> games go to <span className="nxg-code">ux0:pspemu/ISO</span> and play in <b>Adrenaline</b>; SaveState opens it for you.</li>
+          <li><b>PS2, GameCube, PS3 and PC games</b> stream from the host PC with <b>Moonlight for PS Vita</b> (github.com/xyzz/vita-moonlight); the app's Stream tab opens it.</li>
+        </ul>
+        <div className="nxg-tip">Downloaded games stay on the Vita and play without a connection. On this Vita lists them; SQUARE removes one.</div>
       </>
     ),
   },

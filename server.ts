@@ -6913,6 +6913,7 @@ async function startServer() {
         );
         const all = dedupeGamesForClient(withAvailability(r.rows.map(rowToGame)));
         res.set('X-Total-Count', String(all.length));
+        if (req.query.for === "vita") return res.json(forVita(all));
         return res.json(paginate(all));
       } catch (err) {
         log("ERROR", `Games fetch failed: ${err}`, "database");
@@ -6921,8 +6922,21 @@ async function startServer() {
     const all = dedupeGamesForClient(withAvailability(mem.games.filter(g => !!g.relativePath && g.relativePath.trim() !== "")
       .map((g) => ({ ...g, platform: inferPlatformFromRecord(g.platform, g.relativePath, g.title, g.coreId) }))));
     res.set('X-Total-Count', String(all.length));
+    if (req.query.for === "vita") return res.json(forVita(all));
     res.json(paginate(all));
   });
+
+  // SaveState for PS Vita (vita/): only the consoles a Vita runs (RetroArch
+  // cores, PSP through Adrenaline), as small as the list can be: the Vita
+  // parses it with jansson on a 444 MHz CPU.
+  //   i id, t title, p platform, f file name (the size comes with the download)
+  const VITA_PLATFORMS = new Set(["nes", "snes", "gb", "gbc", "gba", "genesis", "megadrive", "mastersystem", "gamegear", "segacd", "pce", "neogeo", "mame", "arcade", "fbneo", "atari2600", "atari", "ps1", "psx", "psp"]);
+  function forVita(all: any[]) {
+    return all
+      .filter((g) => VITA_PLATFORMS.has(String(g.platform ?? "").toLowerCase()))
+      .map((g) => ({ i: g.id, t: g.title, p: String(g.platform).toLowerCase(), f: path.basename(String(g.relativePath ?? "").replace(/\\/g, "/")) }))
+      .sort((a, b) => a.t.localeCompare(b.t));
+  }
 
   app.delete("/api/games/:id", async (req, res) => {
     const authPayload = (req as any).authPayload;
@@ -20447,17 +20461,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return job;
   }
 
-  async function artThumb(id: string, src: string, srcMtime: number, width: number): Promise<string | null> {
-    const out = path.join(ART_SMALL_DIR, `${id}.w${width}.webp`);
+  async function artThumb(id: string, src: string, srcMtime: number, width: number, fmt: "webp" | "jpg" = "webp"): Promise<string | null> {
+    const out = path.join(ART_SMALL_DIR, `${id}.w${width}.${fmt}`);
     const st = await stat(out).catch(() => null);
     if (st && st.mtimeMs >= srcMtime) return out;
-    const key = `${id}@${width}`;
+    const key = `${id}@${width}.${fmt}`;
     let job = artShrinkInflight.get(key);
     if (!job) {
       job = (async () => {
         try {
           const sharp = (await import("sharp")).default;
-          const webp = await sharp(src).resize({ width, withoutEnlargement: true }).webp({ quality: 74 }).toBuffer();
+          const img = sharp(src).resize({ width, withoutEnlargement: true });
+          const webp = await (fmt === "jpg" ? img.flatten({ background: "#11131f" }).jpeg({ quality: 78 }) : img.webp({ quality: 74 })).toBuffer();
           await mkdir(ART_SMALL_DIR, { recursive: true });
           const tmp = `${out}.${process.pid}.tmp`;
           await writeFile(tmp, webp);
@@ -20516,7 +20531,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       let file = p;
       // Phone cards ask for ?w=360: a 75 KB cover becomes about 12 KB.
       const w = Number(req.query.w) || 0;
-      const thumb = w > 0 ? await artThumb(id, p, st.mtimeMs, w <= 240 ? 240 : w <= 360 ? 360 : 480) : null;
+      const thumb = w > 0 ? await artThumb(id, p, st.mtimeMs, w <= 160 ? 160 : w <= 240 ? 240 : w <= 360 ? 360 : 480, req.query.fmt === "jpg" ? "jpg" : "webp") : null;
       if (thumb) file = thumb;
       else if (st.size > ART_SHRINK_OVER_BYTES) file = (await smallArt(id, p, st.size, st.mtimeMs)) ?? p;
       const type = sniffImageType(await readHead(file).catch(() => Buffer.alloc(0)));
@@ -28735,6 +28750,15 @@ Format as JSON:
     res.sendFile(path.join(process.cwd(), 'scripts', 'install.sh'), (err) => {
       if (err && !res.headersSent) res.status(404).type('text/plain').send('echo "The installer is missing on this host." >&2; exit 1\n');
     });
+  });
+
+  // SaveState for PS Vita (vita/): the newest releases/updates/SaveState-Vita-<version>.vpk.
+  app.get('/api/downloads/vita', async (_req, res) => {
+    const dir = path.join(process.cwd(), 'releases', 'updates');
+    const files = (await readdir(dir).catch(() => [] as string[])).filter((f) => /^SaveState-Vita-[\d.]+\.vpk$/i.test(f));
+    files.sort((a, b) => (semverGt(a.replace(/^\D+|\.vpk$/gi, ''), b.replace(/^\D+|\.vpk$/gi, '')) ? -1 : 1));
+    if (!files[0]) return res.status(404).json({ error: 'No PS Vita app on this host yet' });
+    res.download(path.join(dir, files[0]), 'SaveState.vpk');
   });
 
   app.get('/api/downloads/desktop', async (req, res) => {

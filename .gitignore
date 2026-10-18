@@ -63,3 +63,6 @@ android/app/src/main/assets/public/
 
 # Built app installers published by the host (scripts/windows/build-apk.ps1, desktop builds)
 releases/
+
+# PS Vita app build output (vita/CMakeLists.txt)
+vita/build/
