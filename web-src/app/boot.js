@@ -305,6 +305,12 @@ import "./devices.js";
     XMLHttpRequest.prototype.send = function () {
       if (this.__nxUrl && VIDEO.test(this.__nxUrl)) {
         this.addEventListener("loadend", () => {
+          // The NAS is still preparing this film (server/videoprep.ts): the
+          // player's error panel shows why, not "stopped responding".
+          if (this.status === 503) {
+            try { const b = JSON.parse(this.responseText); if (b?.code === "preparing") window.__nxPrepMsg = b.error; } catch { /* not JSON */ }
+            return;
+          }
           if (this.status !== 409) return;
           let body = null;
           try { if (!this.responseType || this.responseType === "text") body = JSON.parse(this.responseText); } catch { /* binary */ }

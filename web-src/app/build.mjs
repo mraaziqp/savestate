@@ -803,6 +803,20 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   hub = patch(hub, "video player preload skipped on phones", 'matchMedia("(max-width: 767px)").matches||navigator.connection?.saveData)&&setTimeout(()=>{import("./hls-',
     'typeof window<"u"&&setTimeout(()=>{import("./hls-',
     'typeof window<"u"&&!(matchMedia("(max-width: 767px)").matches||navigator.connection?.saveData)&&setTimeout(()=>{import("./hls-');
+  // 3p. Every file type plays (server/videoprep.ts): a film with a prepared
+  //     copy (webReady) plays it directly, on any host; any other file that
+  //     isn't an MP4 or WebM goes through the server. Only eight extensions
+  //     did before, so .mpg, .vob, .3gp, .ogv... were handed to the browser
+  //     as they were and never started.
+  hub = patch(hub, "player: any file type through the server", 'xt=!n.webReady&&(!["mp4","m4v","webm"].includes(Bt)',
+    'xt=["mkv","avi","mov","wmv","flv","ts","mts","m2ts"].includes(Bt)||["mp4","m4v"].includes(Bt)&&!Nr',
+    'xt=!n.webReady&&(!["mp4","m4v","webm"].includes(Bt)||["mp4","m4v"].includes(Bt)&&!Nr)');
+  hub = patch(hub, "player: prepared copy plays directly", 'Ze=!n.webReady&&(xt||At)||',
+    'Ze=xt||At||ue!=="auto"', 'Ze=!n.webReady&&(xt||At)||ue!=="auto"');
+  // A film still being prepared (the NAS answers 503 "preparing") says so.
+  hub = patch(hub, "player: says when a film is being prepared", 'window.__nxPrepMsg||"The stream stopped',
+    'children:"The stream stopped responding after several retries"',
+    'children:window.__nxPrepMsg||"The stream stopped responding after several retries"');
   if (hub !== before) writeFileSync(file, hub);
 }
 

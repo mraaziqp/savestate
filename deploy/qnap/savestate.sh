@@ -24,7 +24,8 @@ mount_library() {
   mkdir -p "$BASE/library" "$BASE/cache/rclone"
   rclone mount gdrive:NexusArchive "$BASE/library" --config "$BASE/rclone/rclone.conf" --read-only \
     --vfs-cache-mode full --cache-dir "$BASE/cache/rclone" --vfs-cache-max-size 150G --vfs-cache-max-age 720h \
-    --dir-cache-time 24h --poll-interval 5m --vfs-read-chunk-size 16M --buffer-size 8M \
+    --dir-cache-time 24h --poll-interval 1m --vfs-fast-fingerprint \
+    --vfs-read-chunk-size 32M --vfs-read-chunk-size-limit 256M --vfs-read-ahead 64M --buffer-size 16M \
     --log-file "$LOG/rclone.log" --log-level NOTICE --daemon </dev/null >/dev/null 2>&1
 }
 

@@ -30,6 +30,7 @@ import { createAdminPeople } from "./server/adminpeople.ts";
 import { createGameMode } from "./server/game-mode.ts";
 import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
+import { createVideoPrep } from "./server/videoprep.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
@@ -2629,7 +2630,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
   // Language/subtitle-only folder names to skip (they contain no video, just SRT files)
   const SKIP_DIR_PATTERNS = /^(Subs?|Subtitles?|Behind\s+the\s+Scenes|Interviews?|Trailers?|BDExtras|[A-Za-z]{2,3}\s*\(.*\))$/i;
   // Non-media root folders to skip (game boxart, ROMs, emulators, system folders, build artifacts, code repos)
-  const SKIP_ROOT_DIRS = /^(nexus-art|NexusROMs|Emu|SteamLibrary|\$RECYCLE\.BIN|\.Trash-\d+|\.git|\.nexus-data|System Volume Information|node_modules|dist|build|FlareSolver|quarantine|cores|\.claude|\.gemini|NexussEmu|NexusWinHostData|pics|Projects|AlphaTraders|BCXConnect|financeplay|Project Cupid|Sdk|android-sdk|AndroidStudioProjects|releases|backups|target|cargo-home)$/i;
+  const SKIP_ROOT_DIRS = /^(\.nxweb|nexus-art|NexusROMs|Emu|SteamLibrary|\$RECYCLE\.BIN|\.Trash-\d+|\.git|\.nexus-data|System Volume Information|node_modules|dist|build|FlareSolver|quarantine|cores|\.claude|\.gemini|NexussEmu|NexusWinHostData|pics|Projects|AlphaTraders|BCXConnect|financeplay|Project Cupid|Sdk|android-sdk|AndroidStudioProjects|releases|backups|target|cargo-home)$/i;
 
   async function walk(dir: string) {
     if (out.length >= limit) return;
@@ -4704,7 +4705,7 @@ async function startServer() {
       if (mediaRootDown && primaryUp) log("INFO", `Media library folder is back (${primaryRoot})`, "media");
       mediaRootDown = !primaryUp;
 
-      mem.media = finalItems;
+      mem.media = finalItems.filter((i) => !/[\\/]\.nxweb[\\/]/.test(i.path ?? ""));
       _lastMediaScanAt = Date.now();
 
       // Auto-queue newly-appeared large videos for compression (local files only)
@@ -6138,6 +6139,68 @@ async function startServer() {
     }, 120_000).unref?.(),
   });
   drives.register(app);
+
+  // Films ready for every device (server/videoprep.ts): this PC converts
+  // films a browser can't play into H.264 MP4 copies on Drive; every host
+  // (the NAS too) plays the copy when there is one.
+  const VIDEO_PREP_CONVERTER = process.env.NEXUS_VIDEO_PREP ? process.env.NEXUS_VIDEO_PREP === "1" : process.platform === "win32" && !LOW_MEMORY;
+  const videoPrep = createVideoPrep({
+    pool: () => (dbConnected && pool ? pool : null),
+    log: (level, msg) => log(level, msg, "media"),
+    mediaRoot: () => mediaRoot,
+    videos: () => mem.media.filter((m) => m.kind === "video").map((m) => ({ path: m.path, name: m.name, size: m.size })),
+    ffmpeg: FFMPEG_BIN, ffprobe: FFPROBE_BIN, persistDir: PERSIST_DIR,
+    rc: drives.rc, gameModeActive: () => gameMode.active(),
+    converter: VIDEO_PREP_CONVERTER,
+    remote: process.env.NEXUS_VIDEO_PREP_REMOTE?.trim() || "gdrive",
+    driveFolder: process.env.NEXUS_VIDEO_PREP_FOLDER?.trim() || "NexusArchive",
+    isAdmin: async (req) => (await access.callerOf(req)).admin,
+  });
+  videoPrep.register(app);
+
+  // The NAS can't convert video while someone watches. When a film has no
+  // ready copy (or a quality change is asked for), the request goes to the
+  // host PC (NEXUS_TRANSCODE_HELPER), which converts it live on its GPU; the
+  // film is also put first in line to be prepared. Answers true when handled.
+  const TRANSCODE_HELPER = (process.env.NEXUS_TRANSCODE_HELPER ?? "").trim().replace(/\/+$/, "");
+  async function viaHelper(req: express.Request, res: express.Response, abs: string): Promise<boolean> {
+    if (!LOW_MEMORY) return false;
+    void videoPrep.request(abs);
+    const rel = videoPrep.driveRel(abs);
+    if (TRANSCODE_HELPER && rel) {
+      const ctl = new AbortController();
+      const stop = () => ctl.abort();
+      req.on("close", stop);
+      try {
+        const u = new URL(req.originalUrl, "http://host");
+        u.searchParams.set("rel", rel);
+        const connect = setTimeout(stop, 15_000);
+        const r = await fetch(`${TRANSCODE_HELPER}${u.pathname}${u.search}`, {
+          headers: { Authorization: String(req.headers.authorization ?? ""), ...(req.headers.range ? { Range: String(req.headers.range) } : {}) },
+          signal: ctl.signal,
+        });
+        clearTimeout(connect);
+        if (r.status < 500 && r.body) {
+          res.status(r.status);
+          for (const h of ["content-type", "content-length", "content-range", "accept-ranges", "cache-control", "x-media-duration"]) {
+            const v = r.headers.get(h);
+            if (v) res.setHeader(h, v);
+          }
+          const { Readable } = await import("node:stream");
+          Readable.fromWeb(r.body as any).on("error", () => res.destroy()).pipe(res);
+          return true;
+        }
+      } catch { /* the PC is off or busy: say so below */ }
+    }
+    const st = videoPrep.stateOf(abs);
+    res.status(503).json({
+      code: "preparing",
+      error: st.status === "working"
+        ? `This film is being prepared so it plays on every device (${Math.round((st.progress ?? 0) * 100)}% done). Try again in a few minutes.`
+        : "This film is being prepared so it plays on every device. It's first in line; try again in a few minutes, or watch it while the host PC is on.",
+    });
+    return true;
+  }
 
   // Members and admins connect Google Drive / WebDAV accounts from the app (server/connect.ts).
   createConnect({
@@ -20996,7 +21059,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       movies,
       seriesEpisodes,
       seriesTitles,
-      items: mem.media,
+      // webReady: a prepared copy plays directly in any browser (server/videoprep.ts).
+      items: mem.media.map((m) => (m.kind === "video" && videoPrep.copyFor(m.path) ? { ...m, webReady: true } : m)),
     });
   });
 
@@ -21654,8 +21718,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
 
-    const target = resolveMediaTarget(rel);
+    let target = resolveMediaTarget(rel);
     if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    // A film with a prepared copy (server/videoprep.ts) plays that: an MP4 every browser opens.
+    if (VIDEO_EXT.has(path.extname(target).toLowerCase())) target = videoPrep.copyFor(target) ?? target;
 
     let s: Awaited<ReturnType<typeof stat>>;
     try {
@@ -21823,15 +21889,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
 
-    const target = resolveMediaTarget(rel);
-    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    const original = resolveMediaTarget(rel);
+    if (!isServableMediaPath(original)) return res.status(403).json({ error: "Path outside media root" });
 
     try {
-      const s = await stat(target);
+      const s = await stat(original);
       if (!s.isFile()) return res.status(400).json({ error: "Not a file" });
     } catch {
       return res.status(404).json({ error: "Media file not found" });
     }
+    if (await viaHelper(req, res, original)) return;
+    const target = videoPrep.copyFor(original) ?? original;
 
     const quality = String(req.query.quality ?? "auto");
     const startSec = parseFloat(String(req.query.start ?? "0")) || 0;
@@ -22761,12 +22829,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/media/hls/playlist.m3u8", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
-    const target = resolveMediaTarget(rel);
-    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    const original = resolveMediaTarget(rel);
+    if (!isServableMediaPath(original)) return res.status(403).json({ error: "Path outside media root" });
     try {
-      const st = await stat(target);
+      const st = await stat(original);
       if (!st.isFile()) return res.status(400).json({ error: "Not a file" });
     } catch { return res.status(404).json({ error: "Media file not found" }); }
+    if (await viaHelper(req, res, original)) return;
+    const target = videoPrep.copyFor(original) ?? original;
     void hotCache.played(target);
 
     const fmt = await probeVideoFormat(target);
@@ -22871,8 +22941,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     const n = Math.max(0, parseInt(String(req.query.n ?? "0"), 10) || 0);
     if (!rel) return res.status(400).json({ error: "rel query required" });
-    const target = resolveMediaTarget(rel);
-    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
+    const original = resolveMediaTarget(rel);
+    if (!isServableMediaPath(original)) return res.status(403).json({ error: "Path outside media root" });
+    if (await viaHelper(req, res, original)) return;
+    const target = videoPrep.copyFor(original) ?? original;
 
     const quality = String(req.query.quality ?? "auto");
     const audioTrack = Math.max(0, parseInt(String(req.query.audio_track ?? "0"), 10) || 0);
@@ -23057,8 +23129,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
 
-    const target = resolveMediaTarget(rel);
-    if (!isServableMediaPath(target)) return res.status(403).json({ error: "Forbidden" });
+    const original = resolveMediaTarget(rel);
+    if (!isServableMediaPath(original)) return res.status(403).json({ error: "Forbidden" });
+    const target = videoPrep.copyFor(original) ?? original;
 
     const cached = _mediaTrackCache.get(target);
     if (cached && Date.now() - cached.ts < 600_000) {

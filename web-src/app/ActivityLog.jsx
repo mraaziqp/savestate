@@ -6,7 +6,7 @@ import { useStyles, api, Icon, Note } from "./lib.jsx";
 
 const KINDS = [["", "Everything"], ["upload", "Uploads"], ["freed", "Space freed"], ["download", "Downloads"], ["search", "Deep search"],
   ["payment", "Payments"], ["plan", "Plans & access"], ["profile", "Profiles"], ["key", "Keys"], ["library", "Library"], ["system", "System"]];
-const ICON = { upload: "cloud", freed: "trash", download: "down", search: "bolt", payment: "star", plan: "users", profile: "user", key: "key", library: "film", system: "chip", account: "user" };
+const ICON = { upload: "cloud", freed: "trash", download: "down", search: "bolt", payment: "star", plan: "users", profile: "user", key: "key", library: "film", system: "chip", account: "user", convert: "film" };
 const size = (n) => (n == null ? "" : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1024 ** 2))} MB`);
 const eta = (s) => (!s || s <= 0 || s > 30 * 86400 ? "" : s > 86400 ? `${Math.round(s / 86400)} d` : s > 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
 const when = (d) => new Date(d).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
@@ -26,7 +26,8 @@ function Live() {
   async function act(ids, action) {
     setBusy(ids.join(",") + action); setError("");
     try {
-      for (const id of ids) await api(`/api/admin/offload/${encodeURIComponent(id)}/${action}`, { method: "POST", body: {} });
+      // "video-prep" is the films being prepared for every device (server/videoprep.ts).
+      for (const id of ids) await api(id === "video-prep" ? `/api/admin/video-prep/${action}` : `/api/admin/offload/${encodeURIComponent(id)}/${action}`, { method: "POST", body: {} });
       setItems((await api("/api/activity/live")).items);
     } catch (e) { setError(e.message); } finally { setBusy(""); }
   }
@@ -71,7 +72,7 @@ const RESULT = {
   warn: { icon: "alert", color: "var(--warn)", label: "Needs a look" },
   failed: { icon: "alert", color: "var(--bad)", label: "Stopped" },
 };
-const COMPLETED_KINDS = [["", "Everything"], ["upload", "Copies & uploads"], ["download", "Downloads"], ["freed", "Space freed"], ["library", "Library"]];
+const COMPLETED_KINDS = [["", "Everything"], ["upload", "Copies & uploads"], ["download", "Downloads"], ["freed", "Space freed"], ["library", "Library"], ["convert", "Films prepared"]];
 
 async function downloadReport(url) {
   const r = await fetch(url, { headers: { Authorization: `Bearer ${localStorage.getItem("nexus_token") ?? ""}` } });

@@ -543,6 +543,43 @@ launcher refuses them, and Activity shows "Games still downloading: N". On
 2026-10-17 the PS2 essentials pack (BitTorrent, not qBittorrent) had 140 of
 154 files unfinished.
 
+## Films ready for every device (server/videoprep.ts)
+
+Browsers play MP4 (H.264 + AAC/MP3) and WebM; the rest of the library
+(HEVC and 10-bit rips, MKV/AVI, AC-3/DTS/TrueHD sound, HDR) needed live
+conversion, which the NAS can't do. This PC (the converter: Windows, not
+`NEXUS_LOW_MEMORY`, an rclone account named `gdrive`; override with
+`NEXUS_VIDEO_PREP=0/1`, `NEXUS_VIDEO_PREP_REMOTE`, `NEXUS_VIDEO_PREP_FOLDER`)
+checks every film once and prepares those that need it:
+
+- **direct**: plays as it is, nothing to do (AAC 5.1 in MP4 included).
+- **remux**: H.264 already; the picture is copied, the sound becomes AAC
+  stereo unless an English AAC/MP3 stereo track exists (then it is copied).
+- **convert**: H.264 on the GPU (h264_nvenc, CQ 23, at most 1080p, HDR
+  tone-mapped to SDR with zscale/hable).
+
+Each film comes down from Drive with rclone to
+`<data>/tmp/video-prep` (`NEXUS_VIDEO_PREP_TMP`; not through Drive for
+Desktop, whose cache disk is small), is converted, checked (H.264, full
+length), and goes up next to the original as
+`<folder>/.nxweb/<name>.mp4` (size checked on Drive). Originals are never
+touched. State is the `video_prep` table, shared by every host; requested
+films (someone pressed Play on the NAS) go first, then quick repacks, then
+smallest first. It stops while a game runs, when paused (Activity, or
+`POST /api/admin/video-prep/pause|resume|retry|rescan`), and with under
+200 GB free on Drive. About 16 minutes for a 45-minute HEVC episode,
+most of it moving the file.
+
+Every host then plays the copy: the library marks the film `webReady`,
+the player opens it directly (`/api/media/file` serves the copy for the
+original's path), and info, streaming and HLS use it as their source. The
+player now sends any file that isn't MP4/WebM through the server (only
+eight extensions did). On the NAS (`NEXUS_LOW_MEMORY`) a film without a
+copy, or a quality change, goes to the PC (`NEXUS_TRANSCODE_HELPER`,
+which converts it live on the GPU) and is put first in line; with the PC
+off it answers 503 "preparing" and the player shows that message. Scanners
+skip `.nxweb` folders.
+
 ## Play on this phone (PhonePlay.jsx, Android app 1.0.67)
 
 PSP, PS2, GameCube, Wii, 3DS, Dreamcast and Saturn have Android emulator
