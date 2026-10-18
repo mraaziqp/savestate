@@ -34,7 +34,11 @@ const config: CapacitorConfig = {
     androidScheme: target.startsWith('http://') ? 'http' : 'https',
   },
   plugins: {
-    CapacitorHttp: { enabled: true },
+    // Off: it reroutes the page's fetch and XHR through Android's networking,
+    // which garbled game downloads (a GBA game never started, a Neo Geo set
+    // was "unknown", 2026-10-18). The app loads the live site itself, so
+    // nothing here needs it.
+    CapacitorHttp: { enabled: false },
   },
 };
 

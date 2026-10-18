@@ -86,6 +86,8 @@ export type CompletedItem = {
   to?: string;
   facts: Array<[string, string]>;
   problems?: string[];
+  /** Buttons under the item: POST {post} with { confirm: id }, after asking {ask} when given. */
+  actions?: Array<{ label: string; post: string; ask?: string; danger?: boolean }>;
 };
 export const humanBytes = (n: number) => (n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round(n / 1024))} KB`);
 const completedSources: Array<() => Promise<CompletedItem[]> | CompletedItem[]> = [];

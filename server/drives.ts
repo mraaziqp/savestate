@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync, createWriteStream } from "node:fs";
 import { readFile, writeFile, stat, unlink, readdir, rmdir, mkdir, rm, rename, copyFile } from "node:fs/promises";
-import { receipt, addLiveSource, addCompletedSource, humanBytes } from "./receipts.ts";
+import { receipt, addLiveSource, addCompletedSource, humanBytes, type CompletedItem } from "./receipts.ts";
 const gbs = (n: number) => `${(n / 1024 ** 3).toFixed(1)} GB`;
 
 export type DrivesDeps = {
@@ -599,7 +599,20 @@ export function createDrives(deps: DrivesDeps) {
     if (j.deleted) facts.push(["Freed on this PC", `${j.deleted.files} file(s), ${humanBytes(j.deleted.bytes)}${j.deleted.skipped ? `, ${j.deleted.skipped} left (changed or in use)` : ""}`]);
     facts.push(["Kept in step", j.keepSynced ? `yes, rechecked daily${j.nextSyncAt ? ` (next ${new Date(j.nextSyncAt).toLocaleDateString("en-ZA")})` : ""}` : "no"]);
     if (existsSync(path.join(reportsDir, `${j.id}.txt`))) facts.push(["Full report", `/api/admin/offload/${j.id}/report`]);
+    // Every file confirmed on Drive and the folder still here: offer to free it.
+    // Only files checked before (and unchanged since) are deleted; anything
+    // still downloading or skipped as a duplicate stays.
+    const actions: NonNullable<CompletedItem["actions"]> = [];
+    if (v && !bad && j.status === "verified" && !j.deleted && v.matched > 0 && existsSync(j.source)) {
+      const stays = [j.stillChanging?.count ? `${j.stillChanging.count} still downloading` : "", j.dupes?.count ? `${j.dupes.count} already on Drive elsewhere` : ""].filter(Boolean).join(" and ");
+      actions.push({
+        label: "Delete the local folder", danger: true, post: `/api/admin/offload/${j.id}/delete-local`,
+        ask: `Delete ${v.matched} file(s) (${humanBytes(v.matchedBytes)}) in ${j.source} from this PC?\n\nEvery one is on Google Drive (${j.remote}:${j.dest}) and its checksum matched. Files changed since the check are kept${stays ? `, and so are ${stays}` : ""}.`,
+      });
+    }
+    if (v && ["verified", "incomplete", "kept"].includes(j.status) && !running.has(j.id)) actions.push({ label: "Check against Drive again", post: `/api/admin/offload/${j.id}/verify` });
     return {
+      actions: actions.length ? actions : undefined,
       kind: "upload", id: j.id, title: j.label, result,
       summary: !v ? `Stopped: ${j.lastError ?? "the copy failed"}`
         : bad ? `${v.matched} of ${checked} files confirmed on Drive; ${bad} will be retried`

@@ -135,15 +135,50 @@ const before = shell;
     `NxAdminUsers=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AdminUsers}))),` +
     `NxGameSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameSetup}))),` +
     `NxPlayOverlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayOverlay}))),` +
+    `NxPhonePlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PhonePlay}))),` +
+    `NxWhere=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Where}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
+
+// 3o. Phone cards ask for small covers (window.nxThumb in boot.js).
+shell = patch(shell, "game cards small covers on phones", "(window.nxThumb||(u=>u))((t.boxArt",
+  'p=(0,s.useMemo)(()=>o?null:(t.boxArt??"").trim()||`/api/art/${t.id}`,[t.boxArt,t.id,o])',
+  'p=(0,s.useMemo)(()=>o?null:(window.nxThumb||(u=>u))((t.boxArt??"").trim()||`/api/art/${t.id}`),[t.boxArt,t.id,o])');
+// The Games hub rows (two of them) draw boxArt straight.
+{
+  const from = 'src:c.boxArt,alt:c.title,className:"w-full h-full object-cover",loading:"lazy"';
+  const to = 'src:(window.nxThumb||(u=>u))(c.boxArt),alt:c.title,className:"w-full h-full object-cover",loading:"lazy"';
+  if (!shell.includes(to) && !shell.includes(from)) throw new Error('patch "games hub rows small covers": anchor not found');
+  shell = shell.split(from).join(to);
+}
+{
+  const thumbs = [
+    ["ConsoleHub-", 'src:a.coverUrl??`/api/art/${encodeURIComponent(a.id)}`,alt:a.title,loading:"lazy"', 'src:(window.nxThumb||(u=>u))(a.coverUrl??`/api/art/${encodeURIComponent(a.id)}`),alt:a.title,loading:"lazy"'],
+    ["LocalLibraryPanel-", 'src:t.coverUrl??`/api/art/${encodeURIComponent(t.id)}`,alt:t.title,', 'src:(window.nxThumb||(u=>u))(t.coverUrl??`/api/art/${encodeURIComponent(t.id)}`),alt:t.title,'],
+  ];
+  for (const [prefix, from, to] of thumbs) {
+    const file = path.join(assets, find(prefix));
+    const text = readFileSync(file, "utf8");
+    const out = patch(text, `${prefix} small covers on phones`, "(window.nxThumb||(u=>u))(", from, to);
+    if (out !== text) writeFileSync(file, out);
+  }
+}
+
+// 3n. Games lists show where each game plays (Where.jsx): on a phone they
+//     start on "This phone", so a PS2 game isn't offered where it can't run.
+shell = patch(shell, "games hub where it plays", "(0,e.jsx)(NxWhere,{games:at,",
+  '(0,e.jsx)(Wl,{games:at,loading:Pt,onPlatformSelect:u=>{qt("solo"),Wt(at.filter(M=>M.platform===u))},onSolo:()=>{qt("solo"),Wt(null)},onMultiplayer:()=>S("multiplayer"),onDiscover:()=>S("discover"),onScan:ca,isScanning:sa,onSelectGame:u=>ce(u),isRemoteClient:t})',
+  '(0,e.jsx)(s.Suspense,{fallback:(0,e.jsx)(Oa,{}),children:(0,e.jsx)(NxWhere,{games:at,render:nxG=>(0,e.jsx)(Wl,{games:nxG,loading:Pt,onPlatformSelect:u=>{qt("solo"),Wt(nxG.filter(M=>M.platform===u))},onSolo:()=>{qt("solo"),Wt(null)},onMultiplayer:()=>S("multiplayer"),onDiscover:()=>S("discover"),onScan:ca,isScanning:sa,onSelectGame:u=>ce(u),isRemoteClient:t})})})');
+shell = patch(shell, "games grid where it plays", "(0,e.jsx)(NxWhere,{games:Bn??at,",
+  '(0,e.jsx)(Nl,{games:Bn??at,loading:Pt,isScanning:sa,gpFocusIdx:ft,onSelect:u=>ce(u),onScan:ca})',
+  '(0,e.jsx)(NxWhere,{games:Bn??at,render:nxG=>(0,e.jsx)(Nl,{games:nxG,loading:Pt,isScanning:sa,gpFocusIdx:ft,onSelect:u=>ce(u),onScan:ca})})');
 
 // A link to an admin page (?tab=cloud) sent admins to Movies & TV: the check
 // "not an admin, so leave admin pages" ran before the account had loaded in
@@ -678,6 +713,26 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   // On a PC, "stream from the host" read "the only way to play PSP on a phone".
   gd = patch(gd, "game details stream wording on a PC", 'children:be(t.platform)||!f?"Runs on the host',
     'children:be(t.platform)?"Runs on the host', 'children:be(t.platform)||!f?"Runs on the host');
+  // 3m. PSP, PS2, GameCube, Wii, 3DS, Dreamcast and Saturn have emulator
+  //     apps for Android: on an Android phone "Play on this phone" downloads
+  //     the game and opens it in that app (PhonePlay.jsx), where it said
+  //     "far too heavy, stream it". iPhones still stream them.
+  const PH = "window.nxRuns?.phoneHere?.(t.platform)";
+  gd = patch(gd, "phone play hands heavy games to an emulator app", "?window.nxPhonePlay?.(t):",
+    "onClick:()=>{n(null),f?Se():y?Je():Re()}",
+    `onClick:()=>{n(null),f&&!be(t.platform)&&${PH}?window.nxPhonePlay?.(t):f?Se():y?Je():Re()}`);
+  gd = patch(gd, "phone play enabled with an emulator app", "f&&!be(t.platform)&&!window.nxRuns",
+    "disabled:v||f&&de||f&&!be(t.platform),",
+    `disabled:v||f&&de||f&&!be(t.platform)&&!${PH},`);
+  gd = patch(gd, "phone play recommended with an emulator app", "!(f&&!be(t.platform)&&!window.nxRuns",
+    "!(f&&!be(t.platform))&&!(",
+    `!(f&&!be(t.platform)&&!${PH})&&!(`);
+  gd = patch(gd, "phone play names the emulator app", "downloads here once, then opens there",
+    '`${(t.platform??"This system").toUpperCase()} is far too heavy to emulate on a phone — stream it from the host instead.`',
+    `${PH}?\`Plays on this phone in \${${PH}.map(a=>a.name).join(" or ")}: downloads here once, then opens there.\`:\`\${(t.platform??"This system").toUpperCase()} is too heavy for this phone: stream it from the host instead.\``);
+  gd = patch(gd, "phone note names the emulator app", "in an emulator app on this phone",
+    '`${(t.platform??"This system").toUpperCase()} is too heavy for a phone: choose Stream from the host PC and play it in Moonlight.`',
+    `${PH}?\`\${(t.platform??"This system").toUpperCase()} plays in an emulator app on this phone (\${${PH}.map(a=>a.name).join(" or ")}): press Play on this phone.\`:\`\${(t.platform??"This system").toUpperCase()} is too heavy for a phone: choose Stream from the host PC and play it in Moonlight.\``);
   if (gd !== before) writeFileSync(file, gd);
 }
 
@@ -701,6 +756,12 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ep = patch(ep, "browser play names downloaded games", "window.EJS_gameName=",
     "window.EJS_gameUrl=s,",
     'window.EJS_gameUrl=s,String(s).startsWith("blob:")&&(window.EJS_gameName=r.fileName||String(r.relative_path||r.relativePath||"").split(String.fromCharCode(92)).join("/").split("/").pop()||void 0),');
+  // Not only for blob: a game fetched straight from its URL (.../download)
+  // reached FBNeo named "download", which it can't match to a romset
+  // ("Romset is unknown" for King of Fighters '98 on a phone, 2026-10-18).
+  ep = patch(ep, "browser play names every game", "window.EJS_gameUrl=s,(window.EJS_gameName=",
+    'window.EJS_gameUrl=s,String(s).startsWith("blob:")&&(window.EJS_gameName=',
+    "window.EJS_gameUrl=s,(window.EJS_gameName=");
   ep = patch(ep, "browser play forgets the name", '"EJS_biosUrl","EJS_gameName",', '"EJS_biosUrl",', '"EJS_biosUrl","EJS_gameName",');
   ep = patch(ep, "browser play bios only when set", "d&&(window.EJS_biosUrl=d),",
     "window.EJS_biosUrl=d,", "d&&(window.EJS_biosUrl=d),");
@@ -737,6 +798,11 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
     `className:"space-y-2 nx-admin-only",children:[(0,e.jsx)(Ln,{value:he,onChange:Je,placeholder:"Media root on host..."`);
   const scraper = `to-black/40 p-4 md:p-5",children:[(0,e.jsxs)("div",{className:"flex items-start justify-between gap-3 flex-wrap",children:[(0,e.jsxs)("div",{className:"space-y-1.5 max-w-2xl",children:[(0,e.jsx)("p",{className:"text-[10px] font-black uppercase tracking-[0.24em] text-cyan-300",children:"Gemini Media Scraper"`;
   hub = patch(hub, "scraper is admin-only", scraper.replace(`p-4 md:p-5"`, `p-4 md:p-5 nx-admin-only"`), scraper, scraper.replace(`p-4 md:p-5"`, `p-4 md:p-5 nx-admin-only"`));
+  // Movies fetched the 510 KB video player 4 s after opening, to start films
+  // faster. On a phone or with data saver it now loads when a film is played.
+  hub = patch(hub, "video player preload skipped on phones", 'matchMedia("(max-width: 767px)").matches||navigator.connection?.saveData)&&setTimeout(()=>{import("./hls-',
+    'typeof window<"u"&&setTimeout(()=>{import("./hls-',
+    'typeof window<"u"&&!(matchMedia("(max-width: 767px)").matches||navigator.connection?.saveData)&&setTimeout(()=>{import("./hls-');
   if (hub !== before) writeFileSync(file, hub);
 }
 
@@ -803,6 +869,10 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   dl = patch(dl, "download page: mac and linux use the web app", 'note:"Use the web app (Install App)"',
     '{id:"mac",label:"macOS",note:".dmg installer"},{id:"linux",label:"Linux",note:".AppImage"}',
     '{id:"mac",label:"macOS",note:"Use the web app (Install App)"},{id:"linux",label:"Linux",note:"Use the web app (Install App)"}');
+  // Linux has SaveState for Linux now (scripts/client-install-linux.sh).
+  dl = patch(dl, "download page: linux installer", 'note:"Installer script (.sh): run it with sh"',
+    '{id:"linux",label:"Linux",note:"Use the web app (Install App)"}',
+    '{id:"linux",label:"Linux",note:"Installer script (.sh): run it with sh"}');
   if (dl !== before) writeFileSync(file, dl);
 }
 

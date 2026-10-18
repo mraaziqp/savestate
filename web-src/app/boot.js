@@ -8,6 +8,8 @@
 //  - Turns two refusals the app itself does not understand into something a
 //    person can act on: 402 "that is on another plan" becomes a notice with a
 //    link to Plans, and 401 "your password was changed" signs this device out.
+import "./devices.js";
+
 (() => {
   if (window.__nexusBoot) return;
   window.__nexusBoot = true;
@@ -217,6 +219,42 @@
     : s === 429 ? "Too many tries in a row. Wait a moment and try again."
     : s >= 500 ? "The server had a problem. Please try again in a moment."
     : `That didn't work (code ${s}). Please try again.`);
+
+  // ── The same list, asked for twice at once ──────────────────────────────
+  // Opening Games asked the server for the game list five times (the hub,
+  // the grid, Play Offline...), on a phone's connection too. Identical GETs
+  // of these lists that are in flight together, or within 3 s, now share one
+  // answer. If the shared request is cancelled by the caller that started
+  // it, the others ask again for themselves.
+  const SHARED = /^\/api\/(games|media\/library|media\/progress|plans\/me|plans\/features)$/;
+  const shared = new Map();
+  const network = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    try {
+      const href = typeof input === "string" ? input : input instanceof URL ? input.href : null;
+      const method = String(init?.method ?? "GET").toUpperCase();
+      if (href && method === "GET" && !init?.body) {
+        const u = new URL(href, location.href);
+        if (u.origin === location.origin && SHARED.test(u.pathname)) {
+          const key = `${u.pathname}${u.search}|${new Headers(init?.headers ?? {}).get("authorization") ?? ""}`;
+          const hit = shared.get(key);
+          if (hit && Date.now() - hit.at < 3000) return hit.p.then((r) => r.clone(), (e) => (init?.signal?.aborted ? Promise.reject(e) : network(input, init)));
+          const p = network(input, init);
+          shared.set(key, { at: Date.now(), p });
+          p.then((r) => { if (!r.ok) shared.delete(key); }, () => shared.delete(key));
+          setTimeout(() => { if (shared.get(key)?.p === p) shared.delete(key); }, 3000);
+          return p.then((r) => r.clone());
+        }
+      }
+    } catch { /* fall through to a plain request */ }
+    return network(input, init);
+  };
+
+  // ── Small covers on phones ──────────────────────────────────────────────
+  // Card covers were full size (60-75 KB each, 200+ on Games). On a phone
+  // the cards ask for /api/art/<id>?w=360 (about 12 KB); the server makes it.
+  const smallScreen = (() => { try { return matchMedia("(max-width: 767px)").matches; } catch { return false; } })();
+  window.nxThumb = (src) => (smallScreen && typeof src === "string" && /\/api\/art\/[\w-]+$/.test(src) ? `${src}?w=360` : src);
 
   // ── Refusals ────────────────────────────────────────────────────────────
   // Wraps whatever fetch is current when the app starts calling it; the app's

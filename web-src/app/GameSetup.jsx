@@ -11,6 +11,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useStyles, api, token, Icon, Note, goTab } from "./lib.jsx";
 import { SYSTEMS, EMULATORS } from "./systems.js";
+import { runsOn, inAndroidApp } from "./devices.js";
 
 const LAUNCHER = "http://127.0.0.1:17373";
 // v8 unpacks downloads without extra modules (v7 stopped at "Cannot find module 'adm-zip'").
@@ -48,6 +49,10 @@ const device = () => {
   if (/Macintosh|Mac OS X/i.test(u)) return "mac";
   return "linux";
 };
+// The launcher's name on this computer.
+const APP_NAME = { windows: "SaveState for Windows", linux: "SaveState for Linux" };
+const appName = (dev) => APP_NAME[dev] ?? "SaveState for Windows";
+const LINUX_CMD = () => `curl -fsSL ${location.origin}/api/client-launcher/linux-installer | sh`;
 const DEVICE_NAME = { windows: "this Windows PC", mac: "this Mac", linux: "this computer", android: "this phone", ios: "this iPhone or iPad" };
 
 async function launcher(pathname, opts = {}) {
@@ -77,7 +82,7 @@ export const openGameSetup = () => window.dispatchEvent(new CustomEvent("nexus:g
 
 function Wizard({ onClose }) {
   const dev = device();
-  const desktop = dev === "windows";
+  const desktop = dev === "windows" || dev === "linux";
   const [step, setStep] = useState(0);
   const [picked, setPicked] = useState(() => new Set());
   const [me, setMe] = useState(null);
@@ -107,11 +112,14 @@ function Wizard({ onClose }) {
               <h3 style={{ fontSize: 18 }}>Which consoles do you want to play?</h3>
               <p className="nxa-dim" style={{ marginTop: 4 }}>
                 Green ones play right in the browser on any device, with nothing to install.
-                {desktop ? " Blue ones need SaveState for Windows (a one-time install); the next step does it for you." : ` Blue ones need SaveState for Windows on a PC; on ${DEVICE_NAME[dev]} they stream from the host instead.`}
+                {desktop ? ` Blue ones need ${appName(dev)} (a one-time install); the next step does it for you.` : ` Blue ones need SaveState for Windows or Linux on a computer.`}
+                {dev === "android" ? " Those marked Android also play on this phone in a free emulator app; the next step shows which." : ""}
+                {dev !== "android" && dev !== "windows" ? ` On ${DEVICE_NAME[dev]} they stream from the host instead.` : ""}
               </p>
             </div>
             <div className="nxa-row nxa-wrap">
               <button className="nxa-btn sm" onClick={() => setPicked(new Set(SYSTEMS.filter((s) => s.play === "browser").map((s) => s.id)))}>All browser consoles</button>
+              {dev === "android" && <button className="nxa-btn sm" onClick={() => setPicked(new Set(SYSTEMS.filter((s) => (s.play === "browser" || runsOn(s.id).phone) && (fullGames || !HEAVY.has(s.id))).map((s) => s.id)))}>Everything this phone plays</button>}
               {desktop && <button className="nxa-btn sm" onClick={() => setPicked(new Set(SYSTEMS.filter((s) => fullGames || !HEAVY.has(s.id)).map((s) => s.id)))}>Everything I can play</button>}
               {picked.size > 0 && <button className="nxa-btn sm" onClick={() => setPicked(new Set())}>Clear</button>}
             </div>
@@ -129,7 +137,8 @@ function Wizard({ onClose }) {
                           <b>{s.name}{picked.has(s.id) && <Icon name="check" size={15} />}</b>
                           <span className="nxa-row" style={{ gap: 5, flexWrap: "wrap" }}>
                             {locked ? <span className="nxa-pill warn">Paid plan</span>
-                              : <span className={`nxa-pill ${s.play === "browser" ? "ok" : "acc"}`}>{s.play === "browser" ? "In the browser" : "Desktop app"}</span>}
+                              : <span className={`nxa-pill ${s.play === "browser" ? "ok" : "acc"}`}>{s.play === "browser" ? "Any device" : "PC"}</span>}
+                            {!locked && s.play !== "browser" && runsOn(s.id).phone && <span className={`nxa-pill ${dev === "android" ? "ok" : ""}`}>Android: {runsOn(s.id).phone[runsOn(s.id).phone.length - 1].name}</span>}
                             {s.bios.need === "required" && <span className="nxa-pill">Needs your BIOS</span>}
                           </span>
                         </button>
@@ -148,7 +157,7 @@ function Wizard({ onClose }) {
         )}
 
         {step === 1 && <InstallStep dev={dev} chosen={chosen} needsApp={needsApp} onBack={() => setStep(0)} onNext={() => setStep(2)} />}
-        {step === 2 && <BiosStep dev={dev} chosen={chosen} onBack={() => setStep(1)} onNext={() => setStep(3)} />}
+        {step === 2 && <BiosStep dev={dev} me={me} chosen={chosen} onBack={() => setStep(1)} onNext={() => setStep(3)} />}
         {step === 3 && <GamesStep dev={dev} me={me} onBack={() => setStep(2)} onDone={finish} />}
       </div>
     </div>
@@ -175,7 +184,7 @@ function useLauncher(enabled) {
 }
 
 function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
-  const desktop = dev === "windows";
+  const desktop = dev === "windows" || dev === "linux";
   const app = useLauncher(desktop);
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
@@ -212,26 +221,32 @@ function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
 
       {desktop ? (
         <>
-          {app.status === "checking" && <p className="nxa-dim"><Icon name="spinner" /> Looking for SaveState for Windows on this PC…</p>}
+          {app.status === "checking" && <p className="nxa-dim"><Icon name="spinner" /> Looking for {appName(dev)} on this computer…</p>}
           {app.status === "missing" && (
             <div className="nxgset-row">
-              <div><b>1. Install SaveState for Windows (once)</b>
-                <small>Download it, open the file and let it finish (about a minute). It adds SaveState to the Start menu and keeps a small game launcher running so Play works offline. This page carries on by itself as soon as it's installed.</small></div>
-              <a className="nxa-btn primary" href="/api/downloads/desktop?platform=windows" download><Icon name="down" /> Download</a>
+              <div><b>1. Install {appName(dev)} (once)</b>
+                {dev === "linux"
+                  ? <small>Open a terminal and paste this (no sudo needed; it installs into your home folder): <span className="nxa-code" style={{ userSelect: "all", display: "block", marginTop: 6, overflowWrap: "anywhere" }}>{LINUX_CMD()}</span>It adds SaveState to your applications menu and keeps a small game launcher running. This page carries on by itself as soon as it's installed.</small>
+                  : <small>Download it, open the file and let it finish (about a minute). It adds SaveState to the Start menu and keeps a small game launcher running so Play works offline. This page carries on by itself as soon as it's installed.</small>}</div>
+              {dev === "linux"
+                ? <button className="nxa-btn primary" onClick={() => navigator.clipboard?.writeText(LINUX_CMD()).catch(() => {})}><Icon name="copy" /> Copy</button>
+                : <a className="nxa-btn primary" href="/api/downloads/desktop?platform=windows" download><Icon name="down" /> Download</a>}
             </div>
           )}
           {app.status === "old" && (
             <div className="nxgset-row">
-              <div><b>Update SaveState for Windows</b>
-                <small>This PC has an older version. Download and run the installer again (it replaces the old one in place); this page carries on by itself.</small></div>
-              <a className="nxa-btn primary" href="/api/downloads/desktop?platform=windows" download><Icon name="down" /> Download update</a>
+              <div><b>Update {appName(dev)}</b>
+                <small>{dev === "linux" ? <>This computer has an older version. Run the install command again (it replaces the old one): <span className="nxa-code" style={{ userSelect: "all", display: "block", marginTop: 6, overflowWrap: "anywhere" }}>{LINUX_CMD()}</span></> : "This PC has an older version. Download and run the installer again (it replaces the old one in place); this page carries on by itself."}</small></div>
+              {dev === "linux"
+                ? <button className="nxa-btn primary" onClick={() => navigator.clipboard?.writeText(LINUX_CMD()).catch(() => {})}><Icon name="copy" /> Copy</button>
+                : <a className="nxa-btn primary" href="/api/downloads/desktop?platform=windows" download><Icon name="down" /> Download update</a>}
             </div>
           )}
-          {(app.status === "missing" || app.status === "old") && <p className="nxa-dim"><Icon name="spinner" /> Waiting for it on this PC…</p>}
-          {app.status === "missing" && <p className="nxa-faint" style={{ fontSize: 12.5, margin: 0 }}>Already installed? If the browser asks whether this site may connect to devices or apps on this computer, choose <b>Allow</b>: that's how it reaches SaveState for Windows.</p>}
+          {(app.status === "missing" || app.status === "old") && <p className="nxa-dim"><Icon name="spinner" /> Waiting for it on this computer…</p>}
+          {app.status === "missing" && <p className="nxa-faint" style={{ fontSize: 12.5, margin: 0 }}>Already installed? If the browser asks whether this site may connect to devices or apps on this computer, choose <b>Allow</b>: that's how it reaches {appName(dev)}.</p>}
           {app.status === "ready" && !job && (
             <div className="nxgset-row">
-              <div><b><Icon name="check" /> SaveState for Windows is installed</b>
+              <div><b><Icon name="check" /> {appName(dev)} is installed</b>
                 <small>Set up {chosen.length === 1 ? chosen[0].name : `all ${chosen.length} consoles`} in one go: emulators and their parts download from their official sources (or from this host where there's no public download).</small></div>
               <button className="nxa-btn primary" onClick={start}><Icon name="bolt" /> Set up {chosen.length === 1 ? "it" : "all"}</button>
             </div>
@@ -256,12 +271,14 @@ function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
           )}
           {error && <Note kind="bad">{error}</Note>}
         </>
+      ) : dev === "android" && needsApp.some((s) => runsOn(s.id).phone) ? (
+        <PhoneApps list={needsApp} />
       ) : needsApp.length > 0 ? (
         <Note>
           {needsApp.map((s) => s.name).join(", ")} need{needsApp.length === 1 ? "s" : ""} more power than a browser has.
           {dev === "android" || dev === "ios"
             ? " On a phone, open the game in Games and choose Stream from the host PC: the host runs it and the free Moonlight app shows it here (Help & guides > Play from anywhere)."
-            : " On a Windows PC, open this page there to install SaveState for Windows. On this computer, install the emulator from each console's card in Emulation Setup, or stream from the host with Moonlight."}
+            : " On a Windows or Linux computer, open this page there to install SaveState. On this one, stream from the host with Moonlight."}
         </Note>
       ) : null}
 
@@ -273,9 +290,47 @@ function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
   );
 }
 
+// Android: the emulator app each heavier console uses on this phone, with
+// whether it's installed (in the SaveState app) and where to get it.
+function PhoneApps({ list }) {
+  const [have, setHave] = useState({});
+  const inApp = inAndroidApp();
+  const look = useCallback(async () => {
+    if (!inApp) return;
+    const pkgs = list.flatMap((s) => (runsOn(s.id).phone ?? []).map((a) => a.pkg));
+    try { setHave(await window.Capacitor.nativePromise("NxAndroid", "apps", { packages: pkgs })); } catch { /* older app */ }
+  }, [list.map((s) => s.id).join(",")]);
+  useEffect(() => {
+    look();
+    const vis = () => document.visibilityState === "visible" && look();
+    document.addEventListener("visibilitychange", vis);
+    return () => document.removeEventListener("visibilitychange", vis);
+  }, [look]);
+  const phone = list.filter((s) => runsOn(s.id).phone);
+  const none = list.filter((s) => !runsOn(s.id).phone);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <p className="nxa-dim" style={{ margin: 0 }}>These play on this phone in a free emulator app. Install each one once; after that, Play in Games downloads the game to this phone and opens it there.</p>
+      {phone.map((s) => {
+        const apps = runsOn(s.id).phone;
+        const got = apps.find((a) => have[a.pkg]);
+        const get = apps.find((a) => a.get);
+        return (
+          <div key={s.id} className="nxgset-row">
+            <div><b>{got ? <Icon name="check" /> : null} {s.name}: {got ? got.name : get?.name ?? apps[0].name}</b>
+              <small>{got ? "Installed on this phone. Ready to play." : get?.note ?? (inApp ? "Not installed yet. This page notices when you come back." : "Install it on this phone, then use the SaveState Android app so games open in it by themselves.")}</small></div>
+            {!got && get && <a className="nxa-btn sm primary" href={get.get} target="_blank" rel="noopener noreferrer"><Icon name="down" /> Get {get.name}</a>}
+          </div>
+        );
+      })}
+      {none.length > 0 && <Note>{none.map((s) => s.name).join(", ")} can't run on a phone. Play {none.length === 1 ? "it" : "them"} on a Windows PC, or open the game and choose Stream from the host PC.</Note>}
+    </div>
+  );
+}
+
 // ── Step 3: system files ──────────────────────────────────────────────────
-function BiosStep({ dev, chosen, onBack, onNext }) {
-  const desktop = dev === "windows";
+function BiosStep({ dev, me, chosen, onBack, onNext }) {
+  const desktop = dev === "windows" || dev === "linux";
   const app = useLauncher(desktop);
   const need = chosen.filter((s) => s.bios.need === "required" || s.bios.need === "optional" || s.bios.need === "varies");
   const [found, setFound] = useState({});
@@ -290,7 +345,7 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
     const unknown = [];
     for (const fl of files) {
       const hit = wanted.find((w) => w.file.name.toLowerCase() === fl.name.toLowerCase());
-      if (hit) await add(hit.sys, hit.file, fl); else unknown.push(fl.name);
+      if (hit) await (ready ? add(hit.sys, hit.file, fl) : toHost(hit.sys, hit.file, fl)); else unknown.push(fl.name);
     }
     if (unknown.length) setMsg({ kind: "warn", text: `${unknown.join(", ")}: not a file these consoles use by that name. Use the Add file button next to the file it is, and it will be saved under the right name.` });
   }
@@ -307,6 +362,48 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
     } catch { /* launcher busy */ }
   }, [ready, need.map((s) => s.id).join(",")]);
   useEffect(() => { refresh(); }, [refresh]);
+
+  // The host's own copies: browser play on any device uses them, and the
+  // owner's PCs get them put in place without adding each one again.
+  const [hostHas, setHostHas] = useState({});
+  const names = wanted.map((w) => w.file.name).join(",");
+  useEffect(() => {
+    let live = true;
+    Promise.all(wanted.map(async (w) => {
+      try { return [w.file.name.toLowerCase(), (await fetch(`/api/emulator/bios/serve/${encodeURIComponent(w.file.name)}?token=${encodeURIComponent(token())}`, { method: "HEAD" })).ok]; }
+      catch { return [w.file.name.toLowerCase(), false]; }
+    })).then((pairs) => live && setHostHas(Object.fromEntries(pairs)));
+    return () => { live = false; };
+  }, [names]);
+  const owner = !!me?.isAdmin;
+  // The owner on a phone or another computer: the file goes to the host, so
+  // browser play everywhere (and the owner's PCs) can use it.
+  async function toHost(sys, file, picked) {
+    setBusy(`${sys.id}:${file.name}`); setMsg(null);
+    try {
+      const r = await fetch("/api/emulator/bios/upload", { method: "POST", headers: { Authorization: `Bearer ${token()}`, "x-filename": file.name, "Content-Type": "application/octet-stream" }, body: picked });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "The host didn't take it.");
+      setHostHas((h) => ({ ...h, [file.name.toLowerCase()]: true }));
+      setMsg({ kind: "ok", text: `${file.name} is on the host now: ${sys.name} uses it on every device.` });
+    } catch (e) { setMsg({ kind: "bad", text: e.message }); }
+    finally { setBusy(""); }
+  }
+  async function fromHost(sys, file) {
+    const r = await fetch(`/api/emulator/bios/serve/${encodeURIComponent(file.name)}?token=${encodeURIComponent(token())}`);
+    if (!r.ok) throw new Error(`The host doesn't have ${file.name}.`);
+    await add(sys, file, await r.blob());
+  }
+  // Owner on a PC with the app: copy every file the host has and this PC lacks.
+  const copied = useRef(false);
+  useEffect(() => {
+    if (!owner || !ready || copied.current || !Object.keys(hostHas).length) return;
+    const missing = wanted.filter((w) => hostHas[w.file.name.toLowerCase()] && !found[`${w.sys.id}:${w.file.name.toLowerCase()}`]);
+    // found is filled by /bios-check; wait for it before deciding.
+    if (!Object.keys(found).length && wanted.length) return;
+    copied.current = true;
+    (async () => { for (const w of missing) { try { await fromHost(w.sys, w.file); } catch { /* shown per row */ } } })();
+  }, [owner, ready, hostHas, found]);
 
   async function add(sys, file, picked) {
     setBusy(`${sys.id}:${file.name}`); setMsg(null);
@@ -330,13 +427,14 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
         dump them from consoles you own and add them here. {desktop ? "Each one is put exactly where its console looks." : ""}
       </p>
       {!need.length && <Note kind="ok">None of the consoles you chose need system files. Nothing to do here.</Note>}
-      {need.length > 0 && !ready && desktop && <Note>Finish the install step first (SaveState for Windows), then the files you add here go straight into place.</Note>}
-      {ready && wanted.length > 0 && (
+      {need.length > 0 && !ready && desktop && <Note>Finish the install step first ({appName(dev)}), then the files you add here go straight into place.</Note>}
+      {owner && ready && Object.values(hostHas).some(Boolean) && <Note kind="ok">Files your host already has are copied to this PC by themselves.</Note>}
+      {(ready || owner) && wanted.length > 0 && (
         <label className={`nxgset-drop ${over ? "on" : ""}`} onDragOver={(e) => { e.preventDefault(); setOver(true); }} onDragLeave={() => setOver(false)}
           onDrop={(e) => { e.preventDefault(); setOver(false); dropped(e.dataTransfer.files); }}>
           <Icon name="down" size={22} />
           <b>Drop your system files here</b>
-          <span>or click to choose them. Each one is matched by its name and put where its console looks.</span>
+          <span>or {desktop ? "click" : "tap"} to choose them. Each one is matched by its name and put where its console looks{ready ? "" : " (on the host, for every device)"}.</span>
           <input type="file" multiple hidden onChange={(e) => { const fl = e.target.files; dropped(fl); e.target.value = ""; }} />
         </label>
       )}
@@ -350,8 +448,17 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
             return (
               <div key={f.name} className="nxgset-row">
                 <div><b>{have ? <Icon name="check" /> : null} <span className="nxa-code">{f.name}</span></b>
-                  <small>{f.note}{have ? ` · in place (${have})` : ""}{!isFile ? " · install it inside the emulator (see how below)" : ""}</small></div>
-                {ready && isFile && (
+                  <small>{f.note}{have ? ` · in place (${have})` : ""}{!have && hostHas[f.name.toLowerCase()] ? (ready ? (owner ? " · on your host: copying it here" : " · on the host (browser play uses it)") : sys.play === "browser" ? " · ready: the host has it, so it plays in the browser" : " · on the host") : ""}{!isFile ? " · install it inside the emulator (see how below)" : ""}</small></div>
+                {!ready && isFile && owner && !hostHas[f.name.toLowerCase()] && (
+                  <label className="nxa-btn sm primary" style={{ cursor: "pointer" }}>
+                    {busy === id ? <Icon name="spinner" /> : <Icon name="plus" />} Add to host
+                    <input type="file" hidden onChange={(e) => { const fl = e.target.files?.[0]; e.target.value = ""; if (fl) toHost(sys, f, fl); }} />
+                  </label>
+                )}
+                {ready && isFile && owner && !have && hostHas[f.name.toLowerCase()] && (
+                  <button className="nxa-btn sm primary" disabled={busy === id} onClick={() => fromHost(sys, f).catch((e) => setMsg({ kind: "bad", text: e.message }))}>{busy === id ? <Icon name="spinner" /> : <Icon name="down" />} From host</button>
+                )}
+                {ready && isFile && !(owner && !have && hostHas[f.name.toLowerCase()]) && (
                   <label className={`nxa-btn sm ${have ? "" : "primary"}`} style={{ cursor: "pointer" }}>
                     {busy === id ? <Icon name="spinner" /> : <Icon name="plus" />} {have ? "Replace" : "Add file"}
                     <input type="file" hidden onChange={(e) => { const fl = e.target.files?.[0]; e.target.value = ""; if (fl) add(sys, f, fl); }} />
@@ -374,7 +481,7 @@ function BiosStep({ dev, chosen, onBack, onNext }) {
 
 // ── Step 4: games ─────────────────────────────────────────────────────────
 function GamesStep({ dev, me, onBack, onDone }) {
-  const desktop = dev === "windows";
+  const desktop = dev === "windows" || dev === "linux";
   const app = useLauncher(desktop);
   const [folder, setFolder] = useState(null);
   const [busy, setBusy] = useState(false);

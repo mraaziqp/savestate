@@ -1106,6 +1106,20 @@ function ensureEmulationRoot(cfg) {
 // ── Guided game setup helpers ────────────────────────────────────────────
 let setupJob = null;
 
+// Linux: standalone emulators come from Flathub, each project's own
+// published build, installed for this user only (no sudo).
+const FLATPAK_IDS = {
+  pcsx2: 'net.pcsx2.PCSX2', rpcs3: 'net.rpcs3.RPCS3', cemu: 'info.cemu.Cemu',
+  dolphin: 'org.DolphinEmu.dolphin-emu', ppsspp: 'org.ppsspp.PPSSPP',
+};
+async function installFlatpak(appId) {
+  const has = await runProcess('flatpak', ['--version'], 10_000).catch(() => ({ code: -1 }));
+  if (has.code !== 0) return { ok: false, detail: 'Flatpak is not installed (see flatpak.org/setup), or install the emulator with your package manager' };
+  await runProcess('flatpak', ['remote-add', '--user', '--if-not-exists', 'flathub', 'https://dl.flathub.org/repo/flathub.flatpakrepo'], 60_000).catch(() => null);
+  const r = await runProcess('flatpak', ['install', '--user', '-y', '--noninteractive', 'flathub', appId], 30 * 60_000).catch((e) => ({ code: -1, stderr: String(e && e.message ? e.message : e) }));
+  return r.code === 0 ? { ok: true } : { ok: false, detail: String(r.stderr || '').trim().split(/\r?\n/).pop() || `flatpak exit ${r.code}` };
+}
+
 // Consoles the web app's setup wizard can ask for, and how each is set up.
 // "core": a RetroArch core (RetroArch is installed first). "standalone":
 // its own emulator, from its official release, or copied from the host when
@@ -1136,7 +1150,8 @@ async function runConsoleSetup(job, platforms, hostUrl, token) {
   // The host's own copy first (the same working setup, over the fastest
   // link), the official download if the host has none.
   const fromHost = async (key) => {
-    if (!hostUrl) return false;
+    // The host's copies are Windows programs: no use on Linux or a Mac.
+    if (!hostUrl || !IS_WIN) return false;
     const r = await twice(() => performCloneHostSetup(hostUrl, token, { only: [key] })).catch(() => null);
     return !!(r && r.steps && r.steps.some((x) => x.ok));
   };
@@ -1170,7 +1185,14 @@ async function runConsoleSetup(job, platforms, hostUrl, token) {
         if (have && !isRetroArch(have)) { set(platform, 'done', `Ready (${path.basename(have)})`); continue; }
         set(platform, 'working', 'Copying the emulator from the host…');
         let done = await fromHost(spec.standalone) && !!getEmulatorPath(platform) && !isRetroArch(getEmulatorPath(platform));
-        if (!done && spec.install) {
+        // Linux: the emulator's official Flathub build.
+        if (!done && !IS_WIN && !IS_MAC && FLATPAK_IDS[spec.standalone]) {
+          set(platform, 'working', 'Installing the emulator from Flathub…');
+          const r = await twice(() => installFlatpak(FLATPAK_IDS[spec.standalone])).catch((e) => ({ ok: false, detail: errText(e) }));
+          done = !!(r && r.ok) && !!getEmulatorPath(platform) && !isRetroArch(getEmulatorPath(platform));
+          if (!done) lastError = (r && r.detail) || 'Flathub install did not finish';
+        }
+        if (!done && spec.install && IS_WIN) {
           set(platform, 'working', 'Downloading the emulator from its official site…');
           const r = await twice(() => spec.install()).catch((e) => ({ ok: false, detail: errText(e) }));
           done = !!(r && r.ok);
@@ -1240,7 +1262,28 @@ function readRawBody(req, limit) {
 // on this PC's desktop, on top of the browser.
 function pickFolderNative(title) {
   return new Promise((resolve) => {
-    if (!IS_WIN) { resolve({ ok: false, unsupported: true, error: 'Type the folder path instead (the folder picker is Windows-only).' }); return; }
+    if (!IS_WIN) {
+      // Linux desktops: zenity (GNOME and most others) or kdialog (KDE).
+      const label = String(title || 'Choose a folder');
+      const tryOne = (cmd, args) => new Promise((done) => {
+        let out = '';
+        let child;
+        try { child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] }); } catch { done(null); return; }
+        child.stdout.on('data', (d) => { out += d; });
+        child.on('error', () => done(null));
+        child.on('exit', (code) => done({ code, path: out.trim() }));
+      });
+      (async () => {
+        for (const [cmd, args] of IS_MAC ? [] : [['zenity', ['--file-selection', '--directory', `--title=${label}`]], ['kdialog', ['--getexistingdirectory', os.homedir(), '--title', label]]]) {
+          const r = await tryOne(cmd, args);
+          if (!r) continue;
+          resolve(r.code === 0 && r.path ? { ok: true, path: r.path } : { ok: false, canceled: true });
+          return;
+        }
+        resolve({ ok: false, unsupported: true, error: 'Type the folder path instead (no folder picker found on this computer).' });
+      })();
+      return;
+    }
     const t = String(title || 'Choose a folder').replace(/'/g, "''");
     const ps = [
       'Add-Type -AssemblyName System.Windows.Forms',
@@ -3044,10 +3087,12 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 9,
+    version: 10,
     // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
     // v8: unpacks without bundled modules; copies RetroArch from the host.
     // v9: follows each game until it closes (/launch/status, /launch/stop), full screen, refuses half-downloaded games.
+    // v10: Linux: emulators from Flathub, a games folder by typed path; reports its platform.
+    platform: process.platform,
     features: ['setup-consoles', 'bios', 'rom-folder'],
     native: true,
     embedded: 'electron',

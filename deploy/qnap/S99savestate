@@ -1,0 +1,6 @@
+#!/bin/sh
+# Entware starts every /opt/etc/init.d/S* at boot: SaveState after a restart.
+case "$1" in
+  start|stop|restart|status) /share/CACHEDEV1_DATA/SaveState/savestate.sh "$1" ;;
+  *) echo "usage: $0 start|stop|restart|status" ;;
+esac

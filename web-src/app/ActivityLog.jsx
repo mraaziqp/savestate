@@ -89,9 +89,12 @@ function Completed() {
   const [kind, setKind] = useState("");
   const [open, setOpen] = useState(null);
   const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState("");
+  const [refresh, setRefresh] = useState(() => () => {});
   useEffect(() => {
     let live = true;
     const tick = () => api("/api/activity/completed").then((r) => live && setItems(r.items)).catch((e) => live && setError(e.message));
+    setRefresh(() => tick);
     tick();
     const t = setInterval(() => { if (!document.hidden) tick(); }, 30000);
     return () => { live = false; clearInterval(t); };
@@ -136,6 +139,22 @@ function Completed() {
                         : <span style={{ textAlign: "right" }}>{v}</span>}
                     </div>
                   ))}
+                  {i.actions?.length > 0 && (
+                    <div className="nxa-row nxa-wrap" style={{ gap: 8, marginTop: 4 }}>
+                      {i.actions.map((a) => (
+                        <button key={a.post} className={`nxa-btn sm${a.danger ? " danger" : ""}`} disabled={busy === a.post}
+                          onClick={async () => {
+                            if (a.ask && !window.confirm(a.ask)) return;
+                            setBusy(a.post); setError("");
+                            try { await api(a.post, { method: "POST", body: { confirm: i.id } }); setTimeout(refresh, 1500); }
+                            catch (e) { setError(e.message); }
+                            finally { setBusy(""); }
+                          }}>
+                          {busy === a.post ? <Icon name="spinner" /> : <Icon name={a.danger ? "trash" : "refresh"} />} {a.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {i.problems?.length > 0 && (
                     <div style={{ marginTop: 4 }}>
                       <div className="nxa-label" style={{ marginBottom: 4 }}>Files that need another go (they are retried by themselves)</div>

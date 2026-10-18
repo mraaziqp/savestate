@@ -78,6 +78,16 @@ $parts += @{
   name = 'tunnel'; exe = $cfg.cloudflared; dir = $cfg.dataDir; wait = 0
   args = @('tunnel', '--no-autoupdate', '--protocol', 'http2', '--config', $cfg.tunnelConfig, 'run')
 }
+# Apps that only listen on 127.0.0.1 (Jarvis), reachable from the NAS, which
+# runs the tunnel once this PC's is off (deploy/qnap). "lanForward": ["3006:3005"].
+if ($cfg.lanForward) {
+  $parts += @{ name = 'lan-forward'; exe = $cfg.node; dir = $cfg.appDir; wait = 0
+    args = @('scripts/windows/lan-forward.cjs') + @($cfg.lanForward) }
+}
+# The NAS serves savestate.co.za when this file exists; this PC then keeps its
+# server (uploads, the Arr apps) but not its tunnel: two connectors on one
+# tunnel would split visitors between the two hosts. Delete it to go back.
+$tunnelOff = Join-Path $cfg.dataDir 'tunnel.off'
 
 $procs = @{}
 $backoff = @{}
@@ -122,6 +132,11 @@ if ($cfg.waitForPath) {
 while ($true) {
   foreach ($part in $parts) {
     $p = $procs[$part.name]
+    if ($part.name -eq 'tunnel' -and (Test-Path -LiteralPath $tunnelOff)) {
+      if ($p -and -not $p.HasExited) { Say 'tunnel.off: stopping this PC''s tunnel (the NAS serves the site)'; try { $p.Kill() } catch { } }
+      $procs[$part.name] = $null
+      continue
+    }
     if ($p -and -not $p.HasExited) { continue }
     if ($p) {
       Say "$($part.name) exited with code $($p.ExitCode)"

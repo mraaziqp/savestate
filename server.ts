@@ -1273,7 +1273,10 @@ async function findRomByBasename(root: string, basename: string, maxDepth = 8, d
  * a folder is added on one host (it marked 8,651 games missing and 140 dead
  * ones present on 2026-10-05).
  */
-const ROM_INDEX_TTL_MS = 10 * 60_000;
+// A small NAS (NEXUS_LOW_MEMORY=1) reads its library through a Google Drive
+// mount, where walking it costs minutes: once an hour there.
+const LOW_MEMORY = process.env.NEXUS_LOW_MEMORY === "1";
+const ROM_INDEX_TTL_MS = (LOW_MEMORY ? 60 : 10) * 60_000;
 type RomIndex = Map<string, string>;   // lower-cased file name -> full path
 let romIndex: { key: string; at: number; names: RomIndex } | null = null;
 let romIndexBuilding: Promise<RomIndex> | null = null;
@@ -6069,6 +6072,23 @@ async function startServer() {
     log: (level, msg) => log(level, msg, "incomplete")
   });
   globalIncompleteFiles = incompleteFiles;
+
+  // A game is known by its file name, wherever the file now lives. Its copy
+  // on Google Drive ("./ROMS (E)/Crazy Taxi.rvz") or on the NAS is the same
+  // game as "./Crazy Taxi.rvz"; scanning another folder added it twice
+  // (2026-10-18, the first NAS scan). Every automatic add checks this first.
+  let knownGameFilesCache: { at: number; set: Set<string> } | null = null;
+  async function knownGameFiles(): Promise<Set<string>> {
+    if (knownGameFilesCache && Date.now() - knownGameFilesCache.at < 60_000) return knownGameFilesCache.set;
+    const set = new Set<string>();
+    if (dbConnected && pool) {
+      const r = await pool.query("SELECT relative_path FROM games WHERE relative_path IS NOT NULL").catch(() => ({ rows: [] as any[] }));
+      for (const row of r.rows) set.add(romBasename(row.relative_path));
+    } else for (const g of mem.games) set.add(romBasename(g.relativePath ?? ""));
+    knownGameFilesCache = { at: Date.now(), set };
+    return set;
+  }
+  const rememberGameFile = (rel: string) => knownGameFilesCache?.set.add(romBasename(rel));
   addLiveSource(() => {
     const list = incompleteFiles.list();
     if (!list.length) return [];
@@ -6243,6 +6263,8 @@ async function startServer() {
     } else if (mem.games.find((g) => g.id === gameId)) {
       return;
     }
+    if ((await knownGameFiles()).has(romBasename(relativePath))) return; // the same game in another folder
+    rememberGameFile(relativePath);
 
     const platform = await detectPlatformWithHeader(filename, relativePath, finalPath);
     const core = PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown;
@@ -6333,7 +6355,7 @@ async function startServer() {
     // Google Drive. Recursively watching a FUSE mount costs a stat() storm per
     // poll and never fires for files added from another device, so the periodic
     // cloud scan covers it instead. Set NEXUS_DISABLE_LOCAL_SCAN=0 to restore.
-    if (process.env.NEXUS_DISABLE_LOCAL_SCAN === "1") {
+    if (process.env.NEXUS_DISABLE_LOCAL_SCAN === "1" || LOW_MEMORY) { // no watcher over a Drive mount on a small NAS
       log("INFO", `Ghost Scanner disabled (cloud-first) \u2014 ${vaultRoot}`, "watcher");
       return;
     }
@@ -7260,6 +7282,8 @@ async function startServer() {
           }
         }
 
+        if ((await knownGameFiles()).has(romBasename(rom.relativePath))) continue; // the same game in another folder
+        rememberGameFile(rom.relativePath);
         const game: Record<string, any> = {
           id: gameId,
           title: cleanTitle,
@@ -20360,6 +20384,29 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return job;
   }
 
+  async function artThumb(id: string, src: string, srcMtime: number, width: number): Promise<string | null> {
+    const out = path.join(ART_SMALL_DIR, `${id}.w${width}.webp`);
+    const st = await stat(out).catch(() => null);
+    if (st && st.mtimeMs >= srcMtime) return out;
+    const key = `${id}@${width}`;
+    let job = artShrinkInflight.get(key);
+    if (!job) {
+      job = (async () => {
+        try {
+          const sharp = (await import("sharp")).default;
+          const webp = await sharp(src).resize({ width, withoutEnlargement: true }).webp({ quality: 74 }).toBuffer();
+          await mkdir(ART_SMALL_DIR, { recursive: true });
+          const tmp = `${out}.${process.pid}.tmp`;
+          await writeFile(tmp, webp);
+          await renameFile(tmp, out);
+          return out;
+        } catch { return null; }
+      })().finally(() => artShrinkInflight.delete(key));
+      artShrinkInflight.set(key, job);
+    }
+    return job;
+  }
+
   const artMetaCache = new Map<string, { title: string; platform: string }>();
   const COVER_COLOURS: Record<string, [string, string, string]> = {
     ps2: ["#0b1d4d", "#003791", "PlayStation 2"], ps1: ["#1b1f3b", "#003087", "PlayStation"], psp: ["#101a33", "#00439c", "PSP"],
@@ -20404,7 +20451,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const st = await stat(p).catch(() => null);
       if (!st?.isFile()) continue;
       let file = p;
-      if (st.size > ART_SHRINK_OVER_BYTES) file = (await smallArt(id, p, st.size, st.mtimeMs)) ?? p;
+      // Phone cards ask for ?w=360: a 75 KB cover becomes about 12 KB.
+      const w = Number(req.query.w) || 0;
+      const thumb = w > 0 ? await artThumb(id, p, st.mtimeMs, w <= 240 ? 240 : w <= 360 ? 360 : 480) : null;
+      if (thumb) file = thumb;
+      else if (st.size > ART_SHRINK_OVER_BYTES) file = (await smallArt(id, p, st.size, st.mtimeMs)) ?? p;
       const type = sniffImageType(await readHead(file).catch(() => Buffer.alloc(0)));
       // A day fresh, then served from cache while it revalidates (ETag makes
       // that a 304). "immutable" meant art re-fetched on the host never
@@ -20583,7 +20634,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.post("/api/art/fetch-batch", async (req, res) => {
     if (!(await access.callerOf(req)).admin) return res.json({ started: false, count: 0 });
     if (artBatchRunning || gameMode.active()) return res.json({ started: false, running: artBatchRunning, count: 0 });
-    const limit = Math.min(parseInt(String((req.body as any)?.limit ?? 500)), 5000);
+    const limit = Math.min(parseInt(String((req.body as any)?.limit ?? 500)), LOW_MEMORY ? 60 : 5000);
     let games: { id: string; title: string; platform: string; relative_path?: string }[] = [];
     if (dbConnected && pool) {
       try {
@@ -24780,6 +24831,22 @@ Loop
     res.send(vbs.replace(/\r?\n/g, "\r\n"));
   });
 
+  // SaveState for Linux: `curl -fsSL <host>/api/client-launcher/linux-installer | sh`
+  // installs the same launcher in the home folder (scripts/client-install-linux.sh).
+  app.get("/api/client-launcher/linux-installer", async (req, res) => {
+    const host = req.get("host");
+    const proto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() || req.protocol || "http";
+    try {
+      const sh = await readFile(path.join(process.cwd(), "scripts", "client-install-linux.sh"), "utf8");
+      res.setHeader("Content-Type", "text/x-shellscript; charset=utf-8");
+      res.setHeader("Content-Disposition", 'attachment; filename="savestate-setup.sh"');
+      res.setHeader("Cache-Control", "no-store");
+      res.send(sh.replace("__BASE_URL__", `${proto}://${host}`).replace(/\r\n/g, "\n"));
+    } catch {
+      res.status(404).type("text/plain").send('echo "The Linux installer is missing on this host." >&2; exit 1\n');
+    }
+  });
+
   app.get("/api/client-launcher/windows-installer", (req, res) => {
     const host = req.get("host");
     if (!host) {
@@ -26373,11 +26440,17 @@ Loop
       }
     }
 
+    // Letters and digits of any script. Built at run time: the NAS's Node
+    // (Entware, no ICU) can't even parse a \p{L} regex literal.
+    const NOT_LETTER_OR_DIGIT = (() => {
+      try { return new RegExp("[^\\p{L}\\p{N}\\s]", "gu"); }
+      catch { return /[^A-Za-z0-9\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u3040-\u30FF\u4E00-\u9FFF\s]/g; }
+    })();
     const cleanStr = (s: string) => s
       .replace(/\(.*?\)/g, " ")
       .replace(/\[.*?\]/g, " ")
       .replace(/\b(feat|ft|prod|lyrics|official|video|audio|320\s*kbps)\b.*$/i, " ")
-      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(NOT_LETTER_OR_DIGIT, " ")
       .replace(/\s+/g, " ")
       .trim();
 
@@ -28599,6 +28672,7 @@ Format as JSON:
     // the one-click client installer does the same job (it sets up the local
     // launcher, RetroArch and the cores). "Get the App > Windows" used to 404.
     if (platform === 'windows') return res.redirect(302, '/api/client-launcher/windows-installer');
+    if (platform === 'linux') return res.redirect(302, '/api/client-launcher/linux-installer');
     res.status(404).json({ error: `No desktop installer available for ${platform}` });
   });
 
@@ -28643,6 +28717,8 @@ Format as JSON:
           // installer. Installed apps (a real version) are never told to
           // "update" to it.
           downloadUrl = '/api/client-launcher/windows-installer';
+        } else if (desktopPlatform === 'linux' && clientVersion === '0.0.0') {
+          downloadUrl = '/api/client-launcher/linux-installer';
         }
       }
 
@@ -30315,9 +30391,12 @@ Format as JSON:
         );
 
         let added = 0;
+        const known = await knownGameFiles();
         for (const rom of roms) {
           const gameId = crypto.createHash("md5").update(rom.relativePath).digest("hex");
           if (existingIds.has(gameId)) continue;
+          if (known.has(romBasename(rom.relativePath))) continue; // the same game in another folder
+          rememberGameFile(rom.relativePath);
           const platform = await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath);
           const cleanTitle = path.basename(rom.filename, path.extname(rom.filename))
             .replace(/[_()\[\]]/g, " ").replace(/[_\-\.]+/g, " ").trim().replace(/\s+/g, " ");

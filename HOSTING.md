@@ -398,7 +398,12 @@ so they arrive the same way. The Agent Builder's own API (port 4000,
 themselves (`addCompletedSource` in `server/drives.ts`: files checked and
 matched, missing or different, active time, freed space, and the
 file-by-file report at `/api/admin/offload/<job>/report`); other finished
-work comes from receipts. Time left on uploads is worked out from the last
+work comes from receipts. An item can carry `actions` (buttons that POST
+with `{ confirm: id }`): a copy whose every file matched on Drive and whose
+folder is still on this PC offers **Delete the local folder** (asks first;
+only files checked and unchanged since are deleted, so anything still
+downloading or skipped as a duplicate stays) and **Check against Drive
+again**. Time left on uploads is worked out from the last
 five minutes of progress and withheld while rclone is still counting.
 
 ## Upload speed
@@ -537,6 +542,76 @@ download routes answer 409 `still_downloading`, Drive copies skip them, the
 launcher refuses them, and Activity shows "Games still downloading: N". On
 2026-10-17 the PS2 essentials pack (BitTorrent, not qBittorrent) had 140 of
 154 files unfinished.
+
+## Play on this phone (PhonePlay.jsx, Android app 1.0.67)
+
+PSP, PS2, GameCube, Wii, 3DS, Dreamcast and Saturn have Android emulator
+apps (`PHONE_APPS` in `web-src/app/devices.js`). On an Android phone,
+game details > Play on this phone opens PhonePlay: in the SaveState app
+(`NxAndroidPlugin.java`, called as `Capacitor.nativePromise("NxAndroid", ...)`)
+the game downloads with Android's download manager to
+`Downloads/SaveState/<console>/` and opens in the emulator (PPSSPP by
+ACTION_VIEW, NetherSX2 with `bootPath`, Dolphin with `AutoStartFiles`); a
+second Play opens the copy already there. In a phone's browser it downloads
+the browser's way and says where to open it. The owner can copy the host's
+PS2 BIOS to the phone. MainActivity also gives the WebView a download
+listener, so plain download links in the app save to Downloads/SaveState
+(they went nowhere before).
+
+CapacitorHttp is off (`capacitor.config.ts`): it routed the page's fetches
+through Android's networking and garbled game files (a GBA game "loaded but
+isn't running"). Browser play now always names the game (`EJS_gameName`),
+so FinalBurn Neo recognises arcade sets fetched by URL ("Romset is unknown"
+for kof98 before).
+
+## Where it plays (Where.jsx, devices.js)
+
+The Games hub and grid are wrapped in a filter (`NxWhere`, build.mjs 3n):
+This phone / This PC, All, In the browser, On phones, Needs a PC, with
+counts. Phones start on This phone, so a PS2 game only shows where it can
+run. `window.nxRuns` (set in boot.js) answers the same question for the
+compiled code. Set up games marks each console "Any device", "PC" and
+"Android: <app>", has "Everything this phone plays", lists the Android apps
+with install links, and in the system files step shows the files the host
+already has; the owner's PCs get them copied from the host by themselves,
+and the owner can add files to the host from a phone ("Add to host").
+
+## SaveState for Linux (scripts/client-install-linux.sh, launcher v10)
+
+`curl -fsSL https://savestate.co.za/api/client-launcher/linux-installer | sh`
+(also /api/downloads/desktop?platform=linux and the download page). No
+sudo: Node.js 18+ (or the official nodejs.org build, SHA-256 checked) and
+the launcher go in `~/.local/share/NexusEmuClient`, `run.sh` keeps it
+running, a desktop autostart entry starts it at sign-in, and "SaveState"
+appears in the applications menu (Chromium app window, else the browser).
+`uninstall.sh` removes it. Launcher v10 on Linux installs standalone
+emulators from Flathub (`flatpak install --user`), RetroArch and cores as
+before, picks folders with zenity or kdialog, never copies the host's
+Windows emulators, and reports `platform` in /health. Tested in WSL Ubuntu
+22.04 (install, run, health, uninstall, the Node download).
+
+## QNAP NAS host (deploy/qnap)
+
+The TS-431 (192.168.31.201, ARMv7, 480 MB RAM) runs the app natively, not
+in Docker: Entware Node 18 (no ICU), the Node 18 bundle
+(`esbuild ... --target=node18`), `NEXUS_LOW_MEMORY=1`, Google Drive
+mounted with rclone at `SaveState/library`, ROM and music copies under
+`Multimedia`. `savestate.sh start|stop|restart|status` supervises the
+server and, only while `SaveState/tunnel.on` exists, cloudflared.
+`/opt/etc/init.d/S99savestate` starts it at boot.
+
+Moving savestate.co.za to it (not done yet; it needs the owner): every
+connector of tunnel d7c61183 must send the site to the same server, because
+Cloudflare spreads visitors over all of them. That means this PC's tunnel
+off (`tunnel.off` in the host data folder, which run-host.ps1 checks every
+loop), Agent Builder's own connector (`~/.cloudflared/config.yml`, started
+by its launcher) pointing savestate.co.za and www at
+`http://192.168.31.201:3000`, then `touch tunnel.on` on the NAS. The NAS
+reaches Agent Builder on 192.168.31.217:4000 and Jarvis through
+`scripts/windows/lan-forward.cjs` (3006 -> 127.0.0.1:3005, home network
+only; `lanForward` in the host config). This PC keeps its server for the
+Drive uploads and the Arr apps. Back: `rm tunnel.on` on the NAS, delete
+`tunnel.off`, restore the Agent Builder config.
 
 ## NAS / Linux hosts (install.sh)
 

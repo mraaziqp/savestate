@@ -13,6 +13,8 @@
 //   AdminUsers    admin: every account and every group (Manage Users)
 //   GameSetup     "Set up games": consoles, the Windows app, system files, games
 //   PlayOverlay   after Play: getting ready, starting, playing, closed or failed (retry)
+//   PhonePlay     Play on this phone: PSP, PS2, GameCube... into an Android emulator app
+//   Where         "where it plays" filter over the Games lists (this phone, PC, browser)
 export { Welcome } from "./Welcome.jsx";
 export { AuthForm } from "./AuthForm.jsx";
 export { PlansPage } from "./Plans.jsx";
@@ -32,3 +34,5 @@ export { ScreensInUse } from "./ScreensInUse.jsx";
 export { AdminUsers } from "./AdminUsers.jsx";
 export { GameSetup } from "./GameSetup.jsx";
 export { PlayOverlay } from "./PlayOverlay.jsx";
+export { PhonePlay } from "./PhonePlay.jsx";
+export { Where } from "./Where.jsx";

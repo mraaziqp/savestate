@@ -231,7 +231,9 @@ export function registerFilesLibrary(app: express.Express, deps: FilesDeps) {
         if (s) items.push({ name: d.name, path: r, size: s.size, mtime: s.mtimeMs, type: fileTypeOf(d.name) });
       }
     }
-    const natural = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    // No Intl on a Node built without ICU (the NAS): plain comparison then.
+    const natural = typeof Intl !== "undefined" ? new Intl.Collator(undefined, { numeric: true, sensitivity: "base" })
+      : { compare: (a: string, b: string) => a.toLowerCase().localeCompare(b.toLowerCase()) };
     folders.sort((a, b) => natural.compare(a.name, b.name));
     items.sort((a, b) => natural.compare(a.name, b.name));
     res.json({ path: rel, folders, files: items });

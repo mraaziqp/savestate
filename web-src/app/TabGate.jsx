@@ -117,7 +117,10 @@ function GameHint({ tab }) {
   const [app, setApp] = useState("checking");
   const u = typeof navigator === "undefined" ? "" : navigator.userAgent;
   const phone = /Android|iPhone|iPad|iPod/i.test(u);
-  const windows = !phone && /Windows/i.test(u);
+  const android = /Android/i.test(u);
+  const linux = !phone && !/Windows/i.test(u) && /Linux|X11|CrOS/i.test(u);
+  const windows = !phone && (/Windows/i.test(u) || linux);
+  const appName = linux ? "SaveState for Linux" : "SaveState for Windows";
   useEffect(() => {
     if (!windows) return undefined;
     let live = true;
@@ -129,11 +132,12 @@ function GameHint({ tab }) {
   if (windows && app === "checking") return null;
   const setup = <button className="nxa-btn sm primary" onClick={openGameSetup}><Icon name="bolt" size={13} /> Set up games</button>;
   let text;
-  if (phone) text = <>Retro consoles (NES, SNES, Game Boy, Mega Drive, PS1 and more) play right here with touch controls. PS2, GameCube and other big consoles stream from the host PC with the free Moonlight app.</>;
-  else if (windows && app === "ready") text = <>SaveState for Windows is installed: games play here at full speed and keep working offline once downloaded.</>;
-  else if (windows && app === "old") text = <>SaveState for Windows on this PC needs an update for the newest setup. Run the installer again, or use Set up games.</>;
-  else if (windows) text = <><b>Playing offline on this PC needs SaveState for Windows</b> (a one-time install). Retro consoles also play right here in the browser without it. Set up games installs it and gets your consoles ready.</>;
-  else text = <>Retro consoles play right here in the browser. Bigger consoles need SaveState for Windows on a PC, or stream from the host with Moonlight.</>;
+  if (android) text = <>Retro consoles (NES, SNES, Game Boy, Mega Drive, PS1 and more) play right here with touch controls. PSP, PS2, GameCube and Wii play on this phone in free emulator apps (PPSSPP, NetherSX2, Dolphin): Set up games shows which. The rest stream from the host PC with Moonlight.</>;
+  else if (phone) text = <>Retro consoles (NES, SNES, Game Boy, Mega Drive, PS1 and more) play right here with touch controls. PS2, GameCube and other big consoles stream from the host PC with the free Moonlight app.</>;
+  else if (windows && app === "ready") text = <>{appName} is installed: games play here at full speed and keep working offline once downloaded.</>;
+  else if (windows && app === "old") text = <>{appName} on this computer needs an update for the newest setup. Run the installer again, or use Set up games.</>;
+  else if (windows) text = <><b>Playing offline on this computer needs {appName}</b> (a one-time install). Retro consoles also play right here in the browser without it. Set up games installs it and gets your consoles ready.</>;
+  else text = <>Retro consoles play right here in the browser. Bigger consoles need SaveState for Windows or Linux on a computer, or stream from the host with Moonlight.</>;
   return (
     <div className="nxa" style={{ marginBottom: 10 }}>
       <Note kind={windows && app === "ready" ? "ok" : "info"}>
