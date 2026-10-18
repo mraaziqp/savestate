@@ -718,6 +718,10 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   //     the game and opens it in that app (PhonePlay.jsx), where it said
   //     "far too heavy, stream it". iPhones still stream them.
   const PH = "window.nxRuns?.phoneHere?.(t.platform)";
+  // A phone never has the PC launcher: asking 127.0.0.1 and localhost for it
+  // cost two failed requests (and CORS errors) every time a game opened.
+  gd = patch(gd, "game details skip the launcher on phones", "async function et(t,k){if(f)return null;",
+    "async function et(t,k){for(const w of at())", "async function et(t,k){if(f)return null;for(const w of at())");
   gd = patch(gd, "phone play hands heavy games to an emulator app", "?window.nxPhonePlay?.(t):",
     "onClick:()=>{n(null),f?Se():y?Je():Re()}",
     `onClick:()=>{n(null),f&&!be(t.platform)&&${PH}?window.nxPhonePlay?.(t):f?Se():y?Je():Re()}`);
@@ -762,6 +766,14 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ep = patch(ep, "browser play names every game", "window.EJS_gameUrl=s,(window.EJS_gameName=",
     'window.EJS_gameUrl=s,String(s).startsWith("blob:")&&(window.EJS_gameName=',
     "window.EJS_gameUrl=s,(window.EJS_gameName=");
+  // 3q. Saves follow you (savesync.js): the host's save comes in when the
+  //     game starts, and goes back while playing and when it closes.
+  ep = patch(ep, "browser play syncs saves on start", "window.nxSaveSync?.start(r.id)",
+    "window.EJS_onGameStart=V,",
+    "window.EJS_onGameStart=(...nxA)=>{V(...nxA);try{window.nxSaveSync?.start(r.id)}catch{}},");
+  ep = patch(ep, "browser play syncs saves on close", "window.nxSaveSync?.stop?.(),",
+    "const t=window.EJS_emulator;t?.gameManager?.saveSaveFiles?.(),",
+    "const t=window.EJS_emulator;window.nxSaveSync?.stop?.(),t?.gameManager?.saveSaveFiles?.(),");
   ep = patch(ep, "browser play forgets the name", '"EJS_biosUrl","EJS_gameName",', '"EJS_biosUrl",', '"EJS_biosUrl","EJS_gameName",');
   ep = patch(ep, "browser play bios only when set", "d&&(window.EJS_biosUrl=d),",
     "window.EJS_biosUrl=d,", "d&&(window.EJS_biosUrl=d),");

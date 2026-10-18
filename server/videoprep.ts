@@ -164,6 +164,18 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       rows = next;
     } catch { /* database not ready yet: keep what we have */ }
   }
+  let fullAt = 0;
+  /** Films someone asked for on another host (the NAS) since the last look. */
+  async function pollRequests() {
+    if (Date.now() - fullAt > 10 * 60_000) { await load(); fullAt = Date.now(); return; }
+    try {
+      const r = await q("SELECT rel, requested_at, status, attempts FROM video_prep WHERE requested_at > NOW() - INTERVAL '2 days'");
+      for (const x of r.rows) {
+        const row = rows.get(x.rel);
+        if (row) Object.assign(row, { requested_at: x.requested_at, status: row.status === "working" ? "working" : x.status, attempts: x.attempts });
+      }
+    } catch { /* database busy: next time */ }
+  }
   async function save(rel: string, patch: Partial<Row>) {
     const row: Row = { ...(rows.get(rel) ?? { rel, kind: null, status: "queued", progress: null, out_rel: null, out_bytes: null, src_bytes: null, error: null, attempts: 0, requested_at: null, updated_at: null, info: null }), ...patch };
     rows.set(rel, row);
@@ -174,13 +186,20 @@ export function createVideoPrep(deps: VideoPrepDeps) {
   }
 
   // ── What the other routes ask ──────────────────────────────────────────
-  /** The ready copy of a film on this host, if there is one. */
+  /** The ready copy of a film on this host, if there is one. Whether the
+   *  file is there is remembered for 5 minutes: the library asks for every
+   *  film on every load, and each check goes through Google Drive. */
+  const seenCopy = new Map<string, { at: number; ok: boolean }>();
   function copyFor(abs: string): string | null {
     const rel = driveRel(abs);
     const row = rel ? rows.get(rel) : null;
     if (!row || row.status !== "done" || !row.out_rel) return null;
     const local = localOf(row.out_rel);
-    return existsSync(local) ? local : null;
+    const hit = seenCopy.get(local);
+    if (hit && Date.now() - hit.at < (hit.ok ? 5 : 1) * 60_000) return hit.ok ? local : null;
+    const ok = existsSync(local);
+    seenCopy.set(local, { at: Date.now(), ok });
+    return ok ? local : null;
   }
   function stateOf(abs: string) {
     const rel = driveRel(abs);
@@ -194,7 +213,15 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     const row = rows.get(rel);
     if (row && (row.status === "done" || row.status === "ok" || row.status === "working")) return;
     if (row?.requested_at && Date.now() - Date.parse(row.requested_at) < 60_000) return;
-    await save(rel, { status: row?.status === "failed" && (row.attempts ?? 0) >= 3 ? "failed" : "queued", requested_at: new Date().toISOString() }).catch(() => {});
+    // Only the request is written: this host's copy of the row may be a
+    // minute old, and writing all of it back could undo the converter's
+    // "done" from a moment ago.
+    const at = new Date().toISOString();
+    if (row) row.requested_at = at;
+    // A film not checked yet gets a row, so it is checked and done first.
+    if (!row) await q("INSERT INTO video_prep (rel, status, requested_at) VALUES ($1, 'queued', $2) ON CONFLICT (rel) DO NOTHING", [rel, at]).catch(() => {});
+    await q(`UPDATE video_prep SET requested_at=$2, status = CASE WHEN status = 'failed' AND attempts < 3 THEN 'queued' ELSE status END, updated_at=NOW()
+      WHERE rel=$1 AND status NOT IN ('done','ok','working')`, [rel, at]).catch(() => {});
   }
 
   // ── The converter ──────────────────────────────────────────────────────
@@ -238,6 +265,8 @@ export function createVideoPrep(deps: VideoPrepDeps) {
         if (row && row.src_bytes === v.size && row.kind) continue;
         todo.push({ abs: v.path, rel, size: v.size });
       }
+      // Films someone pressed Play on are checked first.
+      todo.sort((x, y) => (rows.get(y.rel)?.requested_at ? 1 : 0) - (rows.get(x.rel)?.requested_at ? 1 : 0));
       let checked = 0;
       for (const t of todo) {
         if (deps.gameModeActive()) break;
@@ -366,7 +395,7 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       try {
         await new Promise((r) => setTimeout(r, current ? 5000 : 15_000));
         if (!deps.pool()) continue;
-        if (!scanning) await load();
+        if (!scanning) await pollRequests();
         if (settings.paused || deps.gameModeActive()) continue;
         // Never fill the Drive account: stop with 200 GB to spare.
         if (Date.now() - driveFree.at > 30 * 60_000) {
@@ -388,7 +417,7 @@ export function createVideoPrep(deps: VideoPrepDeps) {
   }, 3000).unref?.();
 
   // Hosts that only read: refresh which copies are ready.
-  setInterval(() => { void load(); }, 60_000).unref?.();
+  setInterval(() => { if (!deps.converter) void load(); }, 60_000).unref?.();
   void (async () => {
     try { settings = { ...settings, ...JSON.parse(await readFile(settingsFile, "utf8")) }; } catch { /* first run */ }
     await new Promise((r) => setTimeout(r, 20_000));

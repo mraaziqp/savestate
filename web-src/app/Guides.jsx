@@ -205,7 +205,7 @@ const GUIDES = [
           <li><b>PSP</b> games go to <span className="nxg-code">ux0:pspemu/ISO</span> and play in <b>Adrenaline</b>; SaveState opens it for you.</li>
           <li><b>PS2, GameCube, PS3 and PC games</b> stream from the host PC with <b>Moonlight for PS Vita</b> (github.com/xyzz/vita-moonlight); the app's Stream tab opens it.</li>
         </ul>
-        <div className="nxg-tip">Downloaded games stay on the Vita and play without a connection. On this Vita lists them; SQUARE removes one.</div>
+        <div className="nxg-tip">Downloaded games stay on the Vita and play without a connection. On this Vita lists them; SQUARE removes one. Saves follow you: progress made on the Vita carries on in the browser and back again.</div>
       </>
     ),
   },

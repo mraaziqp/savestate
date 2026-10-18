@@ -18,7 +18,7 @@ include("$ENV{VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "SaveState")
 set(VITA_TITLEID "SVST00001")
-set(VITA_VERSION "01.00")
+set(VITA_VERSION "01.10")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wno-unused-variable -O2 -std=gnu11")
 

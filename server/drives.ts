@@ -99,6 +99,19 @@ const cleanRel = (p: unknown) => {
   return s;
 };
 
+/** Whether a folder answers within ms, without blocking the server. A
+ *  sleeping disk or a network share that is down (the NAS) made existsSync
+ *  wait ~20 s, and every page waited with it (2026-10-18). Answers seen in
+ *  the last 30 s are reused. */
+const reachableSeen = new Map<string, { at: number; ok: boolean }>();
+async function reachable(p: string, ms = 3000): Promise<boolean> {
+  const hit = reachableSeen.get(p);
+  if (hit && Date.now() - hit.at < 30_000) return hit.ok;
+  const ok = await Promise.race([stat(p).then(() => true, () => false), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+  reachableSeen.set(p, { at: Date.now(), ok });
+  return ok;
+}
+
 export function createDrives(deps: DrivesDeps) {
   const jobsFile = path.join(deps.persistDir, "offload-jobs.json");
   const reportsDir = path.join(deps.persistDir, "offload-reports");
@@ -220,8 +233,9 @@ export function createDrives(deps: DrivesDeps) {
     for (const j of jobs) {
       if (j.status === "failed" && j.retryAt && now >= j.retryAt) { j.status = "queued"; j.retryAt = null; save(); }
       // Kept-up-to-date folders are copied again once a day for anything new.
-      if ((j.keepSynced || j.stillChanging?.count) && j.nextSyncAt && now >= j.nextSyncAt && ["verified", "kept", "done", "incomplete"].includes(j.status) && existsSync(j.source)) {
-        j.status = "queued"; j.nextSyncAt = null; j.stats = newStats(); save();
+      if ((j.keepSynced || j.stillChanging?.count) && j.nextSyncAt && now >= j.nextSyncAt && ["verified", "kept", "done", "incomplete"].includes(j.status)) {
+        const job = j;
+        void reachable(job.source).then((ok) => { if (ok && job.nextSyncAt && ["verified", "kept", "done", "incomplete"].includes(job.status)) { job.status = "queued"; job.nextSyncAt = null; job.stats = newStats(); save(); } });
       }
     }
     // A copy that has moved no data for 30 minutes is stuck (a hung
@@ -377,20 +391,37 @@ export function createDrives(deps: DrivesDeps) {
   // file here with the same name and size as one there (5 MB or more) is
   // left out of the copy and of the check. Left-out files are never deleted
   // from this PC: only files the check confirmed at this job's destination are.
+  // Listing the whole archive is one of the heaviest things asked of Google
+  // (thousands of folders); every upload restart did it again, and on a day
+  // of many restarts Google answered RATE_LIMIT_EXCEEDED (2026-10-18). The
+  // listing is kept on disk for 6 hours, and an older one is used when
+  // Google refuses.
   const driveListing = new Map<string, { at: number; files: Map<string, string> }>();
+  const listingFile = (key: string) => path.join(deps.persistDir, `drive-listing-${key.replace(/[^a-z0-9]+/gi, "_")}.json`);
   async function listDrive(bin: string, remote: string, root: string): Promise<Map<string, string>> {
     const key = `${remote}:${root}`;
-    const hit = driveListing.get(key);
-    if (hit && Date.now() - hit.at < 30 * 60_000) return hit.files;
-    const out = await new Promise<string>((resolve, reject) => {
-      execFile(bin, ["lsjson", "-R", "--files-only", "--fast-list", "--no-mimetype", "--no-modtime", key],
-        { windowsHide: true, maxBuffer: 512 * 1024 * 1024, timeout: 10 * 60_000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
-    });
+    let hit = driveListing.get(key);
+    if (!hit) {
+      const saved = await readFile(listingFile(key), "utf8").then((t) => JSON.parse(t)).catch(() => null);
+      if (saved?.at && Array.isArray(saved.files)) driveListing.set(key, hit = { at: saved.at, files: new Map(saved.files) });
+    }
+    if (hit && Date.now() - hit.at < 6 * 3600_000) return hit.files;
+    let out: string;
+    try {
+      out = await new Promise<string>((resolve, reject) => {
+        execFile(bin, ["lsjson", "-R", "--files-only", "--fast-list", "--no-mimetype", "--no-modtime", key],
+          { windowsHide: true, maxBuffer: 512 * 1024 * 1024, timeout: 10 * 60_000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      });
+    } catch (e) {
+      if (hit) { deps.log("INFO", `Drive listing refused (${String((e as Error)?.message ?? e).includes("rateLimit") ? "rate limit" : "error"}); using the one from ${new Date(hit.at).toLocaleString("en-ZA")}`); return hit.files; }
+      throw e;
+    }
     const files = new Map<string, string>();
     for (const e of JSON.parse(out || "[]") as Array<{ Path: string; Name: string; Size: number }>) {
       if (e.Size >= 5 * 1024 * 1024) files.set(`${e.Name.toLowerCase()}|${e.Size}`, `${root}/${e.Path}`);
     }
     driveListing.set(key, { at: Date.now(), files });
+    void writeFile(listingFile(key), JSON.stringify({ at: Date.now(), files: [...files] })).catch(() => {});
     return files;
   }
   async function walkLocal(root: string): Promise<Array<{ rel: string; name: string; size: number; mtimeMs: number }>> {
@@ -577,7 +608,10 @@ export function createDrives(deps: DrivesDeps) {
 
   // Finished copies for the Activity log's "Completed" list: what was copied
   // where, and what the file-by-file check against Drive found.
-  addCompletedSource(() => jobs.filter((j) => j.verify || j.status === "failed").map((j) => {
+  addCompletedSource(async () => {
+   // Whether each folder is still here, checked without blocking (see reachable).
+   const here = new Map(await Promise.all(jobs.filter((j) => j.verify && j.status === "verified" && !j.deleted).map(async (j) => [j.id, await reachable(j.source)] as const)));
+   return jobs.filter((j) => j.verify || j.status === "failed").map((j) => {
     const v = j.verify;
     const bad = v ? v.missing + v.differ + v.errors : 0;
     const checked = v ? v.matched + bad : 0;
@@ -603,7 +637,7 @@ export function createDrives(deps: DrivesDeps) {
     // Only files checked before (and unchanged since) are deleted; anything
     // still downloading or skipped as a duplicate stays.
     const actions: NonNullable<CompletedItem["actions"]> = [];
-    if (v && !bad && j.status === "verified" && !j.deleted && v.matched > 0 && existsSync(j.source)) {
+    if (v && !bad && j.status === "verified" && !j.deleted && v.matched > 0 && here.get(j.id)) {
       const stays = [j.stillChanging?.count ? `${j.stillChanging.count} still downloading` : "", j.dupes?.count ? `${j.dupes.count} already on Drive elsewhere` : ""].filter(Boolean).join(" and ");
       actions.push({
         label: "Delete the local folder", danger: true, post: `/api/admin/offload/${j.id}/delete-local`,
@@ -620,7 +654,8 @@ export function createDrives(deps: DrivesDeps) {
       startedAt: j.startedAt, finishedAt: j.finishedAt ?? v?.at ?? null,
       from: j.source, to: `${j.remote}:${j.dest}`, facts, problems: v?.problems?.length ? v.problems : undefined,
     };
-  }));
+   });
+  });
 
   // Jobs interrupted by a restart pick up where they were.
   void (async () => {
@@ -650,7 +685,7 @@ export function createDrives(deps: DrivesDeps) {
     const summary = async () => {
       if (drivesCache && Date.now() - drivesCache.at < 60_000) return drivesCache.body;
       const local = await Promise.all(LOCAL_DRIVES.map(async (d) => {
-        const about = existsSync(`${d}\\`) ? await rc("operations/about", { fs: `${d}/` }, 15_000).catch(() => null) : null;
+        const about = (await reachable(`${d}\\`)) ? await rc("operations/about", { fs: `${d}/` }, 15_000).catch(() => null) : null;
         return about ? { name: d, total: about.total ?? null, used: about.used ?? null, free: about.free ?? null } : null;
       }));
       const body = { ok: true, accounts: await accounts(), local: local.filter(Boolean) };
@@ -904,7 +939,8 @@ export function createDrives(deps: DrivesDeps) {
 
     app.get("/api/admin/offload/suggestions", async (_req, res) => {
       const list = (await deps.suggestions?.().catch(() => [])) ?? [];
-      const out = list.filter((s) => existsSync(s.source)).map((s) => {
+      const ok = await Promise.all(list.map((s) => reachable(s.source)));
+      const out = list.filter((_, i) => ok[i]).map((s) => {
         const job = jobs.find((j) => j.source.toLowerCase() === path.resolve(s.source).toLowerCase());
         return { ...s, status: job?.status ?? null };
       });

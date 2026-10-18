@@ -28,8 +28,10 @@ function Quote-Args([string[]]$list) {
 function Start-Part($name, $exe, [string[]]$argList, $workDir) {
   $out = Join-Path $logDir "$name.log"
   $err = Join-Path $logDir "$name.err.log"
+  # Each start writes a new log; the previous run's is kept as <name>.prev.log
+  # (it was overwritten, so whatever went wrong before a restart was lost).
   foreach ($f in @($out, $err)) {
-    if ((Test-Path $f) -and ((Get-Item $f).Length -gt 20MB)) { Move-Item -Force $f "$f.old" }
+    if ((Test-Path $f) -and ((Get-Item $f).Length -gt 0)) { Move-Item -Force $f ($f -replace '\.log$', '.prev.log') }
   }
   $opts = @{
     FilePath = $exe; ArgumentList = (Quote-Args $argList); WorkingDirectory = $workDir

@@ -25,7 +25,7 @@ mount_library() {
   rclone mount gdrive:NexusArchive "$BASE/library" --config "$BASE/rclone/rclone.conf" --read-only \
     --vfs-cache-mode full --cache-dir "$BASE/cache/rclone" --vfs-cache-max-size 150G --vfs-cache-max-age 720h \
     --dir-cache-time 24h --poll-interval 1m --vfs-fast-fingerprint \
-    --vfs-read-chunk-size 32M --vfs-read-chunk-size-limit 256M --vfs-read-ahead 64M --buffer-size 16M \
+    --vfs-read-chunk-size 32M --vfs-read-chunk-size-limit 128M --vfs-read-ahead 32M --buffer-size 8M --use-mmap \
     --log-file "$LOG/rclone.log" --log-level NOTICE --daemon </dev/null >/dev/null 2>&1
 }
 
@@ -35,7 +35,7 @@ supervise() {
     mount_library
     # The server: restarted if it stops.
     if ! kill -0 "$(cat "$PIDS/server.pid" 2>/dev/null)" 2>/dev/null; then
-      (cd "$BASE/app" && exec node --max-old-space-size=256 dist/server.mjs >> "$LOG/server.log" 2>&1 </dev/null) &
+      (cd "$BASE/app" && exec node --max-old-space-size=192 dist/server.mjs >> "$LOG/server.log" 2>&1 </dev/null) &
       echo $! > "$PIDS/server.pid"
       echo "$(date '+%F %T') server started (pid $!)" >> "$LOG/supervisor.log"
     fi

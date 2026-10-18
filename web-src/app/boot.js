@@ -9,6 +9,7 @@
 //    person can act on: 402 "that is on another plan" becomes a notice with a
 //    link to Plans, and 401 "your password was changed" signs this device out.
 import "./devices.js";
+import "./savesync.js";
 
 (() => {
   if (window.__nexusBoot) return;
@@ -25,6 +26,27 @@ import "./devices.js";
   const ADMIN_FLAG = "nexus_is_admin";
   const style = document.createElement("style");
   style.textContent = 'html:not([data-nx-admin="1"]) .nx-admin-only{display:none!important}'
+    // Playing in the browser on a touch screen (EmulatorJS): the player
+    // filled the screen minus a 16 px border and its game area didn't shrink,
+    // so in landscape Start/Select sat below the screen edge, and the
+    // on-screen buttons were 50 px (L/R 50x31). The player now fills the
+    // screen and the pad is scaled up, layout kept, so nothing overlaps.
+    + '@media (pointer:coarse),(max-width:767px){'
+    + '.fixed.z-\\[200\\]:has(#ejs-game-container){inset:0!important;border-radius:0!important}'
+    + '.fixed.z-\\[200\\]:has(#ejs-game-container)>.flex-1{min-height:0!important}'
+    + '#ejs-game-container,#ejs-game-container .ejs_parent{height:100%!important;max-height:100%!important}'
+    + '.ejs_virtualGamepad_left{transform:scale(1.35);transform-origin:left bottom}'
+    + '.ejs_virtualGamepad_right{transform:scale(1.35);transform-origin:right bottom}'
+    + '.ejs_virtualGamepad_bottom{transform:scale(1.25);transform-origin:center bottom}'
+    + '.ejs_virtualGamepad_button{font-weight:800!important}'
+    + '}'
+    // Short landscape screens: a slimmer header, so the game gets the height.
+    + '@media (pointer:coarse) and (max-height:500px),(max-height:500px) and (max-width:950px){'
+    + '.fixed.z-\\[200\\]:has(#ejs-game-container)>:first-child:not(.flex-1){padding-top:2px!important;padding-bottom:2px!important;min-height:0!important}'
+    + '.ejs_virtualGamepad_left{transform:scale(1.25)}.ejs_virtualGamepad_right{transform:scale(1.25)}.ejs_virtualGamepad_bottom{transform:scale(1.15)}'
+    // Scaled from the bottom, L and R rose under the header: bring them down.
+    + '.ejs_virtualGamepad_button.b_l,.ejs_virtualGamepad_button.b_r,.ejs_virtualGamepad_button.b_l2,.ejs_virtualGamepad_button.b_r2{margin-top:30px}'
+    + '}'
     // Game details on phones and short landscape screens: one scrolling column (build.mjs 3f).
     + '@media (max-width:767px),(max-height:560px){'
     + '.nx-detail-wrap{padding:6px!important;align-items:stretch!important}'

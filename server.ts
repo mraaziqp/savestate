@@ -31,6 +31,7 @@ import { createGameMode } from "./server/game-mode.ts";
 import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
 import { createVideoPrep } from "./server/videoprep.ts";
+import { registerSaveFiles } from "./server/savefiles.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
@@ -1320,13 +1321,19 @@ const romBasename = (rel: string) => path.basename(String(rel ?? "").replace(/\\
  * it can start, so a copy on a local disk is always preferred.
  */
 const cloudRootCache = new Map<string, boolean>();
+// Whether a path is on Google Drive (Drive for Desktop's drive, or a junction
+// to it like nexus-cloud-media). Resolving the junction used realpathSync,
+// which blocked the whole server for 12-21 s whenever Drive for Desktop was
+// busy (seen in a CPU profile, 2026-10-18). It is resolved in the background
+// now; until then the name decides.
 function isCloudPath(p: string): boolean {
   const drive = (process.env.NEXUS_CLOUD_DRIVE ?? "I:").toUpperCase();
   const top = path.resolve(p).split(path.sep).slice(0, 4).join(path.sep);
   if (!cloudRootCache.has(top)) {
-    let real = top;
-    try { real = realpathSync.native(top); } catch { /* not there */ }
-    cloudRootCache.set(top, real.toUpperCase().startsWith(drive));
+    cloudRootCache.set(top, /nexus-cloud-media|google drive|my drive/i.test(top));
+    void import("node:fs/promises").then(({ realpath }) => realpath(top))
+      .then((real) => cloudRootCache.set(top, real.toUpperCase().startsWith(drive)))
+      .catch(() => { /* not there: keep the guess */ });
   }
   return path.resolve(p).toUpperCase().startsWith(drive) || cloudRootCache.get(top)!;
 }
@@ -1730,10 +1737,32 @@ function normaliseArtTitle(t: string): string {
 // system|category -> (normalised title -> real filename). Populated on demand.
 const libretroIndexCache = new Map<string, Map<string, string> | null>();
 
+// One download per index at a time (art lookups for six GameCube games asked
+// for the same 900-entry page six times at once), and each index is kept on
+// disk for a week instead of fetched again after every restart.
+const libretroIndexInflight = new Map<string, Promise<Map<string, string> | null>>();
+const libretroIndexFile = (key: string) => path.join(PERSIST_DIR, "art-index", `${key.replace(/[^a-z0-9]+/gi, "_")}.json`);
 async function getLibretroIndex(system: string, category: string): Promise<Map<string, string> | null> {
   const key = `${system}|${category}`;
   if (libretroIndexCache.has(key)) return libretroIndexCache.get(key) ?? null;
-
+  const running = libretroIndexInflight.get(key);
+  if (running) return running;
+  const job = (async () => {
+    const saved = await readFile(libretroIndexFile(key), "utf8").then((t) => JSON.parse(t)).catch(() => null);
+    if (saved?.at && Date.now() - saved.at < 7 * 24 * 3600_000 && Array.isArray(saved.entries)) {
+      const map = new Map<string, string>(saved.entries);
+      libretroIndexCache.set(key, map.size ? map : null);
+      return map.size ? map : null;
+    }
+    const fresh = await fetchLibretroIndex(system, category, key);
+    if (fresh) void mkdir(path.dirname(libretroIndexFile(key)), { recursive: true })
+      .then(() => writeFile(libretroIndexFile(key), JSON.stringify({ at: Date.now(), entries: [...fresh] }))).catch(() => {});
+    return fresh;
+  })().finally(() => libretroIndexInflight.delete(key));
+  libretroIndexInflight.set(key, job);
+  return job;
+}
+async function fetchLibretroIndex(system: string, category: string, key: string): Promise<Map<string, string> | null> {
   try {
     const r = await fetch(
       `https://thumbnails.libretro.com/${encodeURIComponent(system)}/${category}/`,
@@ -4182,14 +4211,24 @@ async function startServer() {
   //     start delay. The 2s pause between chunks is what actually paces the
   //     thumbnail server; the extra half hour did nothing but stall progress.
   //
-  // Games whose art genuinely cannot be found are remembered for this process
-  // so the query keeps moving forward instead of retrying the same misses
-  // every pass. Progress is published for the UI (see /api/art/progress).
+  // Games whose art genuinely cannot be found are remembered (art-misses.json,
+  // for a week) so the query keeps moving forward instead of retrying the
+  // same misses: kept only in memory, every restart searched the same 661
+  // games again, 50 at a time (2026-10-18). Progress is published for the UI
+  // (see /api/art/progress).
   (async () => {
     await new Promise(r => setTimeout(r, 20_000));
     const CONCURRENCY = 3;
     const batchSize = 50;
-    const unfetchable = new Set<string>();
+    const missFile = path.join(PERSIST_DIR, "art-misses.json");
+    const missAt: Record<string, number> = await readFile(missFile, "utf8").then((t) => JSON.parse(t)).catch(() => ({}));
+    const WEEK = 7 * 24 * 3600_000;
+    const unfetchable = new Set<string>(Object.entries(missAt).filter(([, at]) => Date.now() - at < WEEK).map(([id]) => id));
+    let missSave: NodeJS.Timeout | null = null;
+    const rememberMiss = (id: string) => {
+      missAt[id] = Date.now();
+      if (!missSave) missSave = setTimeout(() => { missSave = null; void writeFile(missFile, JSON.stringify(missAt)).catch(() => {}); }, 5_000);
+    };
 
     while (pool) {
       if (!dbConnected) { await new Promise(r => setTimeout(r, 15_000)); continue; }
@@ -4233,6 +4272,7 @@ async function startServer() {
             } else {
               // No art source had it — don't let it block the queue forever.
               unfetchable.add(game.id);
+              rememberMiss(game.id);
               artProgress.missing = unfetchable.size;
             }
           }
@@ -4708,8 +4748,11 @@ async function startServer() {
       mem.media = finalItems.filter((i) => !/[\\/]\.nxweb[\\/]/.test(i.path ?? ""));
       _lastMediaScanAt = Date.now();
 
-      // Auto-queue newly-appeared large videos for compression (local files only)
-      if (_hasCompletedFirstMediaScan) {
+      // Auto-queue newly-appeared large videos for compression (local files
+      // only). Off unless NEXUS_AUTO_COMPRESS=1: it made them HEVC, which
+      // browsers don't play, so the film-preparation step (server/videoprep.ts)
+      // then converted the same files back to H.264 (2026-10-18).
+      if (_hasCompletedFirstMediaScan && process.env.NEXUS_AUTO_COMPRESS === "1") {
         for (const item of finalItems) {
           if (item.kind !== 'video') continue;
           if (item.relPath.includes('nexus-cloud-media')) continue;
@@ -4737,7 +4780,9 @@ async function startServer() {
     const { execFile } = await import("child_process");
     const videos = items.filter((i) => i.kind === "video" && !i.relPath.includes("nexus-cloud-media"));
     for (const v of videos.slice(0, 50)) {
-      const fullPath = resolveMediaTarget(v.relPath);
+      // The scan already knows where the file is; resolving it again tried up
+      // to 72 places with blocking checks (1.4 s of a frozen server per scan).
+      const fullPath = v.path || resolveMediaTarget(v.relPath);
       if (!fullPath || _mediaDurationCache.has(fullPath)) continue;
       await new Promise<void>((resolve) => {
         execFile(FFPROBE_BIN, ["-v", "quiet", "-print_format", "json", "-show_format", fullPath],
@@ -4787,7 +4832,17 @@ async function startServer() {
     return Array.from(new Set(usable)).join(',');
   }
 
+  // One row, read by most game routes: from the cloud database it cost
+  // ~150 ms each time, plus blocking existsSync checks on its folders. It is
+  // kept 5 seconds, and dropped whenever the row is written.
+  let vaultConfigMemo: { at: number; value: any } | null = null;
   async function getVaultConfig() {
+    if (vaultConfigMemo && Date.now() - vaultConfigMemo.at < 5_000) return vaultConfigMemo.value;
+    const value = await readVaultConfig();
+    vaultConfigMemo = { at: Date.now(), value };
+    return value;
+  }
+  async function readVaultConfig() {
     if (dbConnected && pool) {
       try {
         const r = await pool.query("SELECT * FROM vault_config WHERE id = 1");
@@ -6140,6 +6195,18 @@ async function startServer() {
   });
   drives.register(app);
 
+  // A blocked server makes every page wait at once (the audit saw plans,
+  // stats and uploads all take 14-18 s together). Freezes over 2 s are
+  // logged so the cause can be found from the time.
+  {
+    let last = Date.now();
+    setInterval(() => {
+      const now = Date.now(), lag = now - last - 1000;
+      if (lag > 2000) log("WARN", `Server was blocked for ${(lag / 1000).toFixed(1)} s (everything waited)`, "system");
+      last = now;
+    }, 1000).unref?.();
+  }
+
   // Films ready for every device (server/videoprep.ts): this PC converts
   // films a browser can't play into H.264 MP4 copies on Drive; every host
   // (the NAS too) plays the copy when there is one.
@@ -6157,6 +6224,54 @@ async function startServer() {
     isAdmin: async (req) => (await access.callerOf(req)).admin,
   });
   videoPrep.register(app);
+
+  // Admins: what the server spends its time on (a CPU profile for N seconds,
+  // saved in the data folder, open it in Chrome DevTools > Performance). For
+  // tracking down freezes the stall warning above reports.
+  app.post("/api/admin/debug/cpu-profile", async (req, res) => {
+    if (!(await access.callerOf(req)).admin) return res.status(403).json({ error: "admin_only" });
+    const seconds = Math.min(600, Math.max(5, Number(req.query.seconds) || 60));
+    const { Session } = await import("node:inspector");
+    const session = new Session();
+    session.connect();
+    const post = (m: string, p?: object) => new Promise<any>((ok, bad) => session.post(m, p ?? {}, (e: any, r: any) => (e ? bad(e) : ok(r))));
+    await post("Profiler.enable");
+    await post("Profiler.setSamplingInterval", { interval: 1000 });
+    await post("Profiler.start");
+    res.json({ ok: true, seconds });
+    setTimeout(async () => {
+      try {
+        const { profile } = await post("Profiler.stop");
+        const file = path.join(PERSIST_DIR, `cpu-${new Date().toISOString().replace(/[:.]/g, "-")}.cpuprofile`);
+        await writeFile(file, JSON.stringify(profile));
+        log("INFO", `CPU profile saved: ${file}`, "system");
+      } catch (e: any) { log("WARN", `CPU profile failed: ${e?.message ?? e}`, "system"); }
+      session.disconnect();
+    }, seconds * 1000);
+  });
+
+  // PC Games' Steam settings, per person (the page read and saved them here,
+  // but the route was missing, so they only lived in one browser).
+  const steamFile = path.join(PERSIST_DIR, "steam-config.json");
+  app.get("/api/steam/config", async (req, res) => {
+    const who = requireAnyAuth(req, res); if (!who) return;
+    const all = await readFile(steamFile, "utf8").then((t) => JSON.parse(t)).catch(() => ({}));
+    res.setHeader("Cache-Control", "no-store");
+    res.json(all[who.userId] ?? { steamId: "", apiKey: "" });
+  });
+  app.post("/api/steam/config", async (req, res) => {
+    const who = requireAnyAuth(req, res); if (!who) return;
+    const steamId = String((req.body as any)?.steamId ?? "").trim().slice(0, 40);
+    const apiKey = String((req.body as any)?.apiKey ?? "").trim().slice(0, 64);
+    const all = await readFile(steamFile, "utf8").then((t) => JSON.parse(t)).catch(() => ({}));
+    all[who.userId] = { steamId, apiKey };
+    await writeFile(steamFile, JSON.stringify(all)).catch(() => {});
+    res.json({ ok: true });
+  });
+
+  // Game saves that follow you between devices: the PS Vita app and the
+  // browser player (server/savefiles.ts).
+  registerSaveFiles(app, { pool: () => (dbConnected && pool ? pool : null), userOf: (req, res) => requireAnyAuth(req, res), log: (level, msg) => log(level, msg, "saves") });
 
   // The NAS can't convert video while someone watches. When a film has no
   // ready copy (or a quality change is asked for), the request goes to the
@@ -6278,7 +6393,7 @@ async function startServer() {
   });
 
   // ── Ghost Scanner (chokidar OS-level file watcher) ────────────
-  let fileWatcher: ReturnType<typeof chokidar.watch> | null = null;
+  let fileWatcher: { close: () => unknown } | null = null;
   let watcherRoot = "";
   const debounceMap = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -6431,14 +6546,43 @@ async function startServer() {
       return;
     }
     watcherRoot = vaultRoot;
-    fileWatcher = chokidar.watch(vaultRoot, {
+    // Windows: one recursive watch for the whole folder. chokidar set up a
+    // watcher per file, which took 14 s of server time on the Drive-backed
+    // ROM folder (CPU profile, 2026-10-18).
+    if (process.platform === "win32") {
+      const { watch } = await import("node:fs");
+      const settle = (full: string, last = -1) => {
+        const prev = debounceMap.get(full);
+        if (prev) clearTimeout(prev);
+        debounceMap.set(full, setTimeout(async () => {
+          debounceMap.delete(full);
+          const st = await stat(full).catch(() => null);
+          if (!st?.isFile()) return;
+          if (st.size !== last) { settle(full, st.size); return; } // still being written
+          processNewRom(full, vaultRoot).catch((err) => log("ERROR", `Ghost Scanner error: ${err}`, "watcher"));
+        }, 2500));
+      };
+      const w = watch(vaultRoot, { recursive: true, persistent: true }, (_ev, name) => {
+        if (!name) return;
+        const rel = String(name);
+        if (/(^|[\\/])\./.test(rel) || /nexus-vault\.json$/.test(rel)) return;
+        if (!ROM_EXT.has(path.extname(rel).toLowerCase())) return;
+        settle(path.join(vaultRoot, rel));
+      });
+      w.on("error", (err) => log("ERROR", `Watcher: ${err instanceof Error ? err.message : String(err)}`, "watcher"));
+      fileWatcher = w;
+      log("INFO", `Ghost Scanner activated \u2014 watching ${vaultRoot}`, "watcher");
+      return;
+    }
+    const cw = chokidar.watch(vaultRoot, {
       persistent: true,
       ignoreInitial: true,
       awaitWriteFinish: { stabilityThreshold: 2000, pollInterval: 500 },
       ignored: /(^|[/\\])\.|nexus-vault\.json$/,
       depth: 6,
     });
-    fileWatcher.on("add", (filePath: string) => {
+    fileWatcher = cw;
+    cw.on("add", (filePath: string) => {
       const ext = path.extname(filePath).toLowerCase();
       if (!ROM_EXT.has(ext)) return;
       const prev = debounceMap.get(filePath);
@@ -6450,7 +6594,7 @@ async function startServer() {
         );
       }, 2000));
     });
-    fileWatcher.on("error", (err: unknown) => {
+    cw.on("error", (err: unknown) => {
       const message = err instanceof Error ? err.message : String(err);
       log("ERROR", `Watcher: ${message}`, "watcher");
     });
@@ -6841,6 +6985,8 @@ async function startServer() {
     if (vc?.root_path) romFileIndex([vc.root_path, ...getExtraRoots(vc)]).catch(() => {});
   }, 15_000).unref?.();
 
+  let gamesListMemo: { at: number; key: string; all: any[] } | null = null;
+  const gamesListBuilding = new Map<string, Promise<any[]>>();
   app.get("/api/games", async (req, res) => {
     // Short cache: service worker / browser can skip this request if fresh.
     // Private: the answer depends on who is asking.
@@ -6908,10 +7054,33 @@ async function startServer() {
     };
     if (dbConnected && pool) {
       try {
-        const r = await pool.query(
-          "SELECT * FROM games WHERE relative_path IS NOT NULL AND relative_path != '' ORDER BY last_played DESC NULLS LAST, title ASC"
-        );
-        const all = dedupeGamesForClient(withAvailability(r.rows.map(rowToGame)));
+        // One page load asked for the list up to five times (hub, grid, Play
+        // Offline, Activity...), 1.5 s of database and file checks each. The
+        // same answer serves everyone with access for 10 seconds.
+        // Answered from the last list straight away while a fresh one is
+        // built (8,900 rows from the cloud database took 2-4 s every time);
+        // a list older than 5 minutes is waited for.
+        const memoKey = includeMissing ? "all" : "present";
+        const rebuild = () => {
+          const running = gamesListBuilding.get(memoKey);
+          if (running) return running;
+          const job = (async () => {
+            const r = await pool!.query(
+              "SELECT * FROM games WHERE relative_path IS NOT NULL AND relative_path != '' ORDER BY last_played DESC NULLS LAST, title ASC"
+            );
+            const list = dedupeGamesForClient(withAvailability(r.rows.map(rowToGame)));
+            gamesListMemo = { at: Date.now(), key: memoKey, all: list };
+            return list;
+          })().finally(() => { gamesListBuilding.delete(memoKey); });
+          gamesListBuilding.set(memoKey, job);
+          return job;
+        };
+        let all: any[];
+        const memo = gamesListMemo && gamesListMemo.key === memoKey ? gamesListMemo : null;
+        if (memo && Date.now() - memo.at < 5 * 60_000) {
+          all = memo.all;
+          if (Date.now() - memo.at > 10_000) void rebuild().catch(() => {});
+        } else all = await rebuild();
         res.set('X-Total-Count', String(all.length));
         if (req.query.for === "vita") return res.json(forVita(all));
         return res.json(paginate(all));
@@ -7241,6 +7410,7 @@ async function startServer() {
     const { root_path, bios_path, emulator_path, extra_scan_paths } = req.body as Record<string, string>;
     if (dbConnected && pool) {
       try {
+        vaultConfigMemo = null;
         await pool.query(
           `UPDATE vault_config SET
              root_path        = COALESCE($1, root_path),
@@ -7528,6 +7698,7 @@ async function startServer() {
     log("INFO", `Healing vault paths → ${new_root_path}`, "vault");
     if (dbConnected && pool) {
       try {
+        vaultConfigMemo = null;
         await pool.query("UPDATE vault_config SET root_path=$1, updated_at=NOW() WHERE id=1", [
           new_root_path,
         ]);
@@ -13019,6 +13190,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
               : relocateDeadPath(cur).newPath;
           vaultChanges[col] = { from: cur, to: target };
           if (apply) {
+            vaultConfigMemo = null;
             await pool.query(
               `UPDATE vault_config SET ${col}=$1, updated_at=NOW() WHERE id=1`,
               [target],
@@ -19169,6 +19341,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const newKey = crypto.randomBytes(32).toString("hex");
     (mem.vaultConfig as any).brain_api_key = newKey;
     if (dbConnected && pool) {
+      vaultConfigMemo = null;
       await pool.query("UPDATE vault_config SET brain_api_key=$1, updated_at=NOW() WHERE id=1", [newKey]).catch(() => {});
     }
     persistHostStateNow().catch(() => {});
@@ -19181,6 +19354,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!key || key.length < 16) return res.status(400).json({ error: "Key must be at least 16 characters" });
     (mem.vaultConfig as any).brain_api_key = key;
     if (dbConnected && pool) {
+      vaultConfigMemo = null;
       await pool.query("UPDATE vault_config SET brain_api_key=$1, updated_at=NOW() WHERE id=1", [key]).catch(() => {});
     }
     persistHostStateNow().catch(() => {});
@@ -19191,6 +19365,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.delete("/api/brain/key", async (_req, res) => {
     (mem.vaultConfig as any).brain_api_key = "";
     if (dbConnected && pool) {
+      vaultConfigMemo = null;
       await pool.query("UPDATE vault_config SET brain_api_key='', updated_at=NOW() WHERE id=1").catch(() => {});
     }
     persistHostStateNow().catch(() => {});

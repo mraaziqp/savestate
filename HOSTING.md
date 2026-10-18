@@ -543,6 +543,54 @@ launcher refuses them, and Activity shows "Games still downloading: N". On
 2026-10-17 the PS2 essentials pack (BitTorrent, not qBittorrent) had 140 of
 154 files unfinished.
 
+## Saves that follow you (server/savefiles.ts, savesync.js, vita/)
+
+A game's battery save (.srm) is kept per person in the database (table
+`save_files`, every host sees it; the replaced copy is kept as
+`prev_data`): `GET/PUT /api/savefile/<game>`, `/info` for its CRC-32.
+The browser player loads the host's save when a game starts (if it changed
+elsewhere and not here), sends it every 45 s while playing and when the game
+closes (savesync.js, hooked into EmulatorJS by build.mjs 3q). The PS Vita
+app (1.1) sends RetroArch's saves (`ux0:data/retroarch/savefiles`, per-core
+folders, or next to the game) when it starts and fetches the host's before
+launching a game. When both changed, the device's own copy wins and the
+other is the backup. PSP saves (Adrenaline) are not synced.
+
+## On-screen controls for browser play on phones
+
+boot.js CSS (touch screens): the player fills the screen (it kept a 16 px
+border and its game area overflowed, so Start/Select fell below the edge in
+landscape), and EmulatorJS's pad is scaled from its corners (1.35x, 1.25x on
+short landscape screens) so the layout stays and buttons are 63-68 px; L/R
+move down clear of the header.
+
+## Server speed: what was fixed (audit 2026-10-18)
+
+- `isCloudPath` resolved the Drive junction with `realpathSync`, which
+  blocked the whole server 12-21 s when Drive for Desktop was busy; it
+  resolves in the background now.
+- Folder checks that can meet a sleeping disk or a share that is down use
+  `reachable()` in drives.ts (3 s, non-blocking); the PC no longer scans
+  the NAS share as a game folder (that path froze it ~20 s when the NAS was
+  off).
+- Ghost Scanner on Windows: one recursive `fs.watch` instead of chokidar's
+  watcher per file (14 s of server time).
+- `/api/games` is answered from the last list while a fresh one is built
+  (1.5-5 s each before, about 5 ms now); `getVaultConfig` is kept 5 s and
+  dropped on every write (150 ms of database per call).
+- Art: misses are remembered for a week (art-misses.json), libretro indexes
+  are downloaded once at a time and kept on disk for a week.
+- Drive's archive listing (for duplicates) is kept on disk for 6 h and the
+  last one is used when Google answers RATE_LIMIT_EXCEEDED.
+- The server logs "Server was blocked for N s" for freezes over 2 s, and
+  `POST /api/admin/debug/cpu-profile?seconds=N` (admins) saves a CPU profile
+  in the data folder to find the cause.
+- run-host.ps1 keeps the previous run's log as `<name>.prev.log`.
+- Automatic HEVC compression of new local films is off
+  (`NEXUS_AUTO_COMPRESS=1` to turn it on): the films then had to be
+  converted back to H.264 for browsers.
+- `/api/steam/config` exists now (PC Games saved Steam settings to it).
+
 ## Films ready for every device (server/videoprep.ts)
 
 Browsers play MP4 (H.264 + AAC/MP3) and WebM; the rest of the library

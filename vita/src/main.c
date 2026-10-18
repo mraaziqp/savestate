@@ -12,6 +12,10 @@
  *   ux0:pspemu/ISO/                       PSP games (where Adrenaline looks)
  *   ux0:data/SaveState/covers/<id>.jpg     cover cache
  *
+ * Saves follow you: a game's RetroArch save (.srm) goes up to the host after
+ * playing and comes down before playing when it changed elsewhere (browser,
+ * another Vita), through /api/savefile/<game>.
+ *
  * Buttons follow the console's own confirm button (cross or circle).
  */
 #include <psp2/kernel/processmgr.h>
@@ -33,6 +37,7 @@
 #include <vita2d.h>
 #include <curl/curl.h>
 #include <jansson.h>
+#include <zlib.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,7 +45,8 @@
 #include <strings.h>
 #include <ctype.h>
 
-#define APP_VERSION "1.0"
+#define APP_VERSION "1.1"
+#define RA_SAVES "ux0:data/retroarch/savefiles"
 #define DATA_DIR "ux0:data/SaveState"
 #define ROM_DIR DATA_DIR "/roms"
 #define COVER_DIR DATA_DIR "/covers"
@@ -178,7 +184,9 @@ static json_t *library = NULL; /* { id: { title, sys, path } } */
 static void load_library(void) { library = json_load_file(LIBRARY_FILE, 0, NULL); if (!json_is_object(library)) { if (library) json_decref(library); library = json_object(); } }
 static void save_library(void) { mkdirs(DATA_DIR); json_dump_file(library, LIBRARY_FILE, JSON_INDENT(1)); }
 static void library_add(const Game *g, const char *path) {
-  json_object_set_new(library, g->id, json_pack("{s:s,s:s,s:s,s:s}", "title", g->title, "sys", SYSTEMS[g->sys].id, "path", path, "file", g->file));
+  json_t *old = json_object_get(library, g->id);
+  json_int_t crc = old ? json_integer_value(json_object_get(old, "crc")) : 0;
+  json_object_set_new(library, g->id, json_pack("{s:s,s:s,s:s,s:s,s:I}", "title", g->title, "sys", SYSTEMS[g->sys].id, "path", path, "file", g->file, "crc", crc));
   save_library();
 }
 
@@ -397,8 +405,97 @@ static void launch_uri(const char *uri) {
   sceKernelDelayThread(500 * 1000);
   sceKernelExitProcess(0);
 }
+/* ── Saves ─────────────────────────────────────────────────────────────── */
+static unsigned char *read_all(const char *path, long *len) {
+  FILE *f = fopen(path, "rb"); if (!f) return NULL;
+  fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+  if (n <= 0 || n > 8 * 1024 * 1024) { fclose(f); return NULL; }
+  unsigned char *b = malloc(n); if (!b) { fclose(f); return NULL; }
+  if (fread(b, 1, n, f) != (size_t)n) { free(b); fclose(f); return NULL; }
+  fclose(f); *len = n; return b;
+}
+/* Where RetroArch keeps this game's save: savefiles/<name>.srm, or a
+   per-core folder inside it, or next to the game. 1 if found; out is the
+   default place to write one either way. */
+static int save_path_for(const char *rom, char *out, size_t n) {
+  const char *slash = strrchr(rom, '/'); const char *name = slash ? slash + 1 : rom;
+  char base[200]; snprintf(base, sizeof base, "%s", name); char *dot = strrchr(base, '.'); if (dot) *dot = 0;
+  snprintf(out, n, RA_SAVES "/%s.srm", base);
+  if (exists(out)) return 1;
+  SceUID d = sceIoDopen(RA_SAVES);
+  if (d >= 0) {
+    SceIoDirent e; char cand[512];
+    while (sceIoDread(d, &e) > 0) {
+      if (!SCE_S_ISDIR(e.d_stat.st_mode)) continue;
+      snprintf(cand, sizeof cand, RA_SAVES "/%s/%s.srm", e.d_name, base);
+      if (exists(cand)) { sceIoDclose(d); snprintf(out, n, "%s", cand); return 1; }
+    }
+    sceIoDclose(d);
+  }
+  char beside[512]; snprintf(beside, sizeof beside, "%.*s/%s.srm", slash ? (int)(slash - rom) : 0, rom, base);
+  if (exists(beside)) { snprintf(out, n, "%s", beside); return 1; }
+  return 0;
+}
+static double entry_crc(const char *id) { json_t *e = json_object_get(library, id); return e ? json_number_value(json_object_get(e, "crc")) : 0; }
+static void set_entry_crc(const char *id, unsigned long crc) { json_t *e = json_object_get(library, id); if (e) { json_object_set_new(e, "crc", json_integer((json_int_t)crc)); save_library(); } }
+/* Sends the bytes as this game's save; 1 on success. */
+static int put_save(const char *id, const unsigned char *data, long len) {
+  char url[512]; snprintf(url, sizeof url, "%s/api/savefile/%s", cfg_host, id);
+  struct curl_slist *h = NULL; CURL *c = curl_for(url, &h);
+  h = curl_slist_append(h, "Content-Type: application/octet-stream");
+  h = curl_slist_append(h, "X-Device: PS Vita");
+  curl_easy_setopt(c, CURLOPT_HTTPHEADER, h);
+  curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, "PUT");
+  curl_easy_setopt(c, CURLOPT_POSTFIELDS, data);
+  curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, len);
+  curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+  Buf b = {0}; curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, buf_write); curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
+  CURLcode rc = curl_easy_perform(c); long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+  curl_easy_cleanup(c); curl_slist_free_all(h); free(b.data);
+  return rc == CURLE_OK && code == 200;
+}
+/* Saves changed on this Vita since the last sync go up. Returns how many. */
+static int sync_up(void) {
+  int sent = 0; const char *key; json_t *v;
+  json_object_foreach(library, key, v) {
+    const char *sys = json_string_value(json_object_get(v, "sys")), *rom = json_string_value(json_object_get(v, "path"));
+    if (!sys || !rom || !strcmp(sys, "psp")) continue;
+    char sp[512]; if (!save_path_for(rom, sp, sizeof sp)) continue;
+    long len = 0; unsigned char *b = read_all(sp, &len); if (!b) continue;
+    unsigned long crc = crc32(0L, b, len);
+    if ((double)crc != entry_crc(key) && put_save(key, b, len)) { set_entry_crc(key, crc); sent++; }
+    free(b);
+  }
+  return sent;
+}
+/* Before playing: the host's save, when it changed elsewhere and this Vita's didn't. */
+static void sync_down(const char *id, const char *rom) {
+  if (!json_object_get(library, id)) return;
+  char url[512]; snprintf(url, sizeof url, "%s/api/savefile/%s", cfg_host, id);
+  struct curl_slist *h = NULL; CURL *c = curl_for(url, &h);
+  Buf b = {0};
+  curl_easy_setopt(c, CURLOPT_HTTPHEADER, h); curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, buf_write); curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
+  curl_easy_setopt(c, CURLOPT_TIMEOUT, 20L);
+  CURLcode rc = curl_easy_perform(c); long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+  curl_easy_cleanup(c); curl_slist_free_all(h);
+  if (rc != CURLE_OK || code != 200 || !b.len) { free(b.data); return; }
+  unsigned long remote = crc32(0L, (unsigned char *)b.data, b.len);
+  double synced = entry_crc(id);
+  char sp[512]; int have = save_path_for(rom, sp, sizeof sp);
+  unsigned long local = 0;
+  if (have) { long len = 0; unsigned char *lb = read_all(sp, &len); if (lb) { local = crc32(0L, lb, len); free(lb); } }
+  if (remote != local && (!have || (double)local == synced)) {
+    char dir[512]; snprintf(dir, sizeof dir, "%s", sp); char *sl = strrchr(dir, '/'); if (sl) { *sl = 0; mkdirs(dir); }
+    char tmp[520]; snprintf(tmp, sizeof tmp, "%s.part", sp);
+    FILE *f = fopen(tmp, "wb");
+    if (f && fwrite(b.data, 1, b.len, f) == b.len) { fclose(f); sceIoRemove(sp); sceIoRename(tmp, sp); set_entry_crc(id, remote); }
+    else { if (f) fclose(f); sceIoRemove(tmp); }
+  } else if (remote == local) set_entry_crc(id, local);
+  free(b.data);
+}
+
 /* Plays a downloaded game: RetroArch straight into it, or Adrenaline for PSP. */
-static void play(int sys, const char *path) {
+static void play(const char *id, int sys, const char *path) {
   if (!strcmp(SYSTEMS[sys].id, "psp")) {
     if (!has_adrenaline()) { say(C_WARN, "PSP games need Adrenaline. Install it, then start the game from its XMB (Memory Stick > Game)."); return; }
     say(C_OK, "Opening Adrenaline: the game is under Game > Memory Stick.");
@@ -409,6 +506,7 @@ static void play(int sys, const char *path) {
   if (!ra) { say(C_WARN, "Install RetroArch for PS Vita first (retroarch.com > Download > PlayStation Vita)."); return; }
   const char *core = core_for(sys, ra);
   if (!core) { char m[200]; snprintf(m, sizeof m, "RetroArch has no core for %s. Reinstall RetroArch with all cores.", SYSTEMS[sys].name); say(C_WARN, m); return; }
+  if (id) sync_down(id, path);
   char uri[700]; snprintf(uri, sizeof uri, "psgm:play?titleid=%s&param=%s&param2=%s", ra, core, path);
   launch_uri(uri);
 }
@@ -639,7 +737,7 @@ static void games_tab(unsigned int pressed) {
   else if ((pressed & confirm_btn) && nfiltered) {
     Game *g = &games[filtered[sel_game]];
     char lp[512]; local_path(g, lp, sizeof lp);
-    if (exists(lp)) { library_add(g, lp); play(g->sys, lp); }
+    if (exists(lp)) { library_add(g, lp); play(g->id, g->sys, lp); }
     else { deferred = D_GET_GAME; deferred_game = filtered[sel_game]; }
   }
   if ((pressed & SCE_CTRL_SQUARE) && nfiltered && focus_games) {
@@ -674,7 +772,7 @@ static void local_tab(unsigned int pressed) {
   if (pressed & SCE_CTRL_DOWN && sel_local < n - 1) sel_local++;
   if (n && (pressed & confirm_btn)) {
     const char *s = json_string_value(json_object_get(items[sel_local], "sys")), *p = json_string_value(json_object_get(items[sel_local], "path"));
-    int si = s ? sys_index(s) : -1; if (si >= 0 && p) play(si, p);
+    int si = s ? sys_index(s) : -1; if (si >= 0 && p) play(ids[sel_local], si, p);
   }
   if (n && (pressed & SCE_CTRL_SQUARE)) {
     const char *p = json_string_value(json_object_get(items[sel_local], "path"));
@@ -808,7 +906,12 @@ int main(void) {
 
   if (*cfg_token) {
     busy("Connecting to your SaveState host...");
-    if (renew() && *cfg_token) { load_games(); screen = SCR_HOME; }
+    if (renew() && *cfg_token) {
+      load_games(); screen = SCR_HOME;
+      busy("Syncing your saves...");
+      int up = sync_up();
+      if (up) { char m[80]; snprintf(m, sizeof m, "%d save%s sent to your host.", up, up == 1 ? "" : "s"); say(C_OK, m); }
+    }
   }
 
   unsigned int old = 0; int hold = 0;
@@ -838,7 +941,7 @@ int main(void) {
       memset(&job, 0, sizeof job);
       if (done && g >= 0) {
         library_add(&games[g], path);
-        if (launch) { vita2d_end_drawing(); vita2d_swap_buffers(); play(games[g].sys, path); continue; }
+        if (launch) { vita2d_end_drawing(); vita2d_swap_buffers(); play(games[g].id, games[g].sys, path); continue; }
       }
     }
     if (screen == SCR_LOGIN) login_screen(&pad, job.active ? 0 : pressed);
