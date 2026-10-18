@@ -514,6 +514,30 @@ BIOS part is empty, `/api/emulator/export/bios` answers 410, and emulator
 exports skip `bios`, `portable`, `bis`, `nand`, `keys`, `firmware`, `user`
 folders and `.keys`/`.pup` files.
 
+## After Play (PlayOverlay.jsx, launcher v9)
+
+Play on a card, in game details or Play Offline shows SaveState's own panel:
+the cover with the real steps ("Getting the game ready" with the launcher's
+copy progress, "Starting PCSX2", "Playing"), Stop game, and "closed" when
+the game ends; a failure says why with Try again (and Set up games when the
+launcher is missing). Driven by `nexus:play` events that build.mjs adds to
+the shared native launch (`gc`) and to Play Offline's copy step. Native
+emulators can't be drawn inside a web page, so they open full screen over
+SaveState (`-f` RetroArch, `-batch -fullscreen -nogui` PCSX2, `--fullscreen`
+Ryujinx) and the panel follows them (`/launch/status`, `/launch/stop`).
+Browser-capable consoles play inside the app itself (EmulatorJS).
+
+## Games still downloading (server/incomplete.ts)
+
+A torrent creates each file at full size and fills it in (a sparse file); a
+half-full PS2 disc crashed PCSX2 ("Jump to unaligned address"). Every 3
+minutes PowerShell lists sparse files under the ROM folders whose real size
+on disk is short of their size. Those games are left out of the lists, both
+download routes answer 409 `still_downloading`, Drive copies skip them, the
+launcher refuses them, and Activity shows "Games still downloading: N". On
+2026-10-17 the PS2 essentials pack (BitTorrent, not qBittorrent) had 140 of
+154 files unfinished.
+
 ## NAS / Linux hosts (install.sh)
 
 `curl -fsSL https://savestate.co.za/install.sh | bash` (served from

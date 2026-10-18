@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_USER: savestate
       POSTGRES_DB: savestate
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-savestate_nas_password}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/nas/.env (install.sh makes one)}
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -24,9 +24,9 @@ services:
     ports:
       - "${PORT:-3000}:3000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://savestate:${DB_PASSWORD:-savestate_nas_password}@db:5432/savestate}
+      DATABASE_URL: ${DATABASE_URL:-postgres://savestate:${DB_PASSWORD}@db:5432/savestate}
       NEXUS_DB_SSL: "0"
-      JWT_SECRET: ${JWT_SECRET}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in deploy/nas/.env (install.sh makes one)}
       NEXUS_DATA_DIR: /data
       NEXUS_CLOUD_FIRST: "0"
       NEXUS_STREAM_ONLY: "0"

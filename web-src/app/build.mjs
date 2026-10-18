@@ -134,13 +134,14 @@ const before = shell;
     `NxScreens=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ScreensInUse}))),` +
     `NxAdminUsers=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AdminUsers}))),` +
     `NxGameSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameSetup}))),` +
+    `NxPlayOverlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayOverlay}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
@@ -151,6 +152,16 @@ shell = patch(shell, "admin pages wait for the account", "(0,s.useEffect)(()=>{!
   "(0,s.useEffect)(()=>{!Ee&&Da.has(x)&&S(\"media\")", "(0,s.useEffect)(()=>{!Ee&&!re.loading&&Da.has(x)&&S(\"media\")");
 shell = patch(shell, "admin pages wait for the account (deps)", "},[x,Ue,kt,Ee,re.loading])",
   "},[x,Ue,kt,Ee])", "},[x,Ue,kt,Ee,re.loading])");
+
+// After Play, SaveState follows the game (PlayOverlay.jsx): the shared native
+// launch announces "starting", then "started" (with the emulator's pid, so the
+// panel knows when the game closes) or "failed" with the reason and a retry.
+shell = patch(shell, "native launch announces each step", "nxGcInner",
+  "async function gc(t){if(!1&&oo&&!Fe())",
+  'async function gc(t){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",game:t,retry:()=>gc(t)}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",game:t,result:nxR,retry:()=>gc(t)}}));return nxR}async function nxGcInner(t){if(!1&&oo&&!Fe())');
+shell = patch(shell, "native launch returns the game's pid", "pid:n.data?.pid,emulator:n.data?.emulator",
+  'return{ok:!0}}catch{return{ok:!1,error:"Could not contact local launcher"}}}',
+  'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}}catch{return{ok:!1,error:"SaveState for Windows didn\\u2019t answer. Try again, or open Games > Set up games."}}}');
 
 // Play on a game card refused outright on https ("Open Nexus at
 // http://your-host:3000 ... HTTPS blocks local launcher connections"), from
@@ -585,6 +596,14 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
     'b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){const nxHeavyNeedsApp=`${String(t.platform).toUpperCase()} games play through SaveState for Windows. Open Games > Set up games to install it (a one-time step), then press Play again.`;f(M=>new Map(M).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:nxHeavyNeedsApp}));o?.(`Couldn\'t play ${t.title}: ${nxHeavyNeedsApp}`,"error",void 0,1e4);return}');
   ch = patch(ch, "play offline: browser storage only for browser games", "if(y.isSupported&&nxCanBrowser(t.platform)){try{const M=x(t),k=await y.downloadRomToDevice(",
     "if(y.isSupported){try{const M=x(t),k=await y.downloadRomToDevice(", "if(y.isSupported&&nxCanBrowser(t.platform)){try{const M=x(t),k=await y.downloadRomToDevice(");
+  // The launcher getting the game ready (copying it to this PC) is the first
+  // step the play panel shows, with its progress; a failure there shows too.
+  ch = patch(ch, "play offline: getting ready shows in the play panel", 'phase:"preparing",game:ne(t)',
+    "if(await _()){let M=0,k=Date.now();",
+    'if(await _()){d&&window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"preparing",game:ne(t),retry:()=>b(t,d)}}));let M=0,k=Date.now();');
+  ch = patch(ch, "play offline: a failed copy shows in the play panel", 'phase:"failed",game:ne(t),error:v.message',
+    'catch(v){f(A=>new Map(A).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:v.message??"Download failed"}))}finally{clearInterval(S),X.current.delete(t.id)}',
+    'catch(v){d&&window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"failed",game:ne(t),error:v.message??"The game couldn\\u2019t be copied to this PC.",retry:()=>b(t,d)}}));f(A=>new Map(A).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:v.message??"Download failed"}))}finally{clearInterval(S),X.current.delete(t.id)}');
   ch = patch(ch, "play offline: play heavy games through the launcher", "c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){",
     "c=(0,s.useCallback)(async t=>{if(y.isSupported){", "c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){");
   // A game card's error overlay: "Retry" wrapped to "Ret / ry" on a wide

@@ -77,7 +77,11 @@ const REQUIRED_BIOS: Record<string, { anyOf: string[]; required: boolean; label:
 // Neon (the hosted database) needs TLS. A host with its own database next to
 // it (the NAS install, deploy/nas) runs Postgres without TLS: NEXUS_DB_SSL=0
 // or sslmode=disable in DATABASE_URL.
-const DB_SSL = process.env.NEXUS_DB_SSL === "0" || /[?&]sslmode=disable/.test(process.env.DATABASE_URL ?? "")
+// Only ever for a database on this machine or network: NEXUS_DB_SSL=0 with a
+// cloud DATABASE_URL (Neon) would just fail to connect, so it is ignored there.
+const DB_HOST = (() => { try { return new URL(String(process.env.DATABASE_URL ?? "").replace(/^postgres(ql)?:/, "http:")).hostname; } catch { return ""; } })();
+const DB_IS_NEARBY = /^(db|localhost|postgres|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(DB_HOST) || !DB_HOST.includes(".");
+const DB_SSL = /[?&]sslmode=disable/.test(process.env.DATABASE_URL ?? "") || (process.env.NEXUS_DB_SSL === "0" && DB_IS_NEARBY)
   ? false : { rejectUnauthorized: true };
 function dbConnectionString(): string {
   return String(process.env.DATABASE_URL ?? "")
@@ -6065,6 +6069,13 @@ async function startServer() {
     log: (level, msg) => log(level, msg, "incomplete")
   });
   globalIncompleteFiles = incompleteFiles;
+  addLiveSource(() => {
+    const list = incompleteFiles.list();
+    if (!list.length) return [];
+    const size = list.reduce((n, f) => n + f.size, 0), have = list.reduce((n, f) => n + f.onDisk, 0);
+    return [{ kind: "download", title: `Games still downloading: ${list.length}`, status: "downloading", progress: size ? have / size : null,
+      detail: `${(have / 1024 ** 3).toFixed(1)} of ${(size / 1024 ** 3).toFixed(1)} GB so far. They appear in Games, and go to Google Drive, once each one is complete.` }];
+  });
 
   // Google Drive accounts, local disks and upload-and-verify jobs (server/drives.ts).
   const drives = createDrives({
@@ -6806,7 +6817,9 @@ async function startServer() {
         }
         return out;
       });
-      return includeMissing ? marked : marked.filter((g) => g.syncStatus !== "missing_media");
+      // Half-downloaded games stay out of the lists until they are complete
+      // (a half-full disc crashes the emulator); Activity says how many there are.
+      return includeMissing ? marked : marked.filter((g) => g.syncStatus !== "missing_media" && g.syncStatus !== "downloading");
     };
     if (dbConnected && pool) {
       try {
@@ -20519,6 +20532,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     let romStat: Awaited<ReturnType<typeof stat>>;
     try { romStat = await stat(resolved.absolutePath); } catch { return res.status(404).json({ error: "ROM file missing" }); }
+    const stillDownloading = incompleteFiles.get(resolved.absolutePath);
+    if (stillDownloading) return res.status(409).json({ code: "still_downloading", error: `${game.title || path.basename(resolved.absolutePath)} is still downloading on the host (${Math.floor(stillDownloading.share * 100)}% so far). It plays once the download finishes.` });
     const fileSize = romStat.size;
     const romSource = hotCache.pick(resolved.absolutePath, romStat);
     if (romSource === resolved.absolutePath) hotCache.warm(resolved.absolutePath, "game");
