@@ -502,5 +502,15 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     });
   }
 
-  return { register, copyFor, stateOf, request, driveRel, classify };
+  /** A film was deleted: its prepared copy's path (to delete too), and its row goes. */
+  async function forget(abs: string): Promise<string | null> {
+    const rel = driveRel(abs);
+    const row = rel ? rows.get(rel) : null;
+    if (!rel) return null;
+    rows.delete(rel);
+    await q("DELETE FROM video_prep WHERE rel=$1", [rel]).catch(() => {});
+    return row?.out_rel ? localOf(row.out_rel) : null;
+  }
+
+  return { register, copyFor, stateOf, request, driveRel, classify, forget };
 }

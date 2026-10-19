@@ -72,11 +72,26 @@ type OffloadJob = {
   counting?: boolean;
   /** Sent in earlier runs of this copy (before a restart), so progress carries on instead of starting at 0. */
   carriedBytes?: number;
+  /** Bytes of this folder that go to Drive (set by the duplicate check). */
+  sendBytes?: number;
   /** Files already on Drive somewhere else in the archive (same name and size): not sent again. */
   dupes?: { count: number; bytes: number; at: number; file: string; examples: string[] } | null;
   /** Files changed in the last half hour (still downloading): left for a later run. */
   stillChanging?: { count: number; bytes: number; at: number } | null;
+  /** The final check before this PC's copy may go (see runFinalCheck). */
+  final?: FinalCheck | null;
 };
+export type FinalCheck = {
+  at: number; running?: boolean; passed: boolean;
+  /** Files that may be deleted here: confirmed at the destination, or a byte-identical duplicate elsewhere on Drive. */
+  safeFiles: number; safeBytes: number;
+  /** Kept on this PC: still being written, or never uploaded by design (desktop.ini...). */
+  keptFiles: number; keptBytes: number;
+  checks: { fresh: string; accounted: string; readBack: string };
+  problems: string[];
+};
+
+const pickSample = <T,>(list: T[], n: number) => { const a = [...list]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a.slice(0, n); };
 
 const EXCLUDES = ["desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**", "*.partial", "*.!qB", "*.crdownload", "*.tmp"];
 // A file changed in the last 30 minutes is probably still being written (a
@@ -464,15 +479,25 @@ export function createDrives(deps: DrivesDeps) {
     const file = path.join(reportsDir, `${job.id}.dupes.txt`);
     await writeFile(file, skip.join("\n") + (skip.length ? "\n" : ""));
     job.dupes = { count: skip.length, bytes, at: Date.now(), file, examples };
+    // What this folder really has to send (for progress): everything here,
+    // less duplicates and files still being written.
+    job.sendBytes = Math.max(0, here.reduce((n, f) => n + f.size, 0) - bytes - (job.stillChanging?.bytes ?? 0));
     if (skip.length) deps.log("INFO", `Upload ${job.id}: ${skip.length} file(s), ${gbs(bytes)}, are already on Drive elsewhere; not sending them again`);
     saveNow();
   }
   const dupeArgs = (job: OffloadJob) => (job.dupes?.count && existsSync(job.dupes.file) ? [`--exclude-from=${job.dupes.file}`] : []);
 
+  // Progress against the folder's real size. Adding up what each run sent
+  // counted every half-sent file again after a restart (F:movies showed
+  // 1,322 of 1,374 GB on a 932 GB disk). rclone's own total for a run is what
+  // is still left, so done = folder total - what's left + what this run sent.
+  const totalOf = (j: OffloadJob) => (j.sendBytes && j.sendBytes >= j.stats.totalBytes ? j.sendBytes : (j.carriedBytes ?? 0) + j.stats.totalBytes);
+  const doneOf = (j: OffloadJob) => (j.sendBytes && j.sendBytes >= j.stats.totalBytes ? Math.max(0, j.sendBytes - j.stats.totalBytes + j.stats.bytes) : (j.carriedBytes ?? 0) + j.stats.bytes);
+
   async function runCopy(job: OffloadJob) {
     const bin = await findRclone();
     if (!bin) { job.status = "failed"; job.lastError = "rclone is not installed on the host"; return saveNow(); }
-    if (!existsSync(job.source)) { failed(job, `The folder ${job.source} is not reachable (disk asleep or unplugged?)`); return saveNow(); }
+    if (!(await reachable(job.source, 15_000))) { failed(job, `The folder ${job.source} is not reachable (disk asleep or unplugged?)`); return saveNow(); }
     job.status = "copying";
     job.startedAt ??= Date.now();
     job.lastProgressAt = Date.now();
@@ -550,6 +575,7 @@ export function createDrives(deps: DrivesDeps) {
         ? { kind: "upload", title: `On Google Drive: ${job.label}`, detail: `${v.matched} file(s), ${gbs(v.matchedBytes)}, every checksum matched (${job.remote}:${job.dest})`, bytes: v.matchedBytes, data: { job: job.id, source: job.source } }
         : { kind: "upload", status: "warn", title: `Upload not complete yet: ${job.label}`, detail: `${v.matched} confirmed, ${v.missing + v.differ + v.errors} still to retry`, data: { job: job.id } });
       if (job.status === "verified") deps.onUploaded?.(job.kind);
+      if (job.status === "verified" && !job.autoFree) void runFinalCheck(job).catch((e) => deps.log("WARN", `Upload ${job.id}: final check failed to run: ${e?.message ?? e}`));
       // The owner asked for this folder to be cleared once it is safely on Drive.
       if (job.status === "verified" && job.autoFree && (job.verify?.matched ?? 0) > 0) {
         deps.log("INFO", `Upload ${job.id}: verified, freeing this PC as asked`);
@@ -564,8 +590,109 @@ export function createDrives(deps: DrivesDeps) {
   }
 
   /** Delete the local files the last check confirmed, if they have not changed since. */
+  // ── The final check: three independent checks before a folder may go ────
+  //   1. fresh   every file compared with Drive again now (size + MD5), not
+  //              the upload's earlier result
+  //   2. accounted  every file in the folder is either confirmed at the
+  //              destination, or a duplicate elsewhere on Drive whose MD5 is
+  //              the same as here, or kept on purpose (still being written,
+  //              desktop.ini...). One file nobody can account for fails it.
+  //   3. read-back  a random sample (up to 8 files, 20 GB) downloaded from
+  //              Drive and compared byte for byte
+  // Writes <job>.final.txt ("= path" for every file that may be deleted).
+  const runOut = (bin: string, args: string[], timeoutMs = 6 * 3600_000) => new Promise<{ code: number; out: string; err: string }>((resolve) => {
+    execFile(bin, args, { windowsHide: true, maxBuffer: 256 * 1024 * 1024, timeout: timeoutMs }, (e, out, err) => resolve({ code: e ? ((e as any).code ?? 1) : 0, out: String(out ?? ""), err: String(err ?? "") }));
+  });
+  async function runFinalCheck(job: OffloadJob): Promise<FinalCheck> {
+    const bin = await findRclone();
+    const fc: FinalCheck = { at: Date.now(), running: true, passed: false, safeFiles: 0, safeBytes: 0, keptFiles: 0, keptBytes: 0,
+      checks: { fresh: "running", accounted: "waiting", readBack: "waiting" }, problems: [] };
+    job.final = fc; saveNow();
+    const finish = (passed: boolean) => { fc.passed = passed; fc.running = false; fc.at = Date.now(); job.final = fc; saveNow(); return fc; };
+    if (!bin) { fc.problems.push("rclone is not installed"); return finish(false); }
+    if (!(await reachable(job.source, 15_000))) { fc.problems.push(`${job.source} is not reachable`); return finish(false); }
+    await mkdir(reportsDir, { recursive: true });
+    const src = job.source, dst = `${job.remote}:${job.dest}`;
+
+    // 1. Fresh check of everything (duplicates and new files are excluded, as in the upload).
+    const fresh = path.join(reportsDir, `${job.id}.final-check.txt`);
+    await runOut(bin, ["check", src, dst, "--one-way", `--combined=${fresh}`, "--checkers=8", "--log-level=ERROR", ...excludeArgs(), ...dupeArgs(job)]);
+    const lines = (await readFile(fresh, "utf8").catch(() => "")).split(/\r?\n/).filter(Boolean);
+    const matched = new Set<string>(), bad: string[] = [];
+    for (const l of lines) { if (l[0] === "=") matched.add(l.slice(2).replace(/\\/g, "/")); else bad.push(`${l[0] === "+" ? "Not on Drive" : l[0] === "*" ? "Different on Drive" : "Could not check"}: ${l.slice(2)}`); }
+    fc.checks.fresh = bad.length ? `${bad.length} problem(s)` : `${matched.size} file(s) matched (size + MD5)`;
+    fc.problems.push(...bad.slice(0, 50));
+
+    // 2. Account for every file in the folder.
+    fc.checks.accounted = "running"; saveNow();
+    const here = await walkLocal(src);
+    const excluded = (rel: string) => /(^|\/)(desktop\.ini|thumbs\.db|\.ds_store)$/i.test(rel) || /\.(partial|!qb|crdownload|tmp)$/i.test(rel) || /^(\$RECYCLE\.BIN|System Volume Information)\//i.test(rel);
+    const onDrive = await listDrive(bin, job.remote, job.dest.split("/")[0] || job.dest).catch(() => new Map<string, string>());
+    const dupes: Array<{ rel: string; size: number; drivePath: string }> = [];
+    const safe: Array<{ rel: string; size: number }> = [];
+    let unaccounted = 0;
+    for (const f of here) {
+      const rel = f.rel.replace(/\\/g, "/");
+      if (matched.has(rel)) { safe.push({ rel, size: f.size }); continue; }
+      if (excluded(rel) || Date.now() - f.mtimeMs < SETTLE_MS || deps.isIncomplete?.(path.join(src, f.rel))) { fc.keptFiles++; fc.keptBytes += f.size; continue; }
+      const there = onDrive.get(`${f.name.toLowerCase()}|${f.size}`);
+      if (there) { dupes.push({ rel, size: f.size, drivePath: there }); continue; }
+      unaccounted++;
+      if (fc.problems.length < 80) fc.problems.push(`Not accounted for: ${rel}`);
+    }
+    // Duplicates count only when Drive's MD5 is the same as the file here.
+    if (dupes.length) {
+      const listA = path.join(reportsDir, `${job.id}.final-dupes-local.txt`), listB = path.join(reportsDir, `${job.id}.final-dupes-drive.txt`);
+      await writeFile(listA, dupes.map((d) => d.rel).join("\n") + "\n");
+      await writeFile(listB, dupes.map((d) => d.drivePath).join("\n") + "\n");
+      const [a, b] = await Promise.all([
+        runOut(bin, ["md5sum", src, `--files-from=${listA}`]),
+        runOut(bin, ["md5sum", `${job.remote}:`, `--files-from=${listB}`]),
+      ]);
+      const parse = (t: string) => new Map(t.split(/\r?\n/).filter(Boolean).map((l) => { const m = /^([0-9a-f]{32})\s+(.+)$/i.exec(l.trim()); return m ? [m[2].replace(/\\/g, "/"), m[1].toLowerCase()] as const : null; }).filter(Boolean) as Array<readonly [string, string]>);
+      const ha = parse(a.out), hb = parse(b.out);
+      for (const d of dupes) {
+        const x = ha.get(d.rel), y = hb.get(d.drivePath);
+        if (x && y && x === y) safe.push(d);
+        else { unaccounted++; if (fc.problems.length < 80) fc.problems.push(`Duplicate not identical on Drive: ${d.rel} (Drive: ${d.drivePath})`); }
+      }
+    }
+    fc.checks.accounted = unaccounted ? `${unaccounted} file(s) not accounted for` : `all ${here.length} file(s) accounted for (${dupes.length} as duplicates elsewhere on Drive, ${fc.keptFiles} kept)`;
+
+    // 3. Read back a sample from Drive, byte for byte.
+    fc.checks.readBack = "running"; saveNow();
+    const pool = safe.filter((x) => matched.has(x.rel));
+    const sample: typeof pool = [];
+    let sampleBytes = 0;
+    for (const x of pickSample(pool, 40)) { if (sample.length >= 8) break; if (sampleBytes + x.size > 20 * 1024 ** 3 && sample.length) continue; sample.push(x); sampleBytes += x.size; }
+    let readBackBad = 0;
+    if (sample.length) {
+      const sf = path.join(reportsDir, `${job.id}.final-sample.txt`), so = path.join(reportsDir, `${job.id}.final-sample-result.txt`);
+      await writeFile(sf, sample.map((x) => x.rel).join("\n") + "\n");
+      await runOut(bin, ["check", src, dst, "--one-way", "--download", `--files-from=${sf}`, `--combined=${so}`, "--log-level=ERROR"]);
+      const r = (await readFile(so, "utf8").catch(() => "")).split(/\r?\n/).filter(Boolean);
+      const ok = r.filter((l) => l[0] === "=").length;
+      readBackBad = sample.length - ok;
+      for (const l of r) if (l[0] !== "=" && fc.problems.length < 90) fc.problems.push(`Read-back differs: ${l.slice(2)}`);
+      fc.checks.readBack = readBackBad ? `${readBackBad} of ${sample.length} sample file(s) differ` : `${sample.length} file(s), ${gbs(sampleBytes)}, downloaded and identical`;
+    } else fc.checks.readBack = "nothing to sample";
+
+    fc.safeFiles = safe.length; fc.safeBytes = safe.reduce((n, x) => n + x.size, 0);
+    const passed = !bad.length && !unaccounted && !readBackBad && safe.length > 0;
+    await writeFile(path.join(reportsDir, `${job.id}.final.txt`), safe.map((x) => `= ${x.rel}`).join("\n") + "\n");
+    deps.log("INFO", `Upload ${job.id}: final check ${passed ? "passed" : "FAILED"}: ${fc.checks.fresh}; ${fc.checks.accounted}; ${fc.checks.readBack}`);
+    receipt(passed
+      ? { kind: "upload", title: `Triple-checked: ${job.label}`, detail: `${safe.length} file(s), ${gbs(fc.safeBytes)}, are safely on Google Drive and may be deleted from this PC${fc.keptFiles ? ` (${fc.keptFiles} kept: still being written or not meant for Drive)` : ""}.`, bytes: fc.safeBytes, data: { job: job.id } }
+      : { kind: "upload", status: "warn", title: `Final check found problems: ${job.label}`, detail: fc.problems.slice(0, 3).join("; "), data: { job: job.id } });
+    return finish(passed);
+  }
+
   async function deleteVerified(job: OffloadJob) {
-    const report = path.join(reportsDir, `${job.id}.txt`);
+    // The final check's list when it passed (it includes confirmed duplicates),
+    // otherwise the upload's own check.
+    const useFinal = !!job.final?.passed;
+    const report = path.join(reportsDir, useFinal ? `${job.id}.final.txt` : `${job.id}.txt`);
+    const checkedAt = useFinal ? job.final!.at : (job.verify?.at ?? 0);
     const lines = (await readFile(report, "utf8").catch(() => "")).split(/\r?\n/).filter((l) => l.startsWith("= "));
     job.status = "deleting";
     saveNow();
@@ -577,7 +704,7 @@ export function createDrives(deps: DrivesDeps) {
       if (!full.startsWith(root + path.sep)) { skipped++; continue; }
       const st = await stat(full).catch(() => null);
       // Changed after the check (or gone): leave it.
-      if (!st || st.mtimeMs > (job.verify?.at ?? 0)) { skipped++; continue; }
+      if (!st || st.mtimeMs > checkedAt) { skipped++; continue; }
       try { await unlink(full); files++; bytes += st.size; dirs.add(path.dirname(full)); } catch { skipped++; }
     }
     // Folders left empty, deepest first; the source folder itself stays.
@@ -600,8 +727,8 @@ export function createDrives(deps: DrivesDeps) {
   addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued", "paused"].includes(j.status)).map((j) => ({
     kind: "upload", title: j.label, status: j.status, jobId: j.id,
     actions: j.status === "paused" ? ["resume"] : j.status === "deleting" ? [] : ["pause"],
-    progress: j.status === "copying" && j.stats.totalBytes ? ((j.carriedBytes ?? 0) + j.stats.bytes) / ((j.carriedBytes ?? 0) + j.stats.totalBytes) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
-    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs((j.carriedBytes ?? 0) + j.stats.bytes)} of ${gbs((j.carriedBytes ?? 0) + j.stats.totalBytes)}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
+    progress: j.status === "copying" && j.stats.totalBytes ? doneOf(j) / totalOf(j) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(doneOf(j))} of ${gbs(totalOf(j))}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
       : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : j.status === "paused" ? "Paused. Press Continue to carry on where it stopped." : "Waiting for its turn",
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
   })));
@@ -633,18 +760,28 @@ export function createDrives(deps: DrivesDeps) {
     if (j.deleted) facts.push(["Freed on this PC", `${j.deleted.files} file(s), ${humanBytes(j.deleted.bytes)}${j.deleted.skipped ? `, ${j.deleted.skipped} left (changed or in use)` : ""}`]);
     facts.push(["Kept in step", j.keepSynced ? `yes, rechecked daily${j.nextSyncAt ? ` (next ${new Date(j.nextSyncAt).toLocaleDateString("en-ZA")})` : ""}` : "no"]);
     if (existsSync(path.join(reportsDir, `${j.id}.txt`))) facts.push(["Full report", `/api/admin/offload/${j.id}/report`]);
-    // Every file confirmed on Drive and the folder still here: offer to free it.
-    // Only files checked before (and unchanged since) are deleted; anything
-    // still downloading or skipped as a duplicate stays.
+    // The final check (three independent checks, runFinalCheck): its result,
+    // and the only way to "Delete the local folder" is through a pass.
+    const fc = j.final;
+    if (fc) {
+      facts.push(["Final check", fc.running ? "running now (fresh check, every file accounted for, read-back sample)" : `${fc.passed ? "PASSED" : "FAILED"} ${new Date(fc.at).toLocaleString("en-ZA")}`]);
+      if (!fc.running) {
+        facts.push(["1. Fresh check", fc.checks.fresh], ["2. Every file accounted for", fc.checks.accounted], ["3. Read back from Drive", fc.checks.readBack]);
+        if (fc.passed) facts.push(["Safe to delete here", `${fc.safeFiles} file(s), ${humanBytes(fc.safeBytes)}${fc.keptFiles ? ` (${fc.keptFiles} file(s), ${humanBytes(fc.keptBytes)}, stay: still being written or not for Drive)` : ""}`]);
+      }
+    }
     const actions: NonNullable<CompletedItem["actions"]> = [];
-    if (v && !bad && j.status === "verified" && !j.deleted && v.matched > 0 && here.get(j.id)) {
-      const stays = [j.stillChanging?.count ? `${j.stillChanging.count} still downloading` : "", j.dupes?.count ? `${j.dupes.count} already on Drive elsewhere` : ""].filter(Boolean).join(" and ");
+    const folderHere = here.get(j.id);
+    if (v && !bad && j.status === "verified" && !j.deleted && folderHere && fc?.passed && !fc.running && Date.now() - fc.at < 7 * 24 * 3600_000) {
       actions.push({
         label: "Delete the local folder", danger: true, post: `/api/admin/offload/${j.id}/delete-local`,
-        ask: `Delete ${v.matched} file(s) (${humanBytes(v.matchedBytes)}) in ${j.source} from this PC?\n\nEvery one is on Google Drive (${j.remote}:${j.dest}) and its checksum matched. Files changed since the check are kept${stays ? `, and so are ${stays}` : ""}.`,
+        ask: `Delete ${fc.safeFiles} file(s) (${humanBytes(fc.safeBytes)}) in ${j.source} from this PC?\n\nTriple-checked on ${new Date(fc.at).toLocaleString("en-ZA")}: every file matched on Google Drive (size and MD5), every file in the folder is accounted for, and a sample was downloaded back and compared byte for byte. Files changed since then are kept${fc.keptFiles ? `, and so are ${fc.keptFiles} still being written or not meant for Drive` : ""}.\n\nThey are removed from this PC for good (not to the Recycle Bin); Google Drive keeps the copies.`,
       });
     }
-    if (v && ["verified", "incomplete", "kept"].includes(j.status) && !running.has(j.id)) actions.push({ label: "Check against Drive again", post: `/api/admin/offload/${j.id}/verify` });
+    if (v && !bad && j.status === "verified" && !j.deleted && folderHere && !fc?.running && !(fc?.passed && Date.now() - fc.at < 7 * 24 * 3600_000)) {
+      actions.push({ label: fc ? "Run the final check again" : "Run the final check", post: `/api/admin/offload/${j.id}/final-check` });
+    }
+    if (v && ["incomplete", "kept"].includes(j.status) && !running.has(j.id)) actions.push({ label: "Check against Drive again", post: `/api/admin/offload/${j.id}/verify` });
     return {
       actions: actions.length ? actions : undefined,
       kind: "upload", id: j.id, title: j.label, result,
@@ -1001,8 +1138,13 @@ export function createDrives(deps: DrivesDeps) {
         if (["paused", "failed", "incomplete"].includes(job.status)) { job.status = "queued"; job.lastError = null; }
       } else if (act === "verify") {
         if (["verified", "incomplete", "kept"].includes(job.status) && !running.has(job.id)) void runVerify(job);
+      } else if (act === "final-check") {
+        if (!["verified", "kept"].includes(job.status)) return res.status(400).json({ error: "Only a finished upload can be checked." });
+        if (job.final?.running) return res.status(400).json({ error: "The final check is already running." });
+        void runFinalCheck(job).catch(() => {});
       } else if (act === "delete-local") {
         if (job.status !== "verified") return res.status(400).json({ error: "Only an upload whose every file was confirmed on Drive can delete local copies." });
+        if (!job.final?.passed || Date.now() - job.final.at > 7 * 24 * 3600_000) return res.status(400).json({ error: "Run the final check first (it must pass, and be less than a week old)." });
         if (req.body?.confirm !== job.id) return res.status(400).json({ error: "Confirmation missing." });
         void deleteVerified(job);
       } else if (act === "autofree-on" || act === "autofree-off") {

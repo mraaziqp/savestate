@@ -406,6 +406,37 @@ downloading or skipped as a duplicate stays) and **Check against Drive
 again**. Time left on uploads is worked out from the last
 five minutes of progress and withheld while rclone is still counting.
 
+## The final check before deleting from this PC (drives.ts runFinalCheck)
+
+Starts by itself when an upload's own check passes (and from Activity >
+Completed, "Run the final check"). Three independent checks, all must pass:
+
+1. **Fresh check**: `rclone check` again, now, size + MD5 for every file.
+2. **Every file accounted for**: each file in the folder is confirmed at the
+   destination, or is a duplicate elsewhere on Drive whose MD5 (`rclone
+   md5sum` here and on Drive) is the same; files still being written or
+   never meant for Drive (desktop.ini, *.partial...) are counted as kept.
+   One file that is none of these fails it.
+3. **Read-back**: a random sample (up to 8 files, 20 GB) downloaded from
+   Drive and compared byte for byte (`rclone check --download`).
+
+The result is on the Completed entry (each check's line, how many files and
+GB may go, how many stay) with a receipt. "Delete the local folder" is only
+offered, and the server only accepts it, after a pass less than a week old;
+it deletes the files on `<job>.final.txt` (confirmed duplicates included)
+that haven't changed since the check, and asks first.
+
+## Deleting films and episodes
+
+Delete (card trash icon, a film's details, "Delete series") asks first and
+removes the files from the host. The confirmation never appeared before: it
+was a portal inside AnimatePresence, which drops portals (build.mjs 3r). On
+touch screens the delete icons are fully visible. The server reports files
+it couldn't remove (it used to say ok), removes the film's prepared copy
+(`.nxweb`) and its video_prep row, and where the Drive folder is a
+read-only mount (the NAS) deletes through rclone (`RCLONE_CONFIG` set in its
+.env). Deleting on Drive puts the file in Drive's trash (30 days).
+
 ## Upload speed
 
 `desiredRate()` in `server/drives.ts`: gaming on the host 64k; 01:00-07:00

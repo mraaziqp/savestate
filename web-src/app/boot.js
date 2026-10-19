@@ -40,6 +40,9 @@ import "./savesync.js";
     + '.ejs_virtualGamepad_bottom{transform:scale(1.25);transform-origin:center bottom}'
     + '.ejs_virtualGamepad_button{font-weight:800!important}'
     + '}'
+    // Films' delete buttons were a faint icon that only lit up on hover:
+    // touch screens have no hover, so they were all but invisible there.
+    + '@media (hover:none){button[title="Delete"],button[title="Delete series"]{opacity:1!important;padding:8px!important}}'
     // Short landscape screens: a slimmer header, so the game gets the height.
     + '@media (pointer:coarse) and (max-height:500px),(max-height:500px) and (max-width:950px){'
     + '.fixed.z-\\[200\\]:has(#ejs-game-container)>:first-child:not(.flex-1){padding-top:2px!important;padding-bottom:2px!important;min-height:0!important}'

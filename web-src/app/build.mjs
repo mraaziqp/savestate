@@ -815,6 +815,16 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   hub = patch(hub, "video player preload skipped on phones", 'matchMedia("(max-width: 767px)").matches||navigator.connection?.saveData)&&setTimeout(()=>{import("./hls-',
     'typeof window<"u"&&setTimeout(()=>{import("./hls-',
     'typeof window<"u"&&!(matchMedia("(max-width: 767px)").matches||navigator.connection?.saveData)&&setTimeout(()=>{import("./hls-');
+  // 3r. Deleting films never worked: the "Delete ...?" confirmation is a
+  //     portal, and it sat inside AnimatePresence, which keeps only plain
+  //     elements, so the dialog was dropped and nothing was ever deleted.
+  //     It now renders outside it.
+  hub = patch(hub, "delete confirmation shows", '(ve&&(0,Sr.createPortal)((0,e.jsx)(De.div,',
+    '(0,e.jsx)(jt,{children:ve&&(0,Sr.createPortal)((0,e.jsx)(De.div,',
+    '(ve&&(0,Sr.createPortal)((0,e.jsx)(De.div,');
+  hub = patch(hub, "delete confirmation closes", '," Delete"]})]})]})}),document.body))',
+    '," Delete"]})]})]})}),document.body)})',
+    '," Delete"]})]})]})}),document.body))');
   // 3p. Every file type plays (server/videoprep.ts): a film with a prepared
   //     copy (webReady) plays it directly, on any host; any other file that
   //     isn't an MP4 or WebM goes through the server. Only eight extensions

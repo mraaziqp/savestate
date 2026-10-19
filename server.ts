@@ -23669,13 +23669,40 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     let deleted = 0;
     const errors: string[] = [];
+    // Removes one file: from disk, or, where the Drive folder is a read-only
+    // mount (the NAS), straight from Google Drive. Failures are reported; they
+    // were swallowed, so a delete that did nothing looked like it worked.
+    const removeOne = async (target: string): Promise<boolean> => {
+      try { await unlink(target); return true; }
+      catch (e: any) {
+        if (e?.code === "ENOENT") return true;
+        const rel = videoPrep.driveRel(target);
+        if (rel && ["EROFS", "EACCES", "EPERM"].includes(e?.code)) {
+          const remote = process.env.NEXUS_VIDEO_PREP_REMOTE?.trim() || "gdrive";
+          const folder = process.env.NEXUS_VIDEO_PREP_FOLDER?.trim() || "NexusArchive";
+          try { await drives.rc("operations/deletefile", { fs: `${remote}:`, remote: `${folder}/${rel}` }, 60_000); return true; }
+          catch (e2: any) { errors.push(`${path.basename(target)}: Google Drive refused (${e2?.message ?? e2})`); return false; }
+        }
+        errors.push(`${path.basename(target)}: ${e?.code === "EBUSY" ? "in use (being played or copied); try again in a moment" : e?.message ?? e}`);
+        return false;
+      }
+    };
     for (const rel of safeRels) {
       const target = resolveMediaTarget(rel);
       if (!isAllowedMediaPath(target)) { errors.push(`Blocked: ${rel}`); continue; }
-      try { await unlink(target); deleted++; } catch { /* file already gone or unreadable — not an error */ }
+      if (await removeOne(target)) deleted++;
+      // A film's prepared copy for other devices goes with it.
+      if (VIDEO_EXT.has(path.extname(target).toLowerCase())) {
+        const copy = await videoPrep.forget(target).catch(() => null);
+        if (copy) await removeOne(copy);
+      }
     }
-    await refreshMediaLibrary().catch(() => {});
-    log("INFO", `Media delete: ${deleted} file(s) removed`, "media");
+    // The film disappears from the list at once; the rescan follows on its own.
+    const gone = new Set(safeRels.map((r) => resolveMediaTarget(r)));
+    mem.media = mem.media.filter((m) => !gone.has(m.path) && !safeRels.includes(m.relPath));
+    void refreshMediaLibrary().catch(() => {});
+    log("INFO", `Media delete: ${deleted} file(s) removed${errors.length ? `, ${errors.length} failed` : ""}`, "media");
+    if (!deleted && errors.length) return res.status(500).json({ error: `Nothing was deleted: ${errors[0]}`, errors });
     return res.json({ ok: true, deleted, errors });
   });
 
