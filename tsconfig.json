@@ -32,7 +32,10 @@
     "android",
     "scripts",
     "release",
-    "**/*.cjs"
+    "**/*.cjs",
+    "src/components",
+    "src/db",
+    "src/app"
   ],
   "include": [
     "src/**/*.ts",

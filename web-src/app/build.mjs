@@ -147,6 +147,32 @@ const before = shell;
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
+// 3p. The game launcher is asked once, not four times. Every request went to
+//     127.0.0.1 and localhost on 17373 and 17374 at the same moment, so the one
+//     launcher got each POST twice (a JSON one it couldn't read was sent again
+//     as a form): Play could start two downloads of the same game. Now
+//     127.0.0.1:17373 first; 17374 only when that can't be reached.
+{
+  const from = /function Ys\(\)\{const t=\["http:\/\/127\.0\.0\.1:17373","http:\/\/localhost:17373","http:\/\/127\.0\.0\.1:17374","http:\/\/localhost:17374"\];[\s\S]*?async function uo\(t\)\{const a=Ys\(\)\.map\(async n=>\{if\(!\(await Ge\(`\$\{n\}\/health`,\{method:"GET",timeoutMs:t\}\)\)\.ok\)throw new Error\(`\$\{n\} unhealthy`\);return!0\}\);try\{return await Promise\.any\(a\)\}catch\{return!1\}\}/;
+  const to = 'function Ys(){const t=["http://127.0.0.1:17373","http://127.0.0.1:17374"];try{const a=(localStorage.getItem(lo)??"").trim();if(!a)return t;const n=a.split(/[\\s,;]+/).map(r=>r.trim().replace(/\\/+$/,"")).filter(r=>/^https?:\\/\\//i.test(r));return Array.from(new Set([...n,...t]))}catch{return t}}' +
+    'async function co(t,a,n){let last={ok:!1,status:0,data:null};for(const i of Ys()){const l=`${i}${t}`;let d;try{d=await Ge(l,{method:"POST",contentType:"application/json",body:JSON.stringify(a),timeoutMs:n})}catch{continue}const f=await d.json().catch(()=>null);if(d.ok&&(f?.success??f?.ok??!0))return{ok:!0,status:d.status,data:f};if(f&&(f.error||f.success===!1))return{ok:!1,status:d.status,data:f};' +
+    'const j=new URLSearchParams;for(const[k,w]of Object.entries(a))j.set(k,typeof w=="string"?w:JSON.stringify(w??""));let p;try{p=await Ge(l,{method:"POST",contentType:"application/x-www-form-urlencoded; charset=UTF-8",body:j.toString(),timeoutMs:n})}catch{continue}const b=await p.json().catch(()=>null);if(p.ok&&(b?.success??b?.ok??!0))return{ok:!0,status:p.status,data:b};if(b)return{ok:!1,status:p.status,data:b};last={ok:!1,status:p.status,data:null}}return last}' +
+    'async function fc(t,a){for(const r of Ys()){try{const o=await Ge(`${r}${t}`,{method:"GET",timeoutMs:a});if(!o.ok)continue;return{ok:!0,data:await o.json().catch(()=>null)}}catch{}}return{ok:!1,data:null}}' +
+    'async function uo(t){for(const n of Ys()){try{if((await Ge(`${n}/health`,{method:"GET",timeoutMs:t})).ok)return!0}catch{}}return!1}';
+  shell = patch(shell, "launcher asked once", 'const t=["http://127.0.0.1:17373","http://127.0.0.1:17374"];', from, to);
+}
+
+// 3q. A game card's small "Play" button let its click reach the card, whose
+//     own click plays too: one press launched the game twice (seen as two
+//     identical /launch requests, 2026-10-19).
+{
+  const file = path.join(assets, find("ConsoleHub-"));
+  const text = readFileSync(file, "utf8");
+  const out = patch(text, "card Play button plays once", 'l&&(0,e.jsxs)("button",{onClick:g=>{g.stopPropagation(),N()},',
+    'l&&(0,e.jsxs)("button",{onClick:N,', 'l&&(0,e.jsxs)("button",{onClick:g=>{g.stopPropagation(),N()},');
+  if (out !== text) writeFileSync(file, out);
+}
+
 // 3o. Phone cards ask for small covers (window.nxThumb in boot.js).
 shell = patch(shell, "game cards small covers on phones", "(window.nxThumb||(u=>u))((t.boxArt",
   'p=(0,s.useMemo)(()=>o?null:(t.boxArt??"").trim()||`/api/art/${t.id}`,[t.boxArt,t.id,o])',
@@ -922,6 +948,19 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   hub = patch(hub, "library replaces the series grid", "(0,e.jsx)(NxLibrary,{movies:Qe,series:ee,",
     'ee.length>0&&(0,e.jsxs)("div",{className:"space-y-3",children:[(0,e.jsxs)("h3",{className:"text-sm font-black uppercase tracking-wider flex items-center gap-2",children:[(0,e.jsx)("span",{className:"w-1 h-3.5 rounded-full",style:{background:"linear-gradient(180deg, #A855F7, #6366f1)",boxShadow:"0 0 10px rgba(168,85,247,0.7)"}}),(0,e.jsx)(Vt,{className:"w-4 h-4 text-purple-300"}),(0,e.jsx)("span",{className:"text-gradient-accent",children:"TV Series"})]}),(0,e.jsx)("div",{className:"grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3",children:ee.map(([s,l])=>(0,e.jsx)(en,{title:s,episodes:l,onSelect:()=>Pe({title:s,episodes:l}),onDeleteSeries:ze},s))})]})',
     '(Qe.length>0||ee.length>0)&&(0,e.jsx)(NxLibrary,{movies:Qe,series:ee,Movie:Gt,Series:en,titleOf:kt,yearOf:mr,onPlayMovie:B,onDeleteMovie:Ce,onOpenMovie:Z,onOpenSeries:(s,l)=>Pe({title:s,episodes:l}),onDeleteSeries:ze})');
+  if (hub !== before) writeFileSync(file, hub);
+}
+
+// 3f. Streaming quality: the film player assumed 1.5 Mbit/s at the start and
+//     only stepped up when it measured 1.67x a level's bitrate, so on a
+//     13 Mbit/s link films stayed at 720p from start to end. It now assumes
+//     5 Mbit/s (starts at 720p, quickly) and steps up at hls.js's own 1.43x.
+{
+  const file = path.join(assets, find("MediaHub-"));
+  let hub = readFileSync(file, "utf8");
+  const before = hub;
+  hub = patch(hub, "player starts from a realistic speed", "abrEwmaDefaultEstimate:5e6,", "abrEwmaDefaultEstimate:15e5,", "abrEwmaDefaultEstimate:5e6,");
+  hub = patch(hub, "player steps up sooner", "abrBandWidthFactor:.8,abrBandWidthUpFactor:.7,", "abrBandWidthFactor:.8,abrBandWidthUpFactor:.6,", "abrBandWidthFactor:.8,abrBandWidthUpFactor:.7,");
   if (hub !== before) writeFileSync(file, hub);
 }
 

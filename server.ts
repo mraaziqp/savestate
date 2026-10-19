@@ -6206,11 +6206,21 @@ async function startServer() {
   // stats and uploads all take 14-18 s together). Freezes over 2 s are
   // logged so the cause can be found from the time.
   {
+    // With the CPU time the server used meanwhile: high means our own code
+    // was busy; near zero means the process sat waiting (a synchronous read
+    // of a stalled disk or Drive, or Windows paging), which is what the long
+    // freezes of 2026-10-19 looked like while E: and F: were saturated.
     let last = Date.now();
+    let lastCpu = process.cpuUsage();
     setInterval(() => {
       const now = Date.now(), lag = now - last - 1000;
-      if (lag > 2000) log("WARN", `Server was blocked for ${(lag / 1000).toFixed(1)} s (everything waited)`, "system");
+      const cpu = process.cpuUsage(lastCpu);
+      if (lag > 2000) {
+        const busy = (cpu.user + cpu.system) / 1000;
+        log("WARN", `Server was blocked for ${(lag / 1000).toFixed(1)} s at ${new Date(last + 1000).toLocaleTimeString("en-GB")} (everything waited; it used ${(busy / 1000).toFixed(1)} s of CPU meanwhile: ${busy > lag * 0.5 ? "its own work" : "waiting on a disk or the system"})`, "system");
+      }
       last = now;
+      lastCpu = process.cpuUsage();
     }, 1000).unref?.();
   }
 
@@ -22724,10 +22734,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
       // The cache shares its disk with downloads: when that disk runs low it
       // gives its space back first (F: filled up with the cache at its cap).
+      // Never what someone is watching now: segments used in the last half
+      // hour stay (a cap of 0 once removed the next minutes of a playing
+      // episode). Below LOW free the cache shrinks, but not under 1 GB.
       let cap = HLS_CACHE_MAX_BYTES;
       const fsInfo = await statfs(HLS_CACHE_DIR).catch(() => null);
-      const LOW = 20 * 1024 ** 3;
-      if (fsInfo) { const free = fsInfo.bavail * fsInfo.bsize; if (free < LOW) cap = Math.max(0, Math.min(cap, total - (LOW - free))); }
+      const LOW = 8 * 1024 ** 3;
+      if (fsInfo) { const free = fsInfo.bavail * fsInfo.bsize; if (free < LOW) cap = Math.max(1024 ** 3, Math.min(cap, total - (LOW - free))); }
       if (total <= cap) return;
 
       files.sort((a, b) => a.mtime - b.mtime);
@@ -22735,6 +22748,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       let removed = 0;
       for (const f of files) {
         if (total - freed <= cap) break;
+        if (now - f.mtime < 30 * 60_000) continue;
         await unlink(f.path).catch(() => {});
         freed += f.size;
         removed++;
@@ -23155,11 +23169,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const videoBps = Math.round((parseFloat(lad.maxrate) || 4) * 1_000_000 * 1.2);
         const audioBps = 160_000;
         const peak = Math.round((videoBps + audioBps) * 1.1);
+        // The average is what hls.js weighs once it has a buffer. These are
+        // constant-quality encodes capped at maxrate; films average about 70%
+        // of the cap. Declaring 75% of the PEAK (~10% over the cap) kept
+        // players on a 13 Mbit/s link at 720p for whole films (2026-10-19).
+        const average = Math.round(((parseFloat(lad.maxrate) || 4) * 1_000_000 * 0.7 + audioBps) * 1.1);
         const h = Math.max(2, Math.round((srcH * t.w) / srcW / 2) * 2);
         const u = new URLSearchParams({ rel, quality: t.q, audio_track: String(audioTrack), variant: "1" });
         if (token) u.set("token", token);
         lines.push(
-          `#EXT-X-STREAM-INF:BANDWIDTH=${peak},AVERAGE-BANDWIDTH=${Math.round(peak * 0.75)},` +
+          `#EXT-X-STREAM-INF:BANDWIDTH=${peak},AVERAGE-BANDWIDTH=${average},` +
           `RESOLUTION=${Math.min(t.w, srcW)}x${h},CODECS="avc1.640028,mp4a.40.2"`,
         );
         lines.push(`/api/media/hls/playlist.m3u8?${u.toString()}`);

@@ -379,8 +379,13 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       return true;
     } catch (e: any) {
       const msg = String(e?.message ?? e);
-      if (current?.stopFor) {
+      // The connection to rclone dropping (a server restart ends its rclone
+      // with it) isn't the film's fault: "Power" episodes reached 3 failed
+      // attempts that way on 2026-10-19. It goes back in the queue uncounted.
+      const transient = /^fetch failed$|ECONNREFUSED|ECONNRESET|socket hang up/i.test(msg);
+      if (current?.stopFor || transient) {
         await save(rel, { status: "queued", progress: null });
+        if (transient) deps.log("INFO", `video prep: ${name}: lost the connection to rclone; it goes back in the queue`);
       } else {
         const attempts = (row.attempts ?? 0) + 1;
         await save(rel, { status: attempts >= 3 ? "failed" : "queued", attempts, error: msg.slice(0, 400), progress: null });

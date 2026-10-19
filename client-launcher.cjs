@@ -3088,8 +3088,27 @@ function runEngine(exe, args, key, token, label, waitMs = 90_000) {
   });
 }
 
+// A small log next to the launcher (it runs without a console): launches and
+// slow requests, newest last, kept under 256 KB.
+function launcherLog(line) {
+  const text = `${new Date().toISOString()} ${line}`;
+  console.log(text);
+  try {
+    const file = path.join(clientRoot, 'launcher.log');
+    try { if (fs.statSync(file).size > 256 * 1024) fs.renameSync(file, `${file}.old`); } catch { /* new */ }
+    fs.appendFileSync(file, `${text}\n`);
+  } catch { /* read-only folder */ }
+}
+
 async function handleLaunch(body, origin) {
   const { romUrl, platform, title, gameId, netplay, relativePath } = body;
+  // How long each step took, in one line when the launch answers (a PS3 game
+  // took 55 s to show while the emulator itself needed 6).
+  const tLaunch = Date.now();
+  const laps = [];
+  const lap = (what) => laps.push(`${what} ${((Date.now() - tLaunch) / 1000).toFixed(1)}s`);
+  try { return await launchSteps(); } finally { launcherLog(`[launch] ${title || gameId || '?'}: ${laps.join(', ')}, answered ${((Date.now() - tLaunch) / 1000).toFixed(1)}s`); }
+  async function launchSteps() {
   const cfg = loadConfig();
   const dir = platformRomDir(cfg, platform);
 
@@ -3207,6 +3226,7 @@ async function handleLaunch(body, origin) {
     : findRomAnywhere(cfg, gameId, title, platform);
 
   // A game kept as a folder (PS3) plays only when the whole folder is here.
+  lap('found');
   const folderRoot = ps3FolderRoot(mirroredFile) || ps3FolderRoot(romFile);
   if (folderRoot && !(ps3FolderRoot(romFile) && folderComplete(ps3FolderRoot(romFile)))) {
     const got = await ensureGameFolder(romUrl, folderRoot, title);
@@ -3262,11 +3282,14 @@ async function handleLaunch(body, origin) {
     // Legacy ".rom" repair BEFORE the archive check — a zip misnamed ".rom"
     // would otherwise skip extraction here and then be unloadable in RetroArch.
     romFile = ensureLoadableRom(romFile, platform);
+    lap('ready to check');
     const share = await downloadedShare(romFile).catch(() => null);
+    lap('download check');
     if (share != null) {
       return { status: 409, json: { success: false, code: 'still_downloading', error: `${path.basename(romFile)} is still downloading (${Math.floor(share * 100)}% so far). It plays once the download has finished.` } };
     }
     romFile = await extractRomIfArchived(romFile, platform);
+    lap('unpacked');
 
     // Inside SaveState (SaveState Engine), with the engine's own core and files.
     let engineError = null;
@@ -3340,7 +3363,9 @@ async function handleLaunch(body, origin) {
     if (body.engine && IS_WIN && !isRetroArch(emu) && !netplay) {
       const exe = await ensureEngine(hostUrl);
       if (exe) {
+        lap('capture starting');
         const run = await startCapture(exe, emu, args, { origin: origin && isTrustedOrigin(origin) ? origin : null, title });
+        lap(run.ok ? 'capture ready' : 'capture failed');
         if (run.ok) {
           return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: emu, usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
         }
@@ -3361,6 +3386,7 @@ async function handleLaunch(body, origin) {
     return { status: 200, json: { success: true, launched: true, pid, file: romFile, emulator: emu, usedCache, ...(engineError ? { engineError } : {}) } };
   } catch (e) {
     return { status: 500, json: { success: false, error: `Launch failed: ${e && e.message ? e.message : e}` } };
+  }
   }
 }
 

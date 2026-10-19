@@ -99,15 +99,78 @@ function markRequested(it) {
   store.set("nxw_requested", all);
 }
 
-export async function requestTitle(it, seasons) {
+export async function requestTitle(it, seasons, qualityProfileId) {
+  const q = qualityProfileId ? { qualityProfileId } : {};
   const r = it.type === "movie"
-    ? await api("/api/arr/add", { method: "POST", body: JSON.stringify({ type: "movie", id: it.id, title: it.title, year: it.year }) })
-    : await api("/api/arr/add-seasons", { method: "POST", body: JSON.stringify({ id: it.id, title: it.title, year: it.year, seasons: seasons ?? "all" }) });
+    ? await api("/api/arr/add", { method: "POST", body: JSON.stringify({ type: "movie", id: it.id, title: it.title, year: it.year, ...q }) })
+    : await api("/api/arr/add-seasons", { method: "POST", body: JSON.stringify({ id: it.id, title: it.title, year: it.year, seasons: seasons ?? "all", ...q }) });
   markRequested(it);
   return r;
 }
 
+// ── Quality (Radarr / Sonarr quality profiles) ─────────────────────────────
+// The quality to download in, as in Downloads > Search & Add: 1080p unless
+// the person picked another one last time (per films / series).
+const qualityRank = (name) => {
+  const n = String(name).toLowerCase();
+  return /\b(2160p|4k|ultra[\s-]?hd|uhd)\b/.test(n) ? 0 : /720p.*1080p?/.test(n) ? 4 : /\b(1080p?|hd[-\s]?1080)\b/.test(n) ? 6 : /\b720p?\b/.test(n) ? 3 : /\b(480p|sd)\b/.test(n) ? 2 : /\b(any|all|everything)\b/.test(n) ? 1 : 3;
+};
+function useQuality(kind) {
+  const type = kind === "movie" ? "movie" : "series";
+  const [profiles, setProfiles] = useState(null);
+  const [pick, setPick] = useState(null);
+  useEffect(() => {
+    api(`/api/arr/quality-profiles?type=${type}`).then((r) => {
+      const list = r.profiles ?? [];
+      setProfiles(list);
+      const kept = store.get(`nxw_quality_${type}`, null);
+      const best = list.find((p) => p.id === kept) ?? list.reduce((a, b) => (a && qualityRank(a.name) >= qualityRank(b.name) ? a : b), null);
+      setPick(best?.id ?? null);
+    }).catch(() => setProfiles([]));
+  }, [type]);
+  const choose = (id) => { setPick(id); store.set(`nxw_quality_${type}`, id); };
+  return { profiles, pick, choose };
+}
+function QualityChips({ q }) {
+  if (q.profiles == null) return <div className="nxw-muted">Looking up qualities…</div>;
+  if (!q.profiles.length) return null;
+  return (
+    <>
+      <div className="nxw-seasons-head">Quality</div>
+      <div className="nxw-chips" role="radiogroup" aria-label="Quality">
+        {q.profiles.map((p) => (
+          <button key={p.id} role="radio" aria-checked={q.pick === p.id} className={`nxw-chip ${q.pick === p.id ? "on" : ""}`} onClick={() => q.choose(p.id)}>
+            {p.name}{p.sizeHint ? <span className="nxw-dim"> · {p.sizeHint}</span> : null}
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+function MoviePicker({ item, onDone, onCancel }) {
+  const q = useQuality("movie");
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    setBusy(true);
+    try {
+      await requestTitle(item, undefined, q.pick);
+      toast(`${item.title} requested — it appears in Movies & TV when it's downloaded`);
+      onDone();
+    } catch (e) { toast(String(e.message ?? e), "err"); setBusy(false); }
+  };
+  return (
+    <div className="nxw-seasons">
+      <QualityChips q={q} />
+      <div className="nxw-actions">
+        <button className="nxw-btn primary" disabled={busy || q.profiles == null} onClick={send}><Icon name="down" /> {busy ? "Requesting…" : "Get it"}</button>
+        <button className="nxw-btn ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function SeasonPicker({ item, onDone, onCancel }) {
+  const q = useQuality("tv");
   const [seasons, setSeasons] = useState(null);
   const [pick, setPick] = useState(new Set());
   const [busy, setBusy] = useState(false);
@@ -118,13 +181,14 @@ function SeasonPicker({ item, onDone, onCancel }) {
   const send = async (which) => {
     setBusy(true);
     try {
-      await requestTitle(item, which);
+      await requestTitle(item, which, q.pick);
       toast(`${item.title} is on its way — it appears in Movies & TV when it's downloaded`);
       onDone();
     } catch (e) { toast(String(e.message ?? e), "err"); setBusy(false); }
   };
   return (
     <div className="nxw-seasons">
+      <QualityChips q={q} />
       <div className="nxw-seasons-head">Which seasons?</div>
       {seasons == null ? <div className="nxw-muted">Looking up seasons…</div> : (
         <div className="nxw-chips">
@@ -153,14 +217,13 @@ export function GetButton({ item, compact = false, buttonText = "Get it" }) {
   const arr = useArr();
   const [state, setState] = useState(isRequested(item) ? "done" : "idle");
   const [seasons, setSeasons] = useState(false);
+  const [quality, setQuality] = useState(false);
   if (!arr?.configured) return null;
   if (state === "done" && buttonText === "Get it") return <button className={`nxw-btn ${compact ? "sm" : ""} done`} disabled><Icon name="check" /> Requested</button>;
   const go = async (e) => {
     e?.stopPropagation();
     if (item.type === "tv") { setSeasons(true); return; }
-    setState("busy");
-    try { await requestTitle(item); setState("done"); toast(`${item.title} requested — it appears in Movies & TV when it's downloaded`); }
-    catch (err) { setState("idle"); toast(String(err.message ?? err), "err"); }
+    setQuality(true);
   };
   return (
     <>
@@ -171,6 +234,13 @@ export function GetButton({ item, compact = false, buttonText = "Get it" }) {
         <div className="nxw-pop" onClick={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) setSeasons(false); }}>
           <div className="nxw-pop-card">
             <SeasonPicker item={item} onDone={() => { setSeasons(false); setState("done"); }} onCancel={() => setSeasons(false)} />
+          </div>
+        </div>
+      )}
+      {quality && (
+        <div className="nxw-pop" onClick={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) setQuality(false); }}>
+          <div className="nxw-pop-card">
+            <MoviePicker item={item} onDone={() => { setQuality(false); setState("done"); }} onCancel={() => setQuality(false)} />
           </div>
         </div>
       )}
