@@ -85,12 +85,12 @@ SaveState is a web page, so the engine cannot draw into it directly. The
 engine streams to the page over a local WebSocket on `127.0.0.1`, and the
 page draws in its own player (the same full-screen player EmulatorJS uses):
 
-| Path | Used for | How |
+| Path | Used for | How (as built in Phase 3) |
 |---|---|---|
-| **Raw frames** | 2D cores (frames up to ~640x480) | Core framebuffer, converted to RGBA8 or kept RGB565, sent as binary frames; the page uploads them to a WebGL2 texture. ~70 MB/s at worst on loopback; no compression, no quality loss, < 1 frame of delay. |
-| **Encoded video** | 3D / upscaled cores (PS2, GameCube, N64...) and captured windows | GPU frame read back (PBO) or captured, encoded with the hardware H.264/HEVC encoder through Media Foundation (NVENC here), low-latency, no B-frames; the page decodes with **WebCodecs** `VideoDecoder` straight to WebGL. ~1-2 frames of delay. |
-| **Audio** | everything | 16-bit stereo PCM at 48 kHz over the same socket into an `AudioWorklet` ring buffer. |
-| **Input** | everything | Controllers read natively by the engine (XInput + SDL database through `gilrs`), so input never waits on the browser; keyboard and touch from the page as a fallback. |
+| **Raw frames** | every core on this PC, 2D and GPU | Software cores: the core's own format (RGB565 kept 16-bit, XRGB8888; 0RGB1555 repacked to RGB565). GPU cores: the framebuffer read back asynchronously (pixel-pack buffer + fence, collected while the engine waits for the next frame's time), RGBA8, flagged bottom-up for the page to flip. Sent as binary WebSocket messages; the page uploads them to a WebGL2 texture once per display refresh. Measured: GameCube at 640x528 RGBA, 60 pictures/s, about 80 MB/s on loopback, under a frame of delay. |
+| **Encoded video** | moved to Phase 6 (other devices) | On the same PC the raw path already holds 60 fps for GPU cores, so the hardware encoder (Media Foundation/NVENC + WebCodecs) is built with WebRTC in Phase 6, where it is needed: to send the picture to phones, the Vita browser and other PCs. |
+| **Audio** | everything | Resampled in the engine (windowed sinc) to 48 kHz stereo 16-bit, sent over the same socket into an `AudioWorklet` ring buffer that reports its fill for rate control. |
+| **Input** | everything | Phase 3: the page reads the keyboard and up to four controllers (Gamepad API, standard mapping) and sends them only when they change. Phase 4 adds native controller reading in the engine (XInput + SDL database through `gilrs`). |
 
 The page applies the **shader presets** in WebGL (raw integer scale, CRT
 aperture grille, handheld LCD grid, smooth upscale), so they look the same
@@ -125,41 +125,38 @@ drivers. SaveState is the frontend.
 
 ### 2.5 Efficiency and power upgrades (added on approval, 2026-10-19)
 
-Efficiency:
-1. **No wasted frames:** duplicate frames (`GET_CAN_DUPE`, NULL frame) are
-   never sent; RGB565 cores stay 16-bit on the wire and are expanded by the
-   page's shader (half the bandwidth of RGBA).
-2. **One copy less:** `GET_CURRENT_SOFTWARE_FRAMEBUFFER` hands software cores
-   the engine's own frame buffer, so they draw straight into what is sent.
-3. **Zero-copy GPU path:** HW-rendered cores render into an OpenGL texture
-   shared with Direct3D 11 (`WGL_NV_DX_interop2`), which the hardware
-   encoder reads directly: no CPU readback for PS2/GameCube/N64.
-4. **Encoder tuned for play, not files:** low-latency NVENC through Media
-   Foundation, no B-frames, gradual intra refresh (no keyframe spikes),
-   one-frame VBV.
-5. **Pre-warmed worker:** while a game runs, the launcher keeps one idle
-   engine process started, so the next game skips process start-up.
-6. **Precise pacing:** high-resolution waitable timers (no 15.6 ms Windows
-   timer slop), the core paced to its own fps, audio rate control absorbing
-   the difference.
-7. **Small, fast rewind:** XOR against the previous state + zstd, within a
-   fixed RAM budget (default 256 MB).
+Efficiency (status after Phase 3):
+1. **No wasted frames** (done): duplicate frames are never sent; RGB565
+   cores stay 16-bit on the wire; pictures are never sent faster than the
+   page's display refreshes (it reports its rate), and a page that falls
+   behind gets the newest picture, never a queue of old ones.
+2. **One copy less** (done): `GET_CURRENT_SOFTWARE_FRAMEBUFFER` hands
+   software cores the engine's own frame buffer; GPU pictures swap buffers
+   instead of copying.
+3. **GPU readback without stalls** (done, replacing the zero-copy D3D11
+   interop for now): pixel-pack buffer + fence, collected in the engine's
+   idle time before the next frame. The D3D11 interop belongs with the
+   hardware encoder in Phase 6.
+4. **Encoder tuned for play** (Phase 6, with WebRTC; see 2.2).
+5. **Pre-warmed worker** (Phase 5): engine start-up measured at 0.2-1.4 s
+   including the game, so this is a smaller win than expected.
+6. **Precise pacing** (done): high-resolution waitable timer plus a short
+   spin; dynamic rate control (±0.5 %); audio sync (the emulation follows
+   the sound card when the page's buffer runs far over target); pacing by
+   the frame rate the core's sound implies when it disagrees with the
+   declared one (Dolphin declares 119.88 fps and runs at 60).
+7. **Small, fast rewind** (Phase 4).
 
 Power:
-1. **Second-instance run-ahead:** a second copy of the core (the DLL copied to
-   a temporary name, since cores keep global state) runs ahead, so run-ahead
-   costs no audio glitches and works with cores whose serialize is slow.
-2. **Disc streaming** (VFS v3 over the host's range requests with a block
-   cache on disk): big discs start in seconds; the cache makes the second
-   play local.
-3. **Per-game profiles on the host:** shader, core options and button layout
-   follow the person between PCs.
-4. **Live stats for the overlay:** fps, frame time, audio drift, encoder
-   delay, so problems are visible rather than guessed.
-5. **Watch and later play together:** the same session stream can go to a
-   second viewer (Phase 6 WebRTC), the foundation for netplay.
-6. **Core options with curated defaults** per core (e.g. internal
-   resolution for 3D cores scaled to the GPU), so no game needs tuning.
+1. **Second-instance run-ahead** (Phase 4).
+2. **Disc streaming** (done in Phase 2): VFS v3 over range requests with a
+   block cache on disk.
+3. **Per-game profiles on the host** (Phase 5); the page already remembers
+   the look per console and the save slot.
+4. **Live stats** (done): fps, time per frame, sound buffer, skipped
+   pictures, in the player's Stats overlay.
+5. **Watch and later play together** (Phase 6).
+6. **Curated core options** (done in Phase 2).
 
 ## 3. Layout
 
@@ -181,39 +178,54 @@ engine/                         Rust workspace (GNU toolchain, see 1)
     src/vfs.rs                  VFS v3: local files + HTTP range streaming with block cache
     src/bios.rs                 BIOS check (MD5) and fetch from the host
     src/session.rs              one game: content (local, download, stream, zip), load, run, states, SRAM
-    src/main.rs                 `info` and `selftest` (Phase 2); WebSocket session in Phase 3
-  Phase 3+ adds:
-    src/hw_render.rs            SET_HW_RENDER: hidden window, OpenGL core context, FBO, PBO readback
-    src/audio.rs                SPSC ring, dynamic rate control, resampler
+    src/hw.rs                   SET_HW_RENDER: hidden window, WGL context (GL core/compat, GLES), FBO, async readback
+    src/audio.rs                windowed-sinc resampler to 48 kHz, dynamic rate control
+    src/timing.rs               high-resolution frame pacing
+    src/ws.rs                   minimal WebSocket server (handshake, frames)
+    src/serve.rs                `serve`: one game streamed to the page (threads, outbox, commands)
+    src/main.rs                 `info`, `selftest`, `serve`
+  Phase 4+ adds:
     src/input.rs                gilrs/XInput polling, per-console mapping, hotkey chords
-    src/state.rs                save-state slots, rewind ring, run-ahead
-    src/stream.rs               raw-frame + encoded-video + audio + input protocol
-    src/encode.rs               Media Foundation hardware H.264/HEVC encoder
+    src/state.rs                rewind ring, run-ahead
+    src/encode.rs               Media Foundation hardware encoder (Phase 6, with WebRTC)
 web-src/app/
-  EnginePlayer.jsx              the in-SaveState player for engine sessions (WebGL, WebCodecs, AudioWorklet, shaders, pause overlay)
-  engine-shaders.js             the four curated presets (GLSL ES 3.0)
-client-launcher.cjs             /engine/* routes: start, stop, status; RetroArch spawning removed in Phase 5
+  EnginePlayer.jsx              the in-SaveState player (WebGL2 with the four looks, AudioWorklet, keyboard/gamepads, menu)
+  PlayOverlay.jsx               opens EnginePlayer when the launcher answers with an engine session
+  build.mjs                     patches: Play asks for the engine; the app's controller navigation pauses during a game
+client-launcher.cjs             v11: fetches/updates the engine from the host (SHA-256), runs RetroArch-system
+                                games in it on request, falls back to RetroArch; RetroArch spawning removed in Phase 5
+server.ts                       /api/client-launcher/engine(/info): serves releases/engine (scripts/publish-engine.mjs)
 ```
 
-## 4. Engine <-> page protocol (WebSocket `ws://127.0.0.1:<port>/session/<id>?key=<one-time key>`)
+## 4. Engine <-> page protocol (as built)
 
-The launcher starts the engine on a random free port with a one-time key
-and returns both to the page (the key stops other local pages from attaching).
+The launcher starts `savestate-engine serve` with the game, the core, a
+one-time key (24 random bytes) and the page's origin. The engine prints
+`{"listening":port}` then `{"ready":{...}}` (or `{"error":"..."}`) on stdout;
+the launcher hands `{port, key, ready}` to the page, which opens
+`ws://127.0.0.1:<port>/session?key=<key>`. The engine refuses any other key
+or origin, listens on loopback only, and accepts one page at a time (a new
+one replaces the old).
 
-Engine -> page (binary messages, 1-byte type + header + payload):
-- `V` raw frame: width, height, pitch, format (RGBA8 / RGB565), frame number, pixels
-- `E` encoded frame: codec (avc1/hev1), key flag, timestamp, NAL data (+ `C` config record once)
-- `A` audio: frame count, interleaved s16 stereo at 48 kHz
-Engine -> page (JSON text):
-- `ready` {system, core, fps, sampleRate, aspect, geometry}, `geometry` changes,
-  `status` {fps, frameTime, audioFill, rewindSeconds}, `saved` {slot, thumb},
-  `error` {message}, `exit` {code}
+Engine -> page, binary:
+- `V` fmt flags 0 | width u32 | height u32 | frame u64 | 0 u32 | pixels
+  (fmt 0 = RGB565, 1 = XRGB8888 as B,G,R,X bytes, 2 = RGBA8; flags bit 0 =
+  rows bottom-up). The 24-byte header keeps the pixels aligned for typed arrays.
+- `A` 0 0 0 | frames u32 | interleaved stereo i16 at 48 kHz
 
-Page -> engine (JSON text):
-- `input` {port, buttons, axes} (keyboard/touch fallback), `pause`, `resume`,
-  `reset`, `save` {slot}, `load` {slot}, `rewind` {on}, `ff` {on},
-  `runahead` {frames 0-2}, `shader` (page-only), `audioFill` {ms} (rate control),
-  `disk` {index}, `option` {key, value}, `quit`
+Engine -> page, JSON text: `ready` {info: game, core, version, gpu, fps,
+sampleRate, width, height, aspect, rotation}, `geometry`, `status` {fps,
+frameMs, audioFillMs, dropped, late, canSave} each second, `saved`/`loaded`
+{slot}, `error` {message}, `exit`.
+
+Page -> engine, JSON text: `{"t":"in","p":port,"b":buttons,"a":[lx,ly,rx,ry],"g":[l2,r2]}`
+(only on change), `pause`, `resume`, `reset`, `save`/`load` {slot}, `ff`
+{on}, `audio` {fill, target} (10 a second), `display` {hz}, `option` {key,
+value}, `quit`.
+
+The game pauses while no page is connected; the engine exits (after saving
+the battery save) when the page quits or after 2 minutes without a page,
+and writes the battery save every 30 s when it changed.
 
 ## 5. Subsystems (the brief's seven, mapped)
 
@@ -261,7 +273,7 @@ Page -> engine (JSON text):
 |---|---|---|
 | 1 | This spec | Owner approval |
 | 2 | `libretro-sys`, loader, switchboard, options, VFS, BIOS/dirs, headless runner | Loads real cores from `C:\RetroArch-Win64\cores` with real games; 120 frames; frame 120 saved as PNG; serialize -> run -> unserialize gives identical game memory and frames (results in 9) |
-| 3 | WebSocket stream, raw + encoded video, HW render context, DRC audio, `EnginePlayer.jsx` with shaders | A game plays inside SaveState in the browser at a steady 60 fps with no audio crackle; HW core (mupen64plus_next / dolphin) shows its picture |
+| 3 | WebSocket stream, raw video (encoded video moved to 6), HW render context, DRC audio, `EnginePlayer.jsx` with shaders | A game plays inside SaveState in the browser at a steady 60 fps with no audio crackle; HW core (dolphin) shows its picture (results in 10) |
 | 4 | Native controllers, mappings, chords, rewind, fast-forward, run-ahead | Controller works with no setup; rewind 60 s; run-ahead measured |
 | 5 | Saves/states/thumbnails to the host with versions, pause overlay, launcher switched to the engine, RetroArch spawning removed | Play from Games opens inside SaveState; RetroArch not installed or needed |
 | 6 (after) | Capture bridge for RPCS3/Switch/Wii U/Xbox; WebRTC for other devices | PS3 game plays inside SaveState |
@@ -279,12 +291,17 @@ Page -> engine (JSON text):
   cores to other people's PCs (the launcher already copies them from this
   host) should come with their licence files and source links.
 
+- Cores that only offer Vulkan or Direct3D get no context (the engine
+  provides OpenGL); they are refused with that reason, and remembered.
+- A PC with browser hardware acceleration turned off draws the page's WebGL
+  on the CPU; GPU-heavy cores then slow down (measured in 10).
+
 ## 8. Checklist
 
 - [x] Phase 1: reconnaissance, decisions, layout, protocol, plan
 - [x] Prerequisite: a working Rust toolchain (GNU toolchain instead of the Build Tools, see 1)
-- [x] Phase 2: core host and headless runner; results in 9 (awaiting approval)
-- [ ] Phase 3
+- [x] Phase 2: core host and headless runner; results in 9 (approved 2026-10-19)
+- [x] Phase 3: games play inside the SaveState page; results in 10 (awaiting approval)
 - [ ] Phase 4
 - [ ] Phase 5
 - [ ] Phase 6
@@ -354,3 +371,67 @@ Fixed while testing (each would have broken real games):
 
 Run it: `engine\build.cmd --release`, then
 `engine\target\release\savestate-engine.exe selftest --core <core.dll> --game <file or URL> [--frames 120] [--png out.png] [--host <url> --token <jwt>]`.
+
+## 10. Phase 3 results (2026-10-19)
+
+Phase 2 refinements first: OpenGL contexts for GPU cores (hw.rs), so
+Dolphin, PCSX2, PPSSPP, Flycast, Citra and Mupen64Plus-Next are no longer
+refused; 0RGB1555 repacked to RGB565 on arrival; sound buffers reused (no
+allocation per frame); the selftest takes `--system` and collects GPU
+frames. Selftest regression: all earlier tests still pass, and Dolphin
+(Crazy Taxi) now passes too: OpenGL 3.3 core on the RTX 3060 Ti, frame
+600 correct (the Acclaim intro), game RAM (24 MB) and pictures identical
+after replay. Release builds no longer carry debug info: 1.7 MB.
+Unit tests: 12 passed (adds resampler rates and level, rate control,
+pacing accuracy, WebSocket handshake, 1555 repacking and GPU flip).
+
+Streaming (`serve`), measured with a client that plays the page's part
+(drains sound at exactly 48 kHz, reports its fill, 60 Hz display):
+
+| Core | Game | Pictures/s | Gap p50 / p99 | Sound | Underruns |
+|---|---|---|---|---|---|
+| mGBA | Fire Red | 59.8 | 16.7 / 17.5 ms | 48,071 Hz, buffer exactly on its 64 ms target | 0 |
+| FinalBurn Neo | Metal Slug 2 | 59.2 | 16.9 / 17.9 ms | 48,139 Hz | 0 |
+| Dolphin (GPU) | Crazy Taxi | ~60 while running | 16.7 / 25-28 ms (shader-compile hitches) | 46-48 kHz | only while its 92 MB state saves/loads |
+
+In the browser (Chrome on savestate.co.za, Games > Play on this PC, launcher v11):
+- Fire Red: the in-page player opened, 59.3 pictures/s, 47,954 Hz sound,
+  keys reached the game (Start/A moved through the intro to the controls
+  tutorial), the menu saved to a slot, Close ended the engine and the page
+  showed "closed".
+- Crazy Taxi (GameCube, GPU core): 55-58 pictures/s, 48.2-48.3 kHz sound,
+  WebGL on ANGLE/D3D11 on the RTX 3060 Ti, save to slot 4 (92 MB state)
+  confirmed, Close ended the engine.
+- With Chrome forced onto its CPU renderer (SwiftShader) the GameCube run
+  fell to 7-22 pictures/s: SwiftShader and Dolphin compete for the CPU.
+  Real browsers draw WebGL on the GPU; noted as a limit for PCs where
+  hardware acceleration is turned off.
+- The launcher fetched engine 0.3.0 from the host on first use, checked its
+  SHA-256, and started Fire Red in 1.4 s.
+
+Fixed while testing:
+- `ready` held the host lock while asking the core a question, and mGBA logs
+  from inside that call: a deadlock. Locks are never held across core calls.
+- Dolphin crashes if asked its save-state size before its first frame: the
+  engine asks after a second of play.
+- Dolphin declares 119.88 fps but runs at 60: the engine paces by the rate
+  its sound implies (two agreeing one-second windows after a 3-second
+  settle), plus audio sync and a flood guard for the boot.
+- After quitting, Dolphin's leftover threads blocked the process exit
+  (thread detach under the loader lock): once the game is closed and saved
+  the engine keeps the core mapped and ends its process directly.
+- The Games library under the player saw Enter and started the focused game
+  again: the player now takes keys first (capture phase) and the app's
+  controller navigation stands down while a game is open.
+- A last animation frame could run after the player closed: fixed.
+- If the engine can't close within 5 s, the page has the launcher stop it.
+
+How it reaches people: the page asks for the engine on every Play of a
+RetroArch-system game (unless "Open games in RetroArch instead" was
+chosen). Launchers before v11 ignore the request and open RetroArch as
+before; v11 fetches the engine from this host and falls back to RetroArch
+when the engine can't run a game. Standalone emulators (PCSX2, RPCS3,
+Ryujinx...) are unchanged until Phase 6's capture bridge.
+
+Publishing a new engine: `engine\build.cmd --release`, then
+`node scripts/publish-engine.mjs`; launchers pick it up within 10 minutes.

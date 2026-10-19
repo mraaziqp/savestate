@@ -2,6 +2,10 @@
 //!
 //!   savestate-engine info --core <core.dll>
 //!   savestate-engine selftest --core <core.dll> --game <file or URL> [options]
+//!   savestate-engine serve --core <core.dll> --game <file or URL> --key <key> [options]
+//!
+//! serve (Phase 3): plays the game inside the SaveState page over a local
+//! WebSocket (serve.rs); the launcher starts it and reads its stdout.
 //!
 //! selftest (Phase 2's proof): loads the core and the game, runs N frames
 //! (default 120), writes frame N as a PNG, then checks save states: it saves
@@ -20,7 +24,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  savestate-engine info --core <core.dll>\n  savestate-engine selftest --core <core.dll> --game <file|url> [--frames 120] [--png out.png]\n      [--data <dir>] [--host <url>] [--token <jwt>] [--name <file name for a URL>] [--option key=value]... [--no-stream] [--verbose]"
+        "usage:\n  savestate-engine info --core <core.dll>\n  savestate-engine serve --core <core.dll> --game <file|url> --key <key> [--port 0] [--origin <page origin>]... [--data <dir>] [--system <dir>] [--saves <dir>] [--states <dir>] [--host <url>] [--token <jwt>] [--name <file name>] [--option key=value]... [--idle <seconds>]\n  savestate-engine selftest --core <core.dll> --game <file|url> [--frames 120] [--png out.png]\n      [--data <dir>] [--system <dir>] [--host <url>] [--token <jwt>] [--name <file name for a URL>] [--option key=value]... [--no-stream] [--verbose]"
     );
     std::process::exit(2)
 }
@@ -99,23 +103,77 @@ fn main() {
             );
         }
         "selftest" => std::process::exit(selftest(&args)),
+        "serve" => std::process::exit(serve(&args)),
         _ => usage(),
     }
 }
 
+/// The game to load, from --game (a path or a URL) and --name.
+fn content_of(args: &Args) -> Content {
+    let game = args.get("game").unwrap_or_else(|| usage()).to_string();
+    if game.starts_with("http://") || game.starts_with("https://") {
+        let name = args.get("name").map(str::to_string).unwrap_or_else(|| game.rsplit('/').next().unwrap_or("game").split('?').next().unwrap_or("game").to_string());
+        Content::Url { url: game, file_name: name }
+    } else {
+        Content::Path(PathBuf::from(&game))
+    }
+}
+
+fn options_of(args: &Args) -> HashMap<String, String> {
+    args.all("option").iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+fn serve(args: &Args) -> i32 {
+    let data = data_dir(args);
+    let _ = std::fs::create_dir_all(&data);
+    // A game can run for hours: keep one previous log, not an endless one.
+    let log_path = data.join("engine.log");
+    if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > 4 << 20) {
+        let _ = std::fs::rename(&log_path, data.join("engine.prev.log"));
+    }
+    let _ = log::set_file(&log_path);
+    let content = content_of(args);
+    let game_name = match &content {
+        Content::Path(p) => p.file_stem().map(|s| s.to_string_lossy().into_owned()),
+        Content::Url { file_name, .. } => std::path::Path::new(file_name).file_stem().map(|s| s.to_string_lossy().into_owned()),
+        Content::None => None,
+    }
+    .unwrap_or_else(|| "game".into());
+    let host = args.get("host").map(|h| Host { base_url: h.to_string(), token: args.get("token").map(str::to_string) });
+    let session = SessionConfig {
+        core: PathBuf::from(args.get("core").unwrap_or_else(|| usage())),
+        content,
+        system_dir: args.get("system").map(PathBuf::from).unwrap_or_else(|| data.join("system")),
+        save_dir: args.get("saves").map(PathBuf::from).unwrap_or_else(|| data.join("saves")),
+        assets_dir: data.join("assets"),
+        cache_dir: data.join("cache"),
+        host,
+        options: options_of(args),
+        username: "SaveState".into(),
+        stream_content: !args.has("no-stream"),
+    };
+    let key = args.get("key").filter(|k| k.len() >= 16).unwrap_or_else(|| {
+        eprintln!("serve needs --key (16+ characters)");
+        std::process::exit(2)
+    });
+    savestate_engine::serve::run(savestate_engine::serve::ServeConfig {
+        session,
+        key: key.to_string(),
+        port: args.get("port").and_then(|p| p.parse().ok()).unwrap_or(0),
+        origins: args.all("origin").into_iter().filter(|o| !o.is_empty()).collect(),
+        states_dir: args.get("states").map(PathBuf::from).unwrap_or_else(|| data.join("states")),
+        game_name,
+        idle_exit: std::time::Duration::from_secs(args.get("idle").and_then(|s| s.parse().ok()).unwrap_or(120)),
+    })
+}
+
 fn selftest(args: &Args) -> i32 {
     let core = PathBuf::from(args.get("core").unwrap_or_else(|| usage()));
-    let game = args.get("game").unwrap_or_else(|| usage()).to_string();
     let frames: u64 = args.get("frames").and_then(|f| f.parse().ok()).unwrap_or(120);
     let data = data_dir(args);
     let _ = std::fs::create_dir_all(&data);
     let _ = log::set_file(&data.join("engine.log"));
-    let content = if game.starts_with("http://") || game.starts_with("https://") {
-        let name = args.get("name").map(str::to_string).unwrap_or_else(|| game.rsplit('/').next().unwrap_or("game").split('?').next().unwrap_or("game").to_string());
-        Content::Url { url: game.clone(), file_name: name }
-    } else {
-        Content::Path(PathBuf::from(&game))
-    };
+    let content = content_of(args);
     let host = args.get("host").map(|h| Host { base_url: h.to_string(), token: args.get("token").map(str::to_string) });
     let mut options = HashMap::new();
     for kv in args.all("option") {
@@ -126,7 +184,7 @@ fn selftest(args: &Args) -> i32 {
     let cfg = SessionConfig {
         core: core.clone(),
         content,
-        system_dir: data.join("system"),
+        system_dir: args.get("system").map(PathBuf::from).unwrap_or_else(|| data.join("system")),
         save_dir: data.join("saves"),
         assets_dir: data.join("assets"),
         cache_dir: data.join("cache"),
@@ -154,6 +212,7 @@ fn selftest(args: &Args) -> i32 {
     let mut sound_hash: u64 = 0xcbf29ce484222325;
     for _ in 0..frames {
         session.run_frame(false);
+        session.finish_frame(2_000_000);
         let audio = session.take_audio();
         samples += audio.len() / 2;
         for v in audio {
@@ -164,10 +223,10 @@ fn selftest(args: &Args) -> i32 {
     let run_ms = t_run.elapsed().as_secs_f64() * 1000.0;
     let (w, h, rgba, frame_hash, hardware, format) = {
         let hs = host::lock();
-        (hs.frame.width, hs.frame.height, hs.frame.to_rgba(), hs.frame.hash(), hs.frame.hardware, format!("{:?}", hs.frame.format))
+        (hs.frame.width, hs.frame.height, hs.frame.to_rgba(), hs.frame.hash(), hs.frame.hardware, format!("{:?}", hs.frame.data_format))
     };
     let png_path = args.get("png").map(PathBuf::from).unwrap_or_else(|| data.join("selftest-frame.png"));
-    let png_ok = w > 0 && h > 0 && !hardware && write_png(&png_path, w, h, &rgba).is_ok();
+    let png_ok = w > 0 && h > 0 && write_png(&png_path, w, h, &rgba).is_ok();
     let lit = rgba.chunks_exact(4).filter(|p| p[0] > 8 || p[1] > 8 || p[2] > 8).count();
 
     // 2. Save state integrity. S0 = the state at frame N. Run 60 frames (a),
@@ -190,6 +249,7 @@ fn selftest(args: &Args) -> i32 {
                 let mut out = Vec::with_capacity(60);
                 for _ in 0..60 {
                     s.run_frame(false);
+                    s.finish_frame(2_000_000);
                     let picture = host::lock().frame.hash();
                     let mut sound: u64 = 0xcbf29ce484222325;
                     for v in s.take_audio() {
@@ -289,6 +349,7 @@ fn selftest(args: &Args) -> i32 {
         "sramBytes": sram,
         "options": options_count,
         "hwRequested": hw,
+        "gpu": if hardware { savestate_engine::hw::description() } else { None },
         "vfsVersion": vfs_version,
         "bios": { "present": session.bios.present.len(), "fetched": session.bios.fetched.len(), "missing": session.bios.missing.iter().map(|(n, r)| serde_json::json!({ "files": n, "required": r })).collect::<Vec<_>>() },
         "messages": messages,

@@ -136,6 +136,18 @@ impl Core {
     }
 }
 
+impl Core {
+    /// Leaves the DLL mapped when the core is dropped. Some cores (Dolphin)
+    /// leave threads behind after retro_deinit; unmapping their code under
+    /// them crashes or hangs. For an engine process that exits right after,
+    /// keeping it is both safe and free.
+    pub fn keep_loaded(&mut self) {
+        if let Some(lib) = self.library.take() {
+            std::mem::forget(lib);
+        }
+    }
+}
+
 impl Drop for Core {
     fn drop(&mut self) {
         drop(self.library.take());

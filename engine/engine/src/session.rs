@@ -60,6 +60,8 @@ pub struct Session {
     pub frames: u64,
     last_frame_at: Option<Instant>,
     deinit_done: bool,
+    /// The GPU picture's buffer, swapped with the frame's (no copy per frame).
+    gpu_pixels: Vec<u8>,
 }
 
 fn dir_cstring(p: &Path) -> CString {
@@ -70,16 +72,14 @@ fn dir_cstring(p: &Path) -> CString {
 /// serves one file, so these are downloaded instead.
 const MULTI_FILE: &[&str] = &["cue", "gdi", "ccd", "m3u", "toc"];
 
-/// Cores that draw only with the graphics card (no software renderer).
-const GPU_ONLY: &[&str] = &["dolphin-emu", "LRPS2", "PCSX2", "PPSSPP", "Citra", "Flycast"];
-
 // What the engine has learned about each core build, in cache/core-caps.json:
 //   "vfs": the VFS version it asked for. Some cores ask only inside
 //          retro_load_game, after the engine must choose between streaming
 //          and downloading, so they download the first time, stream after.
-//   "hw":  "asked" the moment it asks for a graphics-card context (so a core
-//          that then crashes is known next time), "fallback" once it has
-//          loaded a game without one.
+//   "hw":  "refused" the moment the engine turns down a graphics context the
+//          core asked for (Vulkan, Direct3D), so a core that then crashes is
+//          known next time; "gl" once it has loaded with an OpenGL context,
+//          "fallback" once it has loaded without one.
 static CAPS: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
 
 fn caps_path(cache_dir: &Path) -> PathBuf {
@@ -111,18 +111,19 @@ fn caps_set(cache_dir: &Path, key: &str, field: &str, value: serde_json::Value) 
     }
 }
 
-/// Called from SET_HW_RENDER: remembers that the running core wants the GPU.
-pub(crate) fn note_hw_request() {
+/// Called from SET_HW_RENDER when the engine can't provide what was asked.
+pub(crate) fn note_hw_refused() {
     let ctx = CAPS.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some((dir, key)) = ctx {
-        if caps_get(&dir, &key, "hw") != "fallback" {
-            caps_set(&dir, &key, "hw", "asked".into());
+        let known = caps_get(&dir, &key, "hw");
+        if known != "gl" && known != "fallback" {
+            caps_set(&dir, &key, "hw", "refused".into());
         }
     }
 }
 
 fn needs_gpu_message(name: &str) -> String {
-    format!("{name} draws with the graphics card, which this build of SaveState Engine doesn't provide yet")
+    format!("{name} needs a Vulkan or Direct3D graphics context, which SaveState Engine doesn't provide (it provides OpenGL)")
 }
 
 fn extension_of(name: &str) -> String {
@@ -183,7 +184,7 @@ impl Session {
         let core = Core::load(&cfg.core)?;
         let info = core.system_info();
         let key = core_key(&info);
-        if GPU_ONLY.contains(&info.library_name.as_str()) || caps_get(&cfg.cache_dir, &key, "hw") == "asked" {
+        if caps_get(&cfg.cache_dir, &key, "hw") == "refused" {
             return Err(needs_gpu_message(&info.library_name));
         }
         *CAPS.lock().unwrap_or_else(|e| e.into_inner()) = Some((cfg.cache_dir.clone(), key));
@@ -209,7 +210,7 @@ impl Session {
             (core.set_input_state)(host::input_state);
             (core.init)();
         }
-        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false };
+        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new() };
         if let Err(e) = session.load_content(&cfg) {
             // Dropping `session` runs retro_deinit and unloads the core.
             return Err(e);
@@ -320,12 +321,12 @@ impl Session {
                 }
             }
         };
-        let (vfs_version, hw_requested) = {
+        let (vfs_version, hw_requested, hw_granted) = {
             let h = host::lock();
-            (h.vfs_version, h.hw_requested)
+            (h.vfs_version, h.hw_requested, h.hw_granted)
         };
         if !ok {
-            if hw_requested.is_some() {
+            if hw_requested.is_some() && !hw_granted {
                 return Err(needs_gpu_message(&info.library_name));
             }
             return Err(format!("{} couldn't load this game{}", info.library_name, if self.streamed { " (streamed)" } else { "" }));
@@ -334,8 +335,10 @@ impl Session {
         if vfs_version >= 1 && caps_get(&cfg.cache_dir, &key, "vfs").as_u64() != Some(vfs_version as u64) {
             caps_set(&cfg.cache_dir, &key, "vfs", vfs_version.into());
         }
-        if hw_requested.is_some() {
-            // It asked for the GPU, was told no, and loaded anyway: it has a software renderer.
+        if hw_granted {
+            caps_set(&cfg.cache_dir, &key, "hw", "gl".into());
+        } else if hw_requested.is_some() {
+            // It asked for a context it didn't get and loaded anyway: it has a software renderer.
             caps_set(&cfg.cache_dir, &key, "hw", "fallback".into());
         }
         self.content_path = path.clone();
@@ -347,6 +350,8 @@ impl Session {
             h.av = av;
             h.av_changed = true;
         }
+        // A GPU core: its framebuffer, then context_reset (after load, as RetroArch does).
+        crate::hw::start(av.geometry.max_width.max(av.geometry.base_width), av.geometry.max_height.max(av.geometry.base_height))?;
         unsafe {
             for port in 0..2 {
                 (self.core.set_controller_port_device)(port, RETRO_DEVICE_JOYPAD);
@@ -396,6 +401,32 @@ impl Session {
         self.frames += 1;
     }
 
+    /// For a GPU core, brings the frame just presented from the graphics card
+    /// into `host::lock().frame`, waiting up to `wait_us`. True when the frame
+    /// is in place (always true for software cores).
+    pub fn finish_frame(&mut self, wait_us: u64) -> bool {
+        if !crate::hw::pending() {
+            return true;
+        }
+        match crate::hw::collect(&mut self.gpu_pixels, wait_us) {
+            Some((w, h, bottom_up)) => {
+                host::lock().frame.take_gpu_pixels(&mut self.gpu_pixels, w, h, bottom_up);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Keep the core's DLL loaded after the session ends (see `Core::keep_loaded`).
+    pub fn keep_core_loaded(&mut self) {
+        self.core.keep_loaded();
+    }
+
+    /// The core draws with the graphics card.
+    pub fn uses_gpu(&self) -> bool {
+        crate::hw::active()
+    }
+
     pub fn reset(&mut self) {
         unsafe { (self.core.reset)() };
     }
@@ -411,8 +442,20 @@ impl Session {
         std::mem::take(&mut host::lock().audio)
     }
 
+    /// Moves the samples since the last call into `out` (cleared first),
+    /// reusing both buffers: no allocation per frame.
+    pub fn take_audio_into(&self, out: &mut Vec<i16>) {
+        out.clear();
+        std::mem::swap(&mut host::lock().audio, out);
+    }
+
     pub fn shutdown_requested(&self) -> bool {
         host::lock().shutdown_requested
+    }
+
+    /// Bytes a save state needs (0: the core can't save states).
+    pub fn serialize_size(&self) -> usize {
+        unsafe { (self.core.serialize_size)() }
     }
 
     /// A save state of the game right now.
@@ -482,11 +525,13 @@ impl Drop for Session {
                 if let Err(e) = self.save_sram() {
                     crate::warn!("couldn't write the battery save: {e}");
                 }
+                crate::hw::notify_destroy();
                 unsafe { (self.core.unload_game)() };
             }
             unsafe { (self.core.deinit)() };
             self.deinit_done = true;
         }
+        crate::hw::destroy_context();
         ACTIVE.store(false, Ordering::SeqCst);
     }
 }

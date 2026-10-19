@@ -120,9 +120,13 @@ pub unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            let mut h = host::lock();
-            h.av = *(data as *const retro_system_av_info);
-            h.av_changed = true;
+            let av = *(data as *const retro_system_av_info);
+            {
+                let mut h = host::lock();
+                h.av = av;
+                h.av_changed = true;
+            }
+            crate::hw::ensure_size(av.geometry.max_width, av.geometry.max_height);
             true
         }
         RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER => {
@@ -150,16 +154,26 @@ pub unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
             if data.is_null() {
                 return false;
             }
-            let cb = &*(data as *const retro_hw_render_callback);
-            host::lock().hw_requested = Some(cb.context_type);
-            crate::session::note_hw_request();
-            // The GPU context arrives with the video pipeline (spec Phase 3);
-            // until then cores that can fall back to software do so.
-            emit(Level::Info, "env", &format!("core asked for a hardware context (type {}); software only in this build", cb.context_type));
-            false
+            let cb = &mut *(data as *mut retro_hw_render_callback);
+            let kind = cb.context_type;
+            host::lock().hw_requested = Some(kind);
+            match crate::hw::create(cb) {
+                Ok(desc) => {
+                    host::lock().hw_granted = true;
+                    emit(Level::Info, "hw", &format!("{desc} (context type {kind})"));
+                    true
+                }
+                Err(e) => {
+                    crate::session::note_hw_refused();
+                    emit(Level::Info, "hw", &format!("not provided: {e}"));
+                    false
+                }
+            }
         }
-        RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER => false,
-        RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT => false,
+        // OpenGL core profile is what the engine provides best.
+        RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER => write(data, RETRO_HW_CONTEXT_OPENGL_CORE as c_uint),
+        // The core may use its context from its own threads too.
+        RETRO_ENVIRONMENT_SET_HW_SHARED_CONTEXT => true,
         RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE => false,
         RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE => false,
         RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT => false,

@@ -197,6 +197,22 @@ shell = patch(shell, "native launch announces each step", "nxGcInner",
 shell = patch(shell, "native launch returns the game's pid", "pid:n.data?.pid,emulator:n.data?.emulator",
   'return{ok:!0}}catch{return{ok:!1,error:"Could not contact local launcher"}}}',
   'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}}catch{return{ok:!1,error:"SaveState for Windows didn\\u2019t answer. Try again, or open Games > Set up games."}}}');
+// SaveState Engine: Play asks the launcher to run the game inside SaveState
+// (engine:true) unless the person chose RetroArch (localStorage nx_engine
+// "off") or asked for RetroArch for this game just now (window.__nxEngineSkip).
+// A launcher that has the engine answers with { engine: { port, key, ready } }
+// and PlayOverlay plays it in EnginePlayer; older launchers ignore the flag.
+shell = patch(shell, "native launch can use SaveState Engine", "engine:(()=>{const k=window.__nxEngineSkip",
+  'relativePath:t.relativePath,token:localStorage.getItem("nexus_token")??""},6e4)',
+  'relativePath:t.relativePath,token:localStorage.getItem("nexus_token")??"",engine:(()=>{const k=window.__nxEngineSkip===t.id;window.__nxEngineSkip=null;try{return!k&&localStorage.getItem("nx_engine")!=="off"}catch{return!k}})()},9e4)');
+// While a game plays inside SaveState (EnginePlayer sets __nxGameOpen), the
+// app's own controller navigation stands down: the controller is the game's.
+shell = patch(shell, "controller navigation pauses during a game", "if(document.hidden||window.__nxGameOpen){ze=requestAnimationFrame(Dt);return}",
+  "function Dt(t=performance.now()){if(document.hidden){ze=requestAnimationFrame(Dt);return}",
+  "function Dt(t=performance.now()){if(document.hidden||window.__nxGameOpen){ze=requestAnimationFrame(Dt);return}");
+shell = patch(shell, "native launch returns the engine session", "emulator:n.data?.emulator,engine:n.data?.engine",
+  'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}',
+  'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator,engine:n.data?.engine}');
 
 // Play on a game card refused outright on https ("Open Nexus at
 // http://your-host:3000 ... HTTPS blocks local launcher connections"), from

@@ -7,6 +7,10 @@
 //!
 //! For `GET_CURRENT_SOFTWARE_FRAMEBUFFER` the same buffer is handed to the
 //! core to draw into, and then `video_refresh` has nothing to copy.
+//!
+//! 0RGB1555 is repacked to RGB565 on arrival (one 16-bit format for the page
+//! to handle), and a GPU core's picture arrives as RGBA8 read back from its
+//! framebuffer (hw.rs), usually bottom-up.
 use libretro_sys::{RETRO_PIXEL_FORMAT_0RGB1555, RETRO_PIXEL_FORMAT_RGB565, RETRO_PIXEL_FORMAT_XRGB8888};
 use std::ffi::{c_int, c_void};
 
@@ -15,6 +19,8 @@ pub enum PixelFormat {
     Rgb1555,
     Xrgb8888,
     Rgb565,
+    /// R, G, B, A bytes (a GPU core's picture).
+    Rgba8,
 }
 
 impl PixelFormat {
@@ -31,11 +37,12 @@ impl PixelFormat {
             Self::Rgb1555 => RETRO_PIXEL_FORMAT_0RGB1555,
             Self::Xrgb8888 => RETRO_PIXEL_FORMAT_XRGB8888,
             Self::Rgb565 => RETRO_PIXEL_FORMAT_RGB565,
+            Self::Rgba8 => RETRO_PIXEL_FORMAT_XRGB8888,
         }
     }
     pub fn bytes_per_pixel(self) -> usize {
         match self {
-            Self::Xrgb8888 => 4,
+            Self::Xrgb8888 | Self::Rgba8 => 4,
             _ => 2,
         }
     }
@@ -43,7 +50,12 @@ impl PixelFormat {
 
 /// The latest frame, packed (pitch = width * bytes per pixel).
 pub struct Frame {
+    /// The format the core draws in (SET_PIXEL_FORMAT).
     pub format: PixelFormat,
+    /// The format of `data` (RGB565 for 0RGB1555 cores, RGBA8 for GPU cores).
+    pub data_format: PixelFormat,
+    /// Rows run bottom to top (a GPU picture with a bottom-left origin).
+    pub bottom_up: bool,
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
@@ -60,7 +72,7 @@ pub struct Frame {
 impl Default for Frame {
     fn default() -> Self {
         // libretro's default format is 0RGB1555 until the core sets another.
-        Self { format: PixelFormat::Rgb1555, width: 0, height: 0, data: Vec::new(), count: 0, duplicate: false, hardware: false, serial: 0 }
+        Self { format: PixelFormat::Rgb1555, data_format: PixelFormat::Rgb565, bottom_up: false, width: 0, height: 0, data: Vec::new(), count: 0, duplicate: false, hardware: false, serial: 0 }
     }
 }
 
@@ -78,19 +90,37 @@ impl Frame {
         }
         self.duplicate = false;
         if data == libretro_sys::RETRO_HW_FRAME_BUFFER_VALID {
+            // The pixels arrive from the GPU later (`take_gpu_pixels`).
             self.hardware = true;
-            self.width = width;
-            self.height = height;
-            self.serial += 1;
             return;
         }
         self.hardware = false;
+        self.bottom_up = false;
         let bpp = self.format.bytes_per_pixel();
         let row = width as usize * bpp;
         let need = row * height as usize;
         self.width = width;
         self.height = height;
         self.serial += 1;
+        if self.format == PixelFormat::Rgb1555 {
+            self.data_format = PixelFormat::Rgb565;
+            if self.data.len() != need {
+                self.data.resize(need, 0);
+            }
+            let src = data as *const u8;
+            for y in 0..height as usize {
+                let line = std::slice::from_raw_parts(src.add(y * pitch), row);
+                let out = &mut self.data[y * row..(y + 1) * row];
+                for (i, o) in line.chunks_exact(2).zip(out.chunks_exact_mut(2)) {
+                    let p = u16::from_le_bytes([i[0], i[1]]);
+                    // 0RRRRRGGGGGBBBBB -> RRRRRGGGGGGBBBBB (green's low bit copies its top bit).
+                    let q = ((p & 0x7fe0) << 1) | ((p & 0x0200) >> 4) | (p & 0x001f);
+                    o.copy_from_slice(&q.to_le_bytes());
+                }
+            }
+            return;
+        }
+        self.data_format = self.format;
         // Drawn straight into our buffer (software framebuffer): nothing to copy.
         if data as *const u8 == self.data.as_ptr() && pitch == row && self.data.len() >= need {
             self.data.truncate(need);
@@ -109,6 +139,17 @@ impl Frame {
         }
     }
 
+    /// The GPU picture read back by hw.rs (RGBA8).
+    pub fn take_gpu_pixels(&mut self, pixels: &mut Vec<u8>, width: u32, height: u32, bottom_up: bool) {
+        std::mem::swap(&mut self.data, pixels);
+        self.data_format = PixelFormat::Rgba8;
+        self.bottom_up = bottom_up;
+        self.width = width;
+        self.height = height;
+        self.hardware = true;
+        self.serial += 1;
+    }
+
     /// A buffer the core may draw into directly (GET_CURRENT_SOFTWARE_FRAMEBUFFER).
     pub fn software_target(&mut self, width: u32, height: u32) -> (*mut c_void, usize) {
         let row = width as usize * self.format.bytes_per_pixel();
@@ -119,14 +160,23 @@ impl Frame {
         (self.data.as_mut_ptr() as *mut c_void, row)
     }
 
-    /// The frame as RGBA8 (alpha 255).
+    /// The frame as RGBA8 (alpha 255), top row first.
     pub fn to_rgba(&self) -> Vec<u8> {
         let pixels = self.width as usize * self.height as usize;
+        let bpp = self.data_format.bytes_per_pixel();
         let mut out = vec![0u8; pixels * 4];
-        if self.hardware || self.data.len() < pixels * self.format.bytes_per_pixel() {
+        if self.data.len() < pixels * bpp {
             return out;
         }
-        convert_to_rgba(self.format, &self.data[..pixels * self.format.bytes_per_pixel()], &mut out);
+        convert_to_rgba(self.data_format, &self.data[..pixels * bpp], &mut out);
+        if self.bottom_up {
+            let row = self.width as usize * 4;
+            let h = self.height as usize;
+            for y in 0..h / 2 {
+                let (top, bottom) = out.split_at_mut((h - 1 - y) * row);
+                top[y * row..(y + 1) * row].swap_with_slice(&mut bottom[..row]);
+            }
+        }
         out
     }
 
@@ -162,6 +212,12 @@ pub fn convert_to_rgba(format: PixelFormat, src: &[u8], out: &mut [u8]) {
                 o[0] = (r << 3) | (r >> 2);
                 o[1] = (g << 2) | (g >> 4);
                 o[2] = (b << 3) | (b >> 2);
+                o[3] = 255;
+            }
+        }
+        PixelFormat::Rgba8 => {
+            for (px, o) in src.chunks_exact(4).zip(out.chunks_exact_mut(4)) {
+                o[..3].copy_from_slice(&px[..3]);
                 o[3] = 255;
             }
         }
@@ -206,6 +262,24 @@ mod tests {
         assert_eq!(out, [0, 0, 255, 255]);
         convert_to_rgba(PixelFormat::Xrgb8888, &0x00123456u32.to_le_bytes(), &mut out);
         assert_eq!(out, [0x12, 0x34, 0x56, 255]);
+    }
+
+    #[test]
+    fn repacks_1555_as_565_and_flips_gpu_frames() {
+        let mut f = Frame { format: PixelFormat::Rgb1555, ..Frame::default() };
+        // Pure red, green, blue and white in 0RGB1555.
+        let src: Vec<u8> = [0x7C00u16, 0x03E0, 0x001F, 0x7FFF].iter().flat_map(|p| p.to_le_bytes()).collect();
+        unsafe { f.receive(src.as_ptr() as *const c_void, 4, 1, 8) };
+        assert_eq!(f.data_format, PixelFormat::Rgb565);
+        let rgba = f.to_rgba();
+        assert_eq!(&rgba[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&rgba[4..8], &[0, 255, 0, 255]);
+        assert_eq!(&rgba[8..12], &[0, 0, 255, 255]);
+        assert_eq!(&rgba[12..16], &[255, 255, 255, 255]);
+        // A 1x2 GPU picture, bottom row first.
+        let mut px = vec![1, 1, 1, 0, 2, 2, 2, 0];
+        f.take_gpu_pixels(&mut px, 1, 2, true);
+        assert_eq!(f.to_rgba(), vec![2, 2, 2, 255, 1, 1, 1, 255]);
     }
 
     #[test]

@@ -937,6 +937,27 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
   launcher get a new one by running the installer again (the launcher does
   not update itself).
 
+## SaveState Engine (games inside the page)
+
+SaveState's own libretro host (`engine/`, design and results in
+`SAVESTATE_ENGINE_SPEC.md`). With launcher v11, Play on a RetroArch-system
+game (NES to GameCube) runs the game in `savestate-engine.exe`, which streams
+it into the SaveState page over a local WebSocket; the page's player
+(`EnginePlayer.jsx`) draws it, plays its sound and sends the controls. If the
+engine can't run a game the launcher opens RetroArch as before, and the
+player's menu has "Open games in RetroArch instead".
+
+- Build: `engine\build.cmd --release` (Rust's GNU toolchain; no Visual Studio).
+  Tests: `cargo test` with the toolchain's `self-contained` folder on PATH.
+- Publish: `node scripts/publish-engine.mjs` copies the build to
+  `releases\engine` (served by `/api/client-launcher/engine` and `/info`).
+  Launchers check every 10 minutes and replace their copy when the SHA-256
+  changes (`%LOCALAPPDATA%\NexusEmuClient\engine`; its log is `data\engine.log`).
+- Self-check on this PC: `savestate-engine selftest --core <core.dll> --game <file>`
+  prints a JSON report (picture, save-state integrity, speed).
+- The engine uses RetroArch's cores, `system` folder (BIOS) and `saves` folder,
+  so battery saves are shared with RetroArch.
+
 ## Failover
 
 The site runs **only from the home host**. Nothing is served from AWS.

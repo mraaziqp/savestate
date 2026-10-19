@@ -13,6 +13,10 @@
 //   POST /cache-rom        — download a ROM into the local ROM folder
 //   POST /cache-music      — save a host-library track into the local Music folder
 //   POST /launch           — download ROM if needed, then launch the emulator
+//                            (engine: true → for RetroArch systems, run it in
+//                            SaveState Engine and answer { engine: { port, key,
+//                            ready } } so the page plays it in place; falls back
+//                            to RetroArch when the engine can't)
 //                            (optional netplay: {role, hostAddress, port, nick}
 //                            adds RetroArch's --host/--connect args, so netplay
 //                            actually runs here instead of on the host)
@@ -2762,7 +2766,101 @@ function dedupeLaunch(body, run) {
   return promise;
 }
 
-async function handleLaunch(body) {
+// ── SaveState Engine ──────────────────────────────────────────────────────
+// SaveState's own libretro host (engine/ in the SaveState repo): it runs the
+// same RetroArch cores, but streams the game into the SaveState page over a
+// local WebSocket instead of opening a RetroArch window. The host serves the
+// exe; it's fetched (and refreshed when the host's copy changes, checked by
+// SHA-256) into <client root>/engine.
+const engineDir = path.join(clientRoot, 'engine');
+const engineExe = path.join(engineDir, 'savestate-engine.exe');
+let engineChecked = 0;
+
+async function ensureEngine(hostUrl) {
+  if (!IS_WIN) return null;
+  const have = fs.existsSync(engineExe);
+  // Asking the host at most every 10 minutes; a missing engine always asks.
+  if (have && (!hostUrl || Date.now() - engineChecked < 10 * 60_000)) return engineExe;
+  if (!hostUrl) return null;
+  engineChecked = Date.now();
+  try {
+    const infoRes = await fetch(`${hostUrl}/api/client-launcher/engine/info`, { signal: AbortSignal.timeout(8000) });
+    if (!infoRes.ok) return have ? engineExe : null;
+    const info = await infoRes.json();
+    const localPath = path.join(engineDir, 'engine.json');
+    let local = {};
+    try { local = JSON.parse(fs.readFileSync(localPath, 'utf8')); } catch { /* first time */ }
+    if (have && local.sha256 === info.sha256) return engineExe;
+    ensureDirSync(engineDir);
+    const res = await fetch(`${hostUrl}/api/client-launcher/engine`, { signal: AbortSignal.timeout(120_000) });
+    if (!res.ok) return have ? engineExe : null;
+    const bytes = Buffer.from(await res.arrayBuffer());
+    const sha = crypto.createHash('sha256').update(bytes).digest('hex');
+    if (sha !== info.sha256 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
+      console.error('[engine] download did not match the host\'s checksum; keeping the old one');
+      return have ? engineExe : null;
+    }
+    const tmp = engineExe + '.new';
+    fs.writeFileSync(tmp, bytes);
+    try { fs.renameSync(tmp, engineExe); } catch {
+      // In use by a game that's still open: next launch picks it up.
+      try { fs.unlinkSync(tmp); } catch { /* gone */ }
+      return engineExe;
+    }
+    fs.writeFileSync(localPath, JSON.stringify({ version: info.version, sha256: info.sha256, at: new Date().toISOString() }));
+    console.log(`[engine] installed SaveState Engine ${info.version}`);
+    return engineExe;
+  } catch (e) {
+    console.error('[engine] could not check for the engine:', e && e.message ? e.message : e);
+    return have ? engineExe : null;
+  }
+}
+
+// Starts the engine for one game and waits until it has loaded it.
+// Resolves { ok, pid, port, key, ready } or { ok: false, error }.
+function startEngine(exe, { core, romFile, retroarchDir, origin }) {
+  return new Promise((resolve) => {
+    const key = crypto.randomBytes(24).toString('base64url');
+    const args = ['serve', '--core', core, '--game', romFile, '--key', key,
+      '--system', path.join(retroarchDir, 'system'),
+      '--saves', path.join(retroarchDir, 'saves'),
+      '--states', path.join(retroarchDir, 'states'),
+      '--data', path.join(engineDir, 'data')];
+    if (origin) args.push('--origin', origin);
+    let child;
+    try {
+      child = spawn(exe, args, { cwd: engineDir, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    } catch (e) {
+      resolve({ ok: false, error: String(e && e.message ? e.message : e) });
+      return;
+    }
+    let port = 0, done = false, buf = '';
+    const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish({ ok: false, error: 'the engine took too long to load the game' }); }, 90_000);
+    child.stdout.on('data', (d) => {
+      buf += d.toString('utf8');
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        let m; try { m = JSON.parse(line); } catch { continue; }
+        if (m.listening) port = m.listening;
+        if (m.error) finish({ ok: false, error: m.error });
+        if (m.ready) {
+          trackGame(child, exe, []);
+          const rec = runningGames.get(child.pid);
+          if (rec) rec.emulator = 'SaveState Engine';
+          finish({ ok: true, pid: child.pid, port, key, ready: m.ready });
+        }
+      }
+    });
+    child.once('error', (e) => finish({ ok: false, error: String(e && e.message ? e.message : e) }));
+    child.once('exit', (code) => finish({ ok: false, error: `the engine stopped while loading (code ${code})` }));
+  });
+}
+
+async function handleLaunch(body, origin) {
   const { romUrl, platform, title, gameId, netplay, relativePath } = body;
   const cfg = loadConfig();
   const dir = platformRomDir(cfg, platform);
@@ -2968,6 +3066,20 @@ async function handleLaunch(body) {
       args.push('-batch', '-fullscreen', '-nogui');
     }
     args.push(romFile);
+    // Inside SaveState, when the page asks and the engine can run it.
+    let engineError = null;
+    if (body.engine && isRetroArch(emu) && !netplay) {
+      const exe = await ensureEngine(hostUrl);
+      const core = getCorePath(emu, platform);
+      if (exe && core) {
+        const run = await startEngine(exe, { core, romFile, retroarchDir: path.dirname(emu), origin: origin && isTrustedOrigin(origin) ? origin : null });
+        if (run.ok) {
+          return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: 'SaveState Engine', usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
+        }
+        engineError = run.error;
+        console.error(`[engine] ${path.basename(romFile)}: ${run.error}; opening RetroArch instead`);
+      }
+    }
     const { pid, alive, stderr } = await spawnAndVerify(emu, args);
     if (!alive) {
       const plat = String(platform || '').toLowerCase();
@@ -2978,7 +3090,7 @@ async function handleLaunch(body) {
         : 'Check the emulator opens correctly on its own outside NexusEmu first.';
       return { status: 500, json: { success: false, error: `${emu.split(/[\\/]/).pop()} crashed on start: ${stderr || 'unknown error'}`, hint } };
     }
-    return { status: 200, json: { success: true, launched: true, pid, file: romFile, emulator: emu, usedCache } };
+    return { status: 200, json: { success: true, launched: true, pid, file: romFile, emulator: emu, usedCache, ...(engineError ? { engineError } : {}) } };
   } catch (e) {
     return { status: 500, json: { success: false, error: `Launch failed: ${e && e.message ? e.message : e}` } };
   }
@@ -3087,11 +3199,13 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 10,
+    version: 11,
     // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
     // v8: unpacks without bundled modules; copies RetroArch from the host.
     // v9: follows each game until it closes (/launch/status, /launch/stop), full screen, refuses half-downloaded games.
     // v10: Linux: emulators from Flathub, a games folder by typed path; reports its platform.
+    // v11: SaveState Engine: RetroArch-system games play inside the SaveState page (/launch engine:true).
+    engine: IS_WIN,
     platform: process.platform,
     features: ['setup-consoles', 'bios', 'rom-folder'],
     native: true,
@@ -3609,7 +3723,7 @@ function startEmbeddedLauncher(opts = {}) {
 
       if (req.method === 'POST' && p === '/launch') {
         const body = await readBody(req);
-        const result = await dedupeLaunch(body, () => handleLaunch(body));
+        const result = await dedupeLaunch(body, () => handleLaunch(body, origin));
         send(result.json, result.status);
         return;
       }

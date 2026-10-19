@@ -162,6 +162,10 @@ pub unsafe extern "C" fn video_refresh(data: *const c_void, width: c_uint, heigh
         return;
     }
     h.frame.receive(data, width, height, pitch);
+    if data == RETRO_HW_FRAME_BUFFER_VALID {
+        drop(h);
+        crate::hw::frame_presented(width, height);
+    }
 }
 
 pub unsafe extern "C" fn audio_sample(left: i16, right: i16) {

@@ -25051,6 +25051,40 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
+  // SaveState Engine (engine/ in this repo; SAVESTATE_ENGINE_SPEC.md): the
+  // launcher fetches it from here and refreshes it when the SHA-256 changes.
+  // Served from releases/engine (published by scripts/publish-engine.mjs),
+  // never from engine/target, which changes while it builds.
+  const engineRelease = path.join(process.cwd(), "releases", "engine", "savestate-engine.exe");
+  let engineInfoMemo: { mtimeMs: number; info: { version: string; size: number; sha256: string } } | null = null;
+  const engineInfo = async () => {
+    const st = await stat(engineRelease);
+    if (engineInfoMemo && engineInfoMemo.mtimeMs === st.mtimeMs) return engineInfoMemo.info;
+    const sha256 = crypto.createHash("sha256").update(await readFile(engineRelease)).digest("hex");
+    let version = "0";
+    try { version = JSON.parse(await readFile(path.join(path.dirname(engineRelease), "engine.json"), "utf8")).version ?? "0"; } catch { /* unversioned */ }
+    engineInfoMemo = { mtimeMs: st.mtimeMs, info: { version, size: st.size, sha256 } };
+    return engineInfoMemo.info;
+  };
+  app.get("/api/client-launcher/engine/info", async (_req, res) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      res.json(await engineInfo());
+    } catch {
+      res.status(404).json({ error: "SaveState Engine isn't published on this host" });
+    }
+  });
+  app.get("/api/client-launcher/engine", async (_req, res) => {
+    try {
+      await engineInfo();
+      res.setHeader("Content-Disposition", 'attachment; filename="savestate-engine.exe"');
+      res.setHeader("Cache-Control", "no-store");
+      res.sendFile(engineRelease, { headers: { "Content-Type": "application/vnd.microsoft.portable-executable" } });
+    } catch {
+      res.status(404).json({ error: "SaveState Engine isn't published on this host" });
+    }
+  });
+
   // The Windows runner the installer saves as nexus-runner.vbs. Started at
   // sign-in (Task Scheduler) and by nexusemu:// links. It starts the launcher
   // with no window and restarts it within about 10 s if it stops; before, a

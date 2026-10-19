@@ -5,8 +5,12 @@
 // code (build.mjs patches): { phase: "preparing" | "starting" | "started" |
 // "failed", game, result?, retry? }. The emulator's own window opens full
 // screen over SaveState and this stays behind it, following the game.
+//
+// When the launcher ran the game in SaveState Engine instead (result.engine:
+// { port, key, ready }), the game plays right here, in EnginePlayer.
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useStyles, Icon, goTab } from "./lib.jsx";
+import { EnginePlayer } from "./EnginePlayer.jsx";
 
 const LAUNCHER = "http://127.0.0.1:17373";
 const EMULATOR = {
@@ -55,7 +59,7 @@ export function PlayOverlay() {
         const same = old && old.game?.id === d.game.id;
         const base = same ? old : { game: d.game, startedAt: Date.now() };
         if (d.phase === "failed") return { ...base, phase: "failed", error: d.result?.error ?? d.error ?? "It didn't start.", retry: d.retry ?? base.retry };
-        if (d.phase === "started") return { ...base, phase: "started", pid: d.result?.pid ?? null, emulator: d.result?.emulator ?? null, retry: d.retry ?? base.retry };
+        if (d.phase === "started") return { ...base, phase: d.result?.engine ? "engine" : "started", engine: d.result?.engine ?? null, pid: d.result?.pid ?? null, emulator: d.result?.emulator ?? null, retry: d.retry ?? base.retry };
         return { ...base, phase: d.phase, retry: d.retry ?? base.retry, error: null };
       });
     };
@@ -104,13 +108,44 @@ export function PlayOverlay() {
 
   if (!s) return <style>{CSS}</style>;
   const { game, phase } = s;
+
+  // Playing inside SaveState.
+  if (phase === "engine" && s.engine) {
+    const retroArch = () => {
+      // Just this game, this once: the launcher opens it the usual way.
+      window.__nxEngineSkip = game.id;
+      const r = s.retry;
+      setS({ game, phase: "starting", startedAt: Date.now(), retry: r });
+      r?.();
+    };
+    return (
+      <EnginePlayer
+        key={`${s.engine.port}:${s.engine.key}`}
+        engine={s.engine}
+        game={game}
+        onUseRetroArch={retroArch}
+        onExit={(how) => setS((o) => {
+          if (!o || o.phase !== "engine") return o;
+          if (how?.timedOut && o.pid) {
+            fetch(`${LAUNCHER}/launch/stop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pid: o.pid }) }).catch(() => {});
+          }
+          if (how?.crashed || how?.error) {
+            return { ...o, phase: "failed", engineFailed: true, error: how.error ?? "The game stopped unexpectedly. Your battery save is kept (it's written every 30 seconds). Try again, or play it in RetroArch." };
+          }
+          const t2 = setTimeout(() => setS((x) => (x?.phase === "closed" ? null : x)), 2500);
+          timers.current.push(t2);
+          return { ...o, phase: "closed" };
+        })}
+      />
+    );
+  }
   // The launcher reports the program's path (E:\PCSX2\pcsx2-qt.exe).
   const exe = String(s.emulator ?? "").split(/[\\/]/).pop().replace(/\.exe$/i, "").replace(/-qt$/i, "");
   const emu = !exe ? emulatorFor(game.platform) : /^pcsx2$/i.test(exe) ? "PCSX2" : /^rpcs3$/i.test(exe) ? "RPCS3" : /^retroarch$/i.test(exe) ? "RetroArch" : exe;
   const pct = s.progress?.total ? Math.min(100, (s.progress.received / s.progress.total) * 100) : null;
   const steps = [
     ["preparing", "Getting the game ready"],
-    ["starting", `Starting ${emulatorFor(game.platform)}`],
+    ["starting", emulatorFor(game.platform) === "RetroArch" ? "Starting the game" : `Starting ${emulatorFor(game.platform)}`],
     ["started", "Playing"],
   ];
   const order = ["preparing", "starting", "started", "closed"];
@@ -142,11 +177,15 @@ export function PlayOverlay() {
         {busy && <div className={`nxplay-bar ${pct == null ? "indef" : ""}`}><b style={{ width: `${pct ?? 0}%` }} /></div>}
 
         {phase === "started" && <p>{emu} is open full screen with your game. Play with your controller or keyboard; close the game (or press Stop) to come back here.</p>}
+        {phase === "started" && (() => { try { return localStorage.getItem("nx_engine") === "off"; } catch { return false; } })() && (
+          <button className="nxa-link" onClick={() => { try { localStorage.removeItem("nx_engine"); } catch { /* private mode */ } setS(null); }}>Play games inside SaveState next time</button>
+        )}
         {phase === "closed" && <p>Welcome back.</p>}
         {phase === "failed" && <p className="nxplay-err">{s.error}</p>}
 
         <div className="nxplay-row">
           {phase === "failed" && s.retry && <button className="nxa-btn primary" onClick={() => { const r = s.retry; setS({ game, phase: "starting", startedAt: Date.now(), retry: r }); r(); }}><Icon name="refresh" /> Try again</button>}
+          {phase === "failed" && s.engineFailed && s.retry && <button className="nxa-btn" onClick={() => { window.__nxEngineSkip = game.id; const r = s.retry; setS({ game, phase: "starting", startedAt: Date.now(), retry: r }); r(); }}><Icon name="game" /> Play in RetroArch</button>}
           {phase === "failed" && needsApp && <button className="nxa-btn" onClick={() => { setS(null); window.dispatchEvent(new CustomEvent("nexus:game-setup")); }}><Icon name="bolt" /> Set up games</button>}
           {phase === "started" && <button className="nxa-btn" onClick={stop}><Icon name="x" /> Stop game</button>}
           {(phase === "failed" || phase === "started" || phase === "closed") && <button className="nxa-btn" onClick={() => setS(null)}>{phase === "started" ? "Hide" : "Close"}</button>}

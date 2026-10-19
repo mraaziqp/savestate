@@ -321,6 +321,7 @@ pub type retro_proc_address_t = unsafe extern "C" fn();
 pub type retro_hw_get_proc_address_t = unsafe extern "C" fn(sym: *const c_char) -> Option<retro_proc_address_t>;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct retro_hw_render_callback {
     pub context_type: c_int,
     pub context_reset: Option<retro_hw_context_reset_t>,
