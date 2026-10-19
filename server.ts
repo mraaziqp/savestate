@@ -23155,7 +23155,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         { q: "1080", w: 1920 },
         { q: "720",  w: 1280 },
         { q: "480",  w: 854  },
-      ].filter((t) => t.w <= srcW || t.w === 854);
+      // The top tier is kept at the source's own width for anything wider than
+      // 720p: scope films are often 1720-1916 wide, and "1920 <= width" used
+      // to drop their only full-resolution option, capping them at 1280.
+      ].filter((t) => t.w <= srcW || t.w === 854 || (t.q === "1080" && srcW > 1280));
 
       const lines: string[] = ["#EXTM3U", "#EXT-X-VERSION:3", "#EXT-X-INDEPENDENT-SEGMENTS"];
       for (const t of tiers) {

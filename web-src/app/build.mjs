@@ -961,6 +961,13 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   const before = hub;
   hub = patch(hub, "player starts from a realistic speed", "abrEwmaDefaultEstimate:5e6,", "abrEwmaDefaultEstimate:15e5,", "abrEwmaDefaultEstimate:5e6,");
   hub = patch(hub, "player steps up sooner", "abrBandWidthFactor:.8,abrBandWidthUpFactor:.7,", "abrBandWidthFactor:.8,abrBandWidthUpFactor:.6,", "abrBandWidthFactor:.8,abrBandWidthUpFactor:.7,");
+  // The player fixes the quality from the screen when a film loads (and steps
+  // down after two stalls a minute). Phones always got 720p, which is soft on
+  // a 1080p+ phone in landscape: now 1080p when the browser reports a good
+  // connection (4G/Wi-Fi at 5 Mbit/s or more, no data saver).
+  hub = patch(hub, "phones get 1080p on a good connection", "const nxNet=navigator.connection;",
+    "const want=innerWidth<900?720:Math.min(1080,Math.max(720,(window.screen?.height||1080)*(window.devicePixelRatio||1)));",
+    "const nxNet=navigator.connection;const nxGood=!!nxNet&&!nxNet.saveData&&(nxNet.downlink||0)>=5;const want=innerWidth<900?(nxGood?1080:720):Math.min(1080,Math.max(720,(window.screen?.height||1080)*(window.devicePixelRatio||1)));");
   if (hub !== before) writeFileSync(file, hub);
 }
 

@@ -257,6 +257,14 @@ a move, check that the `NexusArchive` folder is still shared with it.
   and the player (build.mjs 3f) starts from 5 Mbit/s and steps up at hls.js's
   own 1.43x: 1080p from about 8 Mbit/s. Measured on Drive films: first
   picture 1.5 s warm, 4-6 s cold, no stalls in a minute.
+  The player then fixes the level from the screen when a film loads (and
+  steps down after two stalls a minute): PCs get the largest level that fits
+  the screen's height; phones got 720p always and now get 1080p when the
+  browser reports a good connection (5 Mbit/s or more, no data saver). Films
+  1281-1919 px wide (scope films) had lost their full-resolution level
+  ("1920 <= width"), capping them at 1280; the top level now follows the
+  source. Headless Chrome reports an 800x600 screen and a slow line, so
+  stream tests must fake a 1080p screen to see what viewers get.
 - Most films live on Drive, so the fastest start is a prepared copy
   (videoprep.ts, "Films ready for every device"): it plays as-is at full
   quality with no live conversion. The queue is long (1,021 of 1,881 films on
