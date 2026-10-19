@@ -11,6 +11,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useStyles, Icon, goTab } from "./lib.jsx";
 import { EnginePlayer } from "./EnginePlayer.jsx";
+import { RemotePlayer } from "./RemotePlayer.jsx";
 
 const LAUNCHER = "http://127.0.0.1:17373";
 const EMULATOR = {
@@ -47,6 +48,8 @@ const mb = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${Math
 
 export function PlayOverlay() {
   useStyles();
+  // ?play=<code>: a game shared from another PC (RemotePlayer).
+  const [remote, setRemote] = useState(() => { try { return new URLSearchParams(window.location.search).get("play"); } catch { return null; } });
   const [s, setS] = useState(null); // { phase, game, error, pid, retry, progress, startedAt, closed }
   const timers = useRef([]);
   const clear = () => { timers.current.forEach(clearInterval); timers.current = []; };
@@ -106,6 +109,12 @@ export function PlayOverlay() {
     setS(null);
   }, [s?.pid]);
 
+  if (remote) {
+    return <RemotePlayer code={remote.toUpperCase()} onClose={() => {
+      try { const u = new URL(window.location.href); u.searchParams.delete("play"); window.history.replaceState(null, "", u.toString()); } catch { /* fine */ }
+      setRemote(null);
+    }} />;
+  }
   if (!s) return <style>{CSS}</style>;
   const { game, phase } = s;
 

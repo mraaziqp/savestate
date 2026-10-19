@@ -40,6 +40,8 @@ fn usage() -> ! {
 struct Args {
     cmd: String,
     flags: HashMap<String, Vec<String>>,
+    /// Everything after a lone `--` (an emulator's own command line).
+    rest: Vec<String>,
 }
 
 impl Args {
@@ -48,7 +50,13 @@ impl Args {
         let cmd = it.next().unwrap_or_else(|| usage());
         let mut flags: HashMap<String, Vec<String>> = HashMap::new();
         let mut pending: Option<String> = None;
-        for a in it {
+        let mut rest = Vec::new();
+        let mut it = it.peekable();
+        while let Some(a) = it.next() {
+            if a == "--" {
+                rest.extend(it.by_ref());
+                break;
+            }
             if let Some(name) = a.strip_prefix("--") {
                 if let Some(p) = pending.take() {
                     flags.entry(p).or_default().push(String::new());
@@ -63,7 +71,7 @@ impl Args {
         if let Some(p) = pending {
             flags.entry(p).or_default().push(String::new());
         }
-        Args { cmd, flags }
+        Args { cmd, flags, rest }
     }
     fn get(&self, k: &str) -> Option<&str> {
         self.flags.get(k).and_then(|v| v.last()).map(String::as_str)
@@ -112,6 +120,24 @@ fn main() {
         }
         "selftest" => std::process::exit(selftest(&args)),
         "serve" => std::process::exit(serve(&args)),
+        "capture" => std::process::exit(capture(&args)),
+        // Plugs in a virtual controller, presses A for a second, unplugs it (checks ViGEmBus).
+        "vigem-test" => {
+            let Some(mut bus) = savestate_engine::vigem::Bus::open() else {
+                println!("{{\"vigem\":false}}");
+                std::process::exit(1)
+            };
+            let a = savestate_engine::host::PortInput { buttons: 1 << libretro_sys::RETRO_DEVICE_ID_JOYPAD_B, ..Default::default() };
+            bus.send(0, &a);
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(args.get("hold").and_then(|v| v.parse().ok()).unwrap_or(1500));
+            while std::time::Instant::now() < until {
+                bus.tick();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            bus.send(0, &Default::default());
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            println!("{{\"vigem\":true,\"pads\":{}}}", bus.count());
+        }
         _ => usage(),
     }
 }
@@ -129,6 +155,39 @@ fn content_of(args: &Args) -> Content {
 
 fn options_of(args: &Args) -> HashMap<String, String> {
     args.all("option").iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+/// Another emulator's window inside the page (capture.rs):
+/// capture --key <key> [--title <game>] [--emulator <name>] [--origin <o>]... [--data <dir>] [--onscreen] -- <emulator.exe> <its arguments>...
+fn capture(args: &Args) -> i32 {
+    let data = data_dir(args);
+    let _ = std::fs::create_dir_all(&data);
+    let log_path = data.join("engine.log");
+    if std::fs::metadata(&log_path).is_ok_and(|m| m.len() > 4 << 20) {
+        let _ = std::fs::rename(&log_path, data.join("engine.prev.log"));
+    }
+    let _ = log::set_file(&log_path);
+    let Some((exe, rest)) = args.rest.split_first() else {
+        eprintln!("capture needs -- <emulator.exe> [its arguments]");
+        return 2;
+    };
+    let key = args.get("key").filter(|k| k.len() >= 16).unwrap_or_else(|| {
+        eprintln!("capture needs --key (16+ characters)");
+        std::process::exit(2)
+    });
+    let exe = PathBuf::from(exe);
+    let emulator = args.get("emulator").map(str::to_string).unwrap_or_else(|| exe.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "emulator".into()));
+    savestate_engine::capture::run(savestate_engine::capture::CaptureConfig {
+        exe,
+        args: rest.to_vec(),
+        title: args.get("title").unwrap_or("Game").to_string(),
+        emulator,
+        key: key.to_string(),
+        port: args.get("port").and_then(|p| p.parse().ok()).unwrap_or(0),
+        origins: args.all("origin").into_iter().filter(|o| !o.is_empty()).collect(),
+        idle_exit: std::time::Duration::from_secs(args.get("idle").and_then(|s| s.parse().ok()).unwrap_or(120)),
+        offscreen: !args.has("onscreen"),
+    })
 }
 
 fn serve(args: &Args) -> i32 {
@@ -391,7 +450,12 @@ fn selftest(args: &Args) -> i32 {
             "left" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_LEFT,
             _ => libretro_sys::RETRO_DEVICE_ID_JOYPAD_DOWN,
         };
-        if let Ok(start) = session.serialize() {
+        if size > 16 << 20 {
+            // As in play (serve.rs, StateCost::runahead_max): states this big
+            // are never saved and loaded every frame. Measuring it anyway hung
+            // Dolphin twice in ~14 runs, spinning inside its own save-state code.
+            latency_report = serde_json::json!({ "skipped": format!("save states of {} MB are too big for run-ahead", size >> 20) });
+        } else if let Ok(start) = session.serialize() {
             let mut buf = Vec::new();
             // Pictures per frame, and a hash of all the sound, for 30 frames.
             // Each branch starts alike: 20 warm-up frames from the starting
@@ -399,6 +463,7 @@ fn selftest(args: &Args) -> i32 {
             // save states is the same at every start (not left over from the
             // branch before).
             let settle = |s: &mut Session| {
+                savestate_engine::debug!("selftest: settle");
                 let _ = s.unserialize(&start);
                 for _ in 0..20 {
                     s.run_frame(false);
@@ -409,6 +474,7 @@ fn selftest(args: &Args) -> i32 {
             };
             let mut branch = |s: &mut Session, ahead: u32, press: bool| -> (Vec<u64>, u64) {
                 settle(s);
+                savestate_engine::debug!("selftest: run-ahead {ahead}, pressed {press}");
                 let input = savestate_engine::host::PortInput { buttons: if press { 1 << button } else { 0 }, ..Default::default() };
                 let mut hashes = Vec::new();
                 let mut sound: u64 = 0xcbf29ce484222325;
@@ -440,6 +506,7 @@ fn selftest(args: &Args) -> i32 {
             // run-ahead or rewind can keep it exact: the core's save flushes sound.)
             let save_changes_sound = {
                 settle(&mut session);
+                savestate_engine::debug!("selftest: does saving change the sound");
                 let mut sound: u64 = 0xcbf29ce484222325;
                 let mut tmp = Vec::new();
                 for _ in 0..30 {

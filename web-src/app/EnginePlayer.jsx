@@ -17,6 +17,10 @@
 //            LB load, Start menu, RT fast-forward, LT rewind, d-pad left/right
 //            save slot; Esc menu, Tab fast-forward, ` rewind, F2 save, F4 load.
 //            In the menu the d-pad moves, A chooses, B goes back.
+//   another  the picture (canvas.captureStream) and sound go to another device
+//   device   over WebRTC (Chrome encodes them on the GPU); its controls come back
+//            on a data channel as player 2 (or 1). server/rtc.ts introduces the
+//            two; RemotePlayer.jsx is the other device's side
 //   saves    slots are kept on this PC and sent to the person's account (the
 //            host keeps earlier versions); preferences follow them too
 //            (/api/engine/prefs)
@@ -55,6 +59,7 @@ const CSS = `
 .nxe-key kbd{font:600 12px ui-monospace,monospace;background:rgba(255,255,255,.1);border-radius:6px;padding:2px 6px}
 .nxe-key.wait kbd{background:#6d5dfc}
 .nxe-stats{font:12px ui-monospace,monospace;color:#9ab;display:grid;gap:2px}
+.nxe-stuck{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:380px;background:rgba(10,12,20,.92);border:1px solid rgba(255,255,255,.14);border-radius:16px;padding:18px 20px;display:grid;gap:12px;text-align:center;font:600 14px/1.5 system-ui,sans-serif}
 .nxe-toast{position:absolute;left:50%;bottom:28px;transform:translateX(-50%);background:rgba(0,0,0,.78);padding:9px 14px;border-radius:12px;font:600 13px system-ui,sans-serif;pointer-events:none}
 .nxe-chip{position:absolute;right:14px;bottom:14px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.15);padding:8px 12px;border-radius:12px;font:600 13px system-ui,sans-serif;cursor:pointer}
 .nxe-wait{position:absolute;inset:0;display:grid;place-items:center;color:#aab;font:600 14px system-ui,sans-serif}
@@ -68,7 +73,7 @@ const CSS = `
 
 // libretro joypad ids, in order: B Y Select Start Up Down Left Right A X L R L2 R2 L3 R3
 const BUTTONS = ["B", "Y", "Select", "Start", "Up", "Down", "Left", "Right", "A", "X", "L", "R", "L2", "R2", "L3", "R3"];
-const DEFAULT_KEYS = {
+export const DEFAULT_KEYS = {
   ArrowUp: 4, ArrowDown: 5, ArrowLeft: 6, ArrowRight: 7,
   KeyZ: 0, KeyX: 8, KeyA: 1, KeyS: 9, KeyQ: 10, KeyW: 11, KeyE: 12, KeyR: 13,
   Enter: 3, ShiftRight: 2, Backspace: 2, KeyC: 14, KeyV: 15,
@@ -76,7 +81,7 @@ const DEFAULT_KEYS = {
 // Standard-mapping gamepad button -> libretro id. By position, the bottom
 // button is the console's bottom button (B on a SNES pad); by label, the
 // button marked A is the console's A.
-const PAD_POSITION = [0, 8, 1, 9, 10, 11, 12, 13, 2, 3, 14, 15, 4, 5, 6, 7];
+export const PAD_POSITION = [0, 8, 1, 9, 10, 11, 12, 13, 2, 3, 14, 15, 4, 5, 6, 7];
 const PAD_LABELS = [8, 0, 9, 1, 10, 11, 12, 13, 2, 3, 14, 15, 4, 5, 6, 7];
 const LOOKS = [["sharp", "Sharp pixels"], ["smooth", "Smooth"], ["crt", "CRT"], ["lcd", "LCD"]];
 const LOOK_MODE = { smooth: 0, sharp: 1, crt: 2, lcd: 3 };
@@ -189,6 +194,14 @@ const pushPrefs = () => {
 };
 const save = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } if (PREF.test(k)) pushPrefs(); };
 
+export const ICE = [{ urls: "stun:stun.l.google.com:19302" }];
+/** Waits until a peer connection has gathered its addresses (or 3 s), so one offer/answer carries them. */
+export const iceGathered = (pc) => new Promise((resolve) => {
+  if (pc.iceGatheringState === "complete") { resolve(); return; }
+  const t = setTimeout(resolve, 3000);
+  pc.addEventListener("icegatheringstatechange", () => { if (pc.iceGatheringState === "complete") { clearTimeout(t); resolve(); } });
+});
+
 // Menu navigation by controller: the nearest button in a direction.
 const menuButtons = () => [...document.querySelectorAll(".nxe-card button:not(:disabled)")];
 const moveFocus = (dir) => {
@@ -243,7 +256,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   const [rewinding, setRewinding] = useState(false);
   const [slots, setSlots] = useState(null);
   const [slot, setSlot] = useState(Number(load("nx_engine_slot", "1")) || 1);
-  const [look, setLook] = useState(() => load(`nx_engine_look_${plat}`, engine.ready?.gpu ? "smooth" : "sharp"));
+  const [look, setLook] = useState(() => load(`nx_engine_look_${plat}`, engine.ready?.gpu || engine.ready?.capture ? "smooth" : "sharp"));
   const [stats, setStats] = useState(load("nx_engine_stats", "0") === "1");
   const [runahead, setRunahead] = useState(Number(load(`nx_engine_runahead_${plat}`, "0")) || 0);
   const [rewindOn, setRewindOn] = useState(load("nx_engine_rewind", "1") === "1");
@@ -253,6 +266,9 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   const [keymap, setKeymap] = useState(st.current.keymap);
   const [listening, setListening] = useState(null);
   const [versions, setVersions] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [share, setShare] = useState(null);
+  const [stuck, setStuck] = useState(false);
   const lookRef = useRef(look);
   lookRef.current = look;
   const prefs = useRef({});
@@ -306,6 +322,9 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         URL.revokeObjectURL(url);
         node = new AudioWorkletNode(ctx, "nx-sound", { outputChannelCount: [2] });
         node.connect(ctx.destination);
+        // The same sound for another device (play from another device).
+        S.audioDest = ctx.createMediaStreamDestination();
+        node.connect(S.audioDest);
         S.worklet = node;
         setPre();
         node.port.onmessage = (e) => {
@@ -345,13 +364,18 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
     ws.onmessage = (e) => {
       if (typeof e.data === "string") {
         let m; try { m = JSON.parse(e.data); } catch { return; }
-        if (m.type === "ready") { S.info = m.info; setInfo(m.info); }
+        if (m.type === "ready") {
+          S.info = m.info; setInfo(m.info);
+          // The battery save came from another device (it was newer).
+          if (m.info?.saveFrom && !S.toldSaveFrom) { S.toldSaveFrom = true; setTimeout(() => flash(`Your save came from ${m.info.saveFrom.device ?? "another device"} (it was newer)${m.info.saveFrom.backup ? "; this PC's copy is kept as a backup" : ""}`), 1200); }
+        }
         else if (m.type === "geometry") { S.info = { ...S.info, ...m }; setInfo((i) => ({ ...i, ...m })); }
         else if (m.type === "status") { setStatus(m); S.nativeCount = m.pads ?? 0; }
         else if (m.type === "pads") { if (m.native > S.nativeCount) flash("Controller connected"); else if (m.native < S.nativeCount) flash("Controller disconnected"); S.nativeCount = m.native; }
         else if (m.type === "saved") { flash(`Saved to slot ${m.slot}`); send({ t: "slots" }); }
         else if (m.type === "synced") { flash(`Slot ${m.slot} is on your account too`); send({ t: "slots" }); }
         else if (m.type === "syncError") flash(m.message);
+        else if (m.type === "deleted") flash(`Slot ${m.slot} deleted`);
         else if (m.type === "loaded") flash(m.version ? `Loaded an earlier save of slot ${m.slot}` : `Loaded slot ${m.slot}${m.from === "host" ? " (from your account)" : ""}`);
         else if (m.type === "slots") setSlots(m.slots);
         else if (m.type === "versions") setVersions({ slot: m.slot, list: m.versions ?? [] });
@@ -367,6 +391,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         else if (m.type === "ff") { if (m.on) flash(`Fast-forward${prefs.current.ffSpeed ? ` ${prefs.current.ffSpeed}×` : ""}`); }
         else if (m.type === "rumble") S.rumble[m.port] = { strong: m.strong / 65535, weak: m.weak / 65535, at: 0 };
         else if (m.type === "error") flash(m.message);
+        else if (m.type === "stuck") setStuck(!!m.stuck);
         else if (m.type === "exit") { S.exited = true; }
         return;
       }
@@ -500,6 +525,13 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
           } else if (r.strong + r.weak === 0 && r.at) { r.at = 0; g.vibrationActuator.reset?.().catch?.(() => {}); }
         }
       });
+      // The other device's controls (play from another device), on their port.
+      if (S.remote) {
+        const rp = S.remotePort ?? 1;
+        const cur = ports.get(rp) ?? { b: 0, a: [0, 0, 0, 0], tr: [0, 0] };
+        const r = S.remote;
+        ports.set(rp, { b: cur.b | (r.b | 0), a: cur.a.map((v, i) => v || (r.a?.[i] | 0)), tr: [Math.max(cur.tr[0], r.g?.[0] | 0), Math.max(cur.tr[1], r.g?.[1] | 0)] });
+      }
       for (let port = 0; port < 8; port++) {
         const p = ports.get(port) ?? { b: 0, a: [0, 0, 0, 0], tr: [0, 0] };
         let b = p.b;
@@ -612,6 +644,73 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   // Full screen as the game opens (browsers allow it right after the Play click).
   useEffect(() => { box.current?.requestFullscreen?.().catch(() => {}); }, []);
 
+  // ── Play from another device ─────────────────────────────────────────
+  const stopShare = useCallback(() => {
+    const S = st.current;
+    if (S.pc) {
+      // Tell the other device first (the channel drops messages, so a few
+      // times): closing alone only reaches it when its connection times out.
+      const pc = S.pc, dc = S.dc;
+      try { if (dc?.readyState === "open") for (let i = 0; i < 3; i++) dc.send('{"t":"bye"}'); } catch { /* closing */ }
+      setTimeout(() => { try { pc.close(); } catch { /* closed */ } }, 150);
+      S.pc = null; S.dc = null;
+    }
+    if (S.shareCode) { fetch(`/api/rtc/rooms/${S.shareCode}`, { method: "DELETE", headers: { Authorization: `Bearer ${token()}` } }).catch(() => {}); S.shareCode = null; }
+    S.remote = null;
+    setShare(null);
+  }, []);
+  const startShare = useCallback(async (anyone) => {
+    stopShare();
+    const S = st.current;
+    const headers = { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" };
+    try {
+      const room = await fetch("/api/rtc/rooms", { method: "POST", headers, body: JSON.stringify({ anyone, game: game.title }) }).then((r) => r.json());
+      if (!room.code) throw new Error(room.error ?? "no code");
+      const pc = new RTCPeerConnection({ iceServers: ICE });
+      S.pc = pc;
+      S.shareCode = room.code;
+      const stream = canvas.current.captureStream(60);
+      const video = stream.getVideoTracks()[0];
+      if (video) { video.contentHint = "motion"; pc.addTrack(video, stream); }
+      const audio = S.audioDest?.stream.getAudioTracks()[0];
+      if (audio) pc.addTrack(audio, stream);
+      const dc = pc.createDataChannel("controls", { ordered: false, maxRetransmits: 0 });
+      S.dc = dc;
+      dc.onmessage = (e) => { try { const m = JSON.parse(e.data); if (m.t === "in") S.remote = { b: m.b | 0, a: m.a ?? [0, 0, 0, 0], g: m.g ?? [0, 0] }; } catch { /* not ours */ } };
+      dc.onclose = () => { S.remote = null; };
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (S.pc !== pc) return;
+        setShare((x) => x && { ...x, status: state });
+        if (state === "connected") flash("The other device is connected");
+        if (state === "failed" || state === "disconnected" || state === "closed") S.remote = null;
+      };
+      await pc.setLocalDescription(await pc.createOffer());
+      await iceGathered(pc);
+      // Smooth over sharp: keep 60 frames a second, up to 12 Mbit/s.
+      for (const sender of pc.getSenders()) {
+        if (sender.track?.kind !== "video") continue;
+        const params = sender.getParameters();
+        params.encodings = [{ ...(params.encodings?.[0] ?? {}), maxBitrate: 12_000_000, maxFramerate: 60 }];
+        params.degradationPreference = "maintain-framerate";
+        sender.setParameters(params).catch(() => {});
+      }
+      await fetch(`/api/rtc/rooms/${room.code}/offer`, { method: "PUT", headers, body: JSON.stringify({ sdp: pc.localDescription.sdp }) });
+      setShare({ code: room.code, anyone, status: "waiting", link: `${location.origin}/?play=${room.code}` });
+      while (S.pc === pc) {
+        const r = await fetch(`/api/rtc/rooms/${room.code}/answer`, { headers });
+        if (S.pc !== pc) break;
+        if (r.status === 200) { const { sdp } = await r.json(); await pc.setRemoteDescription({ type: "answer", sdp }); setShare((x) => x && { ...x, status: "connecting" }); break; }
+        if (r.status !== 204) { setShare((x) => x && { ...x, status: "expired" }); break; }
+      }
+    } catch (e) {
+      flash(`Couldn't share the game: ${e.message}`);
+      stopShare();
+    }
+  }, [game.title, flash, stopShare]);
+  const chooseRemotePort = (n) => { st.current.remotePort = n; setShare((x) => x && { ...x, port: n }); };
+  useEffect(() => () => stopShare(), [stopShare]);
+
   const quit = useCallback(() => {
     st.current.exited = true;
     send({ t: "quit" });
@@ -621,7 +720,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   }, [send, onExit]);
   const fullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : box.current?.requestFullscreen())?.catch?.(() => {});
   const chooseLook = (k) => { setLook(k); save(`nx_engine_look_${plat}`, k); };
-  const chooseSlot = (n) => { setSlot(n); save("nx_engine_slot", String(n)); send({ t: "slot", n }); };
+  const chooseSlot = (n) => { setSlot(n); setConfirmDelete(false); save("nx_engine_slot", String(n)); send({ t: "slot", n }); };
   const chooseRunahead = (n) => { setRunahead(n); save(`nx_engine_runahead_${plat}`, String(n)); send({ t: "runahead", frames: n }); };
   const chooseRewind = (on) => { setRewindOn(on); save("nx_engine_rewind", on ? "1" : "0"); send({ t: "rewinding", enabled: on }); };
   const chooseFf = (x) => { setFfSpeed(x); save("nx_engine_ffspeed", String(x)); send({ t: "ffspeed", x }); };
@@ -631,6 +730,8 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   const keysFor = (id) => Object.entries(keymap).filter(([, v]) => v === id).map(([c]) => keyName(c));
   const raMax = status?.runahead?.max ?? 0;
   const rw = status?.rewind;
+  // Another emulator's window (capture bridge): it saves, rewinds and plays sound itself.
+  const capture = !!info?.capture;
 
   return (
     <div ref={box} className={`nxe ${idle && !menu ? "idle" : ""} ${menu ? "menu" : ""}`} role="application" aria-label={`${game.title}, playing in SaveState`}>
@@ -644,22 +745,37 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         <button className="nxe-ib" onClick={quit} title="Close the game"><Icon name="x" /></button>
       </div>
       {rewinding && !menu && <div className="nxe-rw">◀◀ Rewinding</div>}
+      {share?.status === "connected" && !menu && !rewinding && <div className="nxe-rw">Also on another device</div>}
       {stats && status && !menu && (
         <div className="nxe-stats" style={{ position: "absolute", left: 12, bottom: 12, background: "rgba(0,0,0,.6)", padding: "6px 9px", borderRadius: 10 }}>
-          <span>{status.fps} fps · {status.frameMs} ms/frame{status.runahead?.frames ? ` · run-ahead ${status.runahead.frames}${status.runahead.copies === 2 ? " (2 copies)" : ""}` : ""}</span>
-          <span>sound {status.audioFillMs} / {status.audioTargetMs} ms{status.dropped ? ` · ${status.dropped} skipped` : ""}</span>
+          {capture
+            ? <span>{status.fps} pictures/s · {status.width}×{status.height}{status.dropped ? ` · ${status.dropped} skipped` : ""}{status.pads ? ` · ${status.pads} virtual controller${status.pads > 1 ? "s" : ""}` : ""}</span>
+            : <>
+              <span>{status.fps} fps · {status.frameMs} ms/frame{status.runahead?.frames ? ` · run-ahead ${status.runahead.frames}${status.runahead.copies === 2 ? " (2 copies)" : ""}` : ""}</span>
+              <span>sound {status.audioFillMs} / {status.audioTargetMs} ms{status.dropped ? ` · ${status.dropped} skipped` : ""}</span>
+            </>}
           {rw?.on && <span>rewind {rw.seconds} s kept ({rw.megabytes} MB)</span>}
         </div>
       )}
-      {soundBlocked && <button className="nxe-chip" onClick={() => setSoundBlocked(false)}>Click or press a key for sound</button>}
+      {soundBlocked && !capture && <button className="nxe-chip" onClick={() => setSoundBlocked(false)}>Click or press a key for sound</button>}
       {toast && <div className="nxe-toast">{toast}</div>}
+      {stuck && (
+        <div className="nxe-stuck" role="alert">
+          <span>The game stopped responding. It may come back by itself; if not, close it (saves made before this are safe).</span>
+          <button className="nxe-btn" onClick={quit}><Icon name="x" /> Close game</button>
+        </div>
+      )}
       {menu && (
         <div className="nxe-menu" onClick={(e) => { if (e.target === e.currentTarget) setMenu(false); }}>
           {!keysPanel ? (
             <div className="nxe-card">
               <h3>{game.title}</h3>
               <p>{info?.core ?? "SaveState Engine"}{info?.gpu ? ` · ${info.gpu.replace(/\/PCIe\/SSE2/, "")}` : ""}</p>
-              <button className="nxe-btn primary" onClick={() => setMenu(false)} autoFocus>Resume</button>
+              <button className="nxe-btn primary" onClick={() => setMenu(false)} autoFocus>{capture ? "Back to the game" : "Resume"}</button>
+              {capture && (
+                <p>{info?.core ?? "The emulator"} is running this game; SaveState shows it here. Save and load in the game (or with {info?.core ?? "the emulator"}'s own keys); its sound plays on this PC. Your controllers work with it directly{info?.virtualControllers ? ", and the keyboard and other controllers reach it as a virtual Xbox controller" : ""}.</p>
+              )}
+              {!capture && <>
               <h4>Save slots</h4>
               <div className="nxe-slots" role="group" aria-label="Save slot">
                 {[1, 2, 3, 4].map((n) => {
@@ -678,6 +794,9 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
                 <button className="nxe-btn" disabled={status?.canSave === false} onClick={() => { send({ t: "save", slot }); setMenu(false); }}><Icon name="down" /> Save to slot {slot}</button>
                 <button className="nxe-btn" disabled={status?.canSave === false || !slots?.find((x) => x.slot === slot)?.saved} onClick={() => { send({ t: "load", slot }); setMenu(false); }}><Icon name="refresh" /> Load slot {slot}</button>
                 {(slots?.find((x) => x.slot === slot)?.versions ?? 0) > 1 && <button className="nxe-btn" onClick={() => send({ t: "versions", slot })}><Icon name="cloud" /> Earlier saves</button>}
+                {slots?.find((x) => x.slot === slot)?.saved && (confirmDelete
+                  ? <button className="nxe-btn" onClick={() => { send({ t: "delete", slot }); setConfirmDelete(false); }}><Icon name="trash" /> Yes, delete slot {slot}{slots.find((x) => x.slot === slot)?.onHost ? " (here and on your account)" : ""}</button>
+                  : <button className="nxe-btn" onClick={() => setConfirmDelete(true)}><Icon name="trash" /> Delete slot {slot}</button>)}
                 <button className="nxe-btn" onClick={() => { send({ t: "reset" }); setMenu(false); }}><Icon name="bolt" /> Restart</button>
                 <button className="nxe-btn" onClick={fullscreen}><Icon name="ext" /> Full screen</button>
               </div>
@@ -692,10 +811,12 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
                   ))}
                 </div>
               )}
+              </>}
               <h4>Look</h4>
               <div className="nxe-row" role="group" aria-label="Look">
                 {LOOKS.map(([k, label]) => <button key={k} className={`nxe-btn ${look === k ? "on" : ""}`} onClick={() => chooseLook(k)}>{label}</button>)}
               </div>
+              {!capture && <>
               <h4>Play</h4>
               <div className="nxe-row" role="group" aria-label="Rewind">
                 <button className={`nxe-btn ${rewindOn ? "on" : ""}`} disabled={rw && !rw.available} onClick={() => chooseRewind(!rewindOn)}>
@@ -713,11 +834,30 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
                 {[[2, "2×"], [4, "4×"], [0, "As fast as it goes"]].map(([x, label]) => <button key={x} className={`nxe-btn ${ffSpeed === x ? "on" : ""}`} onClick={() => chooseFf(x)}>Fast-forward {label}</button>)}
               </div>
               <p>Run-ahead removes frames of the game's own input lag (it shows what your button does a frame or two sooner); it's offered when this PC can afford it. Rewind keeps the last minutes of play in memory.</p>
+              <h4>Another device</h4>
+              {!share ? (
+                <div className="nxe-grid">
+                  <button className="nxe-btn" onClick={() => startShare(false)}><Icon name="link" /> Play on my phone or tablet</button>
+                  <button className="nxe-btn" onClick={() => startShare(true)}><Icon name="users" /> Let a friend play</button>
+                </div>
+              ) : (
+                <div className="nxe-vers">
+                  {share.status === "connected" ? <p>Connected: the other device sees and hears the game, and its controls are player {(share.port ?? 1) + 1}.</p>
+                    : share.status === "expired" ? <p>That code expired. Stop and share again.</p>
+                    : <p>On the other device, open <b style={{ color: "#fff" }}>{share.link.replace(/^https?:[/][/]/, "")}</b> (code <b style={{ color: "#fff", letterSpacing: ".12em" }}>{share.code}</b>), signed in {share.anyone ? "as anyone" : "as you"}.</p>}
+                  <div className="nxe-row" role="group" aria-label="Their controls">
+                    {[0, 1].map((n) => <button key={n} className={`nxe-btn ${(share.port ?? 1) === n ? "on" : ""}`} onClick={() => chooseRemotePort(n)}>Their controls: player {n + 1}</button>)}
+                  </div>
+                  <button className="nxe-btn" onClick={() => { navigator.clipboard?.writeText(share.link).then(() => flash("Link copied")).catch(() => {}); }}><Icon name="copy" /> Copy the link</button>
+                  <button className="nxe-btn" onClick={stopShare}><Icon name="x" /> Stop sharing</button>
+                </div>
+              )}
               <h4>Controls</h4>
               <div className="nxe-row" role="group" aria-label="Button layout">
                 <button className={`nxe-btn ${!labels ? "on" : ""}`} onClick={() => chooseLabels(false)}>Buttons by position</button>
                 <button className={`nxe-btn ${labels ? "on" : ""}`} onClick={() => chooseLabels(true)}>Buttons by label</button>
               </div>
+              </>}
               <p>
                 {status?.pads ? `${status.pads} controller${status.pads > 1 ? "s" : ""} read directly. ` : ""}
                 Controllers: Guide or Back with RB save, LB load, Start menu, left/right change slot, hold RT fast-forward, hold LT rewind; in this menu the d-pad moves, A chooses, B goes back. Keyboard: Esc menu, F2 save, F4 load, hold Tab fast-forward, hold ` rewind.

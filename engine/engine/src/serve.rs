@@ -71,11 +71,13 @@ pub struct ServeConfig {
     pub idle_exit: Duration,
 }
 
-enum Command {
+pub(crate) enum Command {
     Input(usize, PortInput),
     Pause(bool),
     Reset,
     Save(u32),
+    /// Removes a slot here and on the host.
+    Delete(u32),
     /// A slot; a version to load an earlier one from the host.
     Load(u32, Option<u32>),
     /// The host's earlier versions of a slot.
@@ -100,7 +102,7 @@ enum Command {
 }
 
 #[derive(Default)]
-struct Outbox {
+pub(crate) struct Outbox {
     /// Header + pixels of the newest picture not sent yet.
     video: Vec<u8>,
     video_fresh: bool,
@@ -109,29 +111,83 @@ struct Outbox {
     pongs: Vec<Vec<u8>>,
     /// The writing half of the current page's connection.
     stream: Option<TcpStream>,
-    generation: u64,
+    pub(crate) generation: u64,
     /// The `ready` message, sent first to every page that connects.
     hello: Option<String>,
 }
 
-struct Shared {
+pub(crate) struct Shared {
     out: Mutex<Outbox>,
-    wake: Condvar,
-    quit: AtomicBool,
-    dropped: AtomicU64,
+    pub(crate) wake: Condvar,
+    pub(crate) quit: AtomicBool,
+    pub(crate) dropped: AtomicU64,
     /// Shortest gap between pictures sent, in microseconds (from the page's refresh rate).
-    min_video_gap_us: AtomicU64,
+    pub(crate) min_video_gap_us: AtomicU64,
+    /// When the work thread last came round its loop (ms since `started`);
+    /// the watchdog in `host` reads it.
+    beat_ms: AtomicU64,
+    started: Instant,
+    /// The page asked to close (seen by the reader, even if the work thread is stuck).
+    quit_asked: AtomicBool,
 }
 
 impl Shared {
-    fn out(&self) -> MutexGuard<'_, Outbox> {
+    pub(crate) fn out(&self) -> MutexGuard<'_, Outbox> {
         self.out.lock().unwrap_or_else(|e| e.into_inner())
     }
-    fn text(&self, v: Value) {
+    /// Hands a picture to the writer (replacing one not sent yet).
+    pub(crate) fn picture(&self, fmt: u8, bottom_up: bool, width: u32, height: u32, frame: u64, rows: impl FnOnce(&mut Vec<u8>)) {
+        let mut o = self.out();
+        if o.video_fresh {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        o.video.clear();
+        o.video.extend_from_slice(&[b'V', fmt, bottom_up as u8, 0]);
+        o.video.extend_from_slice(&width.to_le_bytes());
+        o.video.extend_from_slice(&height.to_le_bytes());
+        o.video.extend_from_slice(&frame.to_le_bytes());
+        o.video.extend_from_slice(&[0, 0, 0, 0]);
+        rows(&mut o.video);
+        o.video_fresh = true;
+        drop(o);
+        self.wake.notify_one();
+    }
+    /// Hands sound to the writer (interleaved stereo i16 at 48 kHz).
+    pub(crate) fn sound(&self, samples: &[i16]) {
+        let mut o = self.out();
+        // A page that stopped reading must not grow this forever (~1 s).
+        let queued: usize = o.audio.iter().map(Vec::len).sum();
+        if queued < OUTPUT_RATE as usize * 2 {
+            o.audio.push_back(samples.to_vec());
+        }
+        drop(o);
+        self.wake.notify_one();
+    }
+    /// The `ready` message every page gets first.
+    pub(crate) fn set_hello(&self, info: &Value) {
+        self.out().hello = Some(json!({ "type": "ready", "info": info }).to_string());
+    }
+    pub(crate) fn text(&self, v: Value) {
         self.out().text.push_back(v.to_string());
         self.wake.notify_one();
     }
+    /// The work thread is alive: called once per pass of its loop.
+    pub(crate) fn beat(&self) {
+        self.beat_ms.store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+    fn since_beat(&self) -> Duration {
+        Duration::from_millis((self.started.elapsed().as_millis() as u64).saturating_sub(self.beat_ms.load(Ordering::Relaxed)))
+    }
 }
+
+/// The page is told the game stopped responding after this long without a
+/// pass of the work thread's loop (a core stuck inside `retro_run`, an
+/// emulator stuck); it comes back on its own if the core recovers.
+const STUCK_AFTER: Duration = Duration::from_secs(20);
+/// Asked to close while stuck: the process ends after this long.
+const STUCK_QUIT_AFTER: Duration = Duration::from_secs(8);
+/// Stuck this long: the process ends even with nobody asking (nothing can save it).
+const STUCK_GIVE_UP: Duration = Duration::from_secs(300);
 
 fn say(line: Value) {
     let mut out = std::io::stdout().lock();
@@ -140,28 +196,46 @@ fn say(line: Value) {
 }
 
 pub fn run(cfg: ServeConfig) -> i32 {
-    let listener = match TcpListener::bind(("127.0.0.1", cfg.port)) {
+    let (session_cfg, states_dir, game_name, idle_exit) = (cfg.session.clone(), cfg.states_dir.clone(), cfg.game_name.clone(), cfg.idle_exit);
+    host(cfg.port, cfg.key.clone(), cfg.origins.clone(), move |shared, cmd_rx, ready_tx| emulation(session_cfg, states_dir, game_name, idle_exit, shared, cmd_rx, ready_tx))
+}
+
+/// Serves one page over a local WebSocket while `work` (on its own thread)
+/// produces pictures and sound: binds, prints `{"listening":port}`, waits
+/// for `work` to report `ready` (printed) or an error, accepts pages that
+/// present `key` (and an allowed origin), and ends the process once `work`
+/// has set `quit`. Used by `serve` (a libretro game) and `capture` (another
+/// emulator's window).
+pub(crate) fn host<F>(port: u16, key: String, origins: Vec<String>, work: F) -> i32
+where
+    F: FnOnce(Arc<Shared>, Receiver<Command>, Sender<Result<Value, String>>) + Send + 'static,
+{
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
         Ok(l) => l,
         Err(e) => {
-            say(json!({ "error": format!("can't listen on 127.0.0.1:{}: {e}", cfg.port) }));
+            say(json!({ "error": format!("can't listen on 127.0.0.1:{port}: {e}") }));
             return 1;
         }
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     say(json!({ "listening": port }));
 
-    let shared = Arc::new(Shared { out: Mutex::new(Outbox::default()), wake: Condvar::new(), quit: AtomicBool::new(false), dropped: AtomicU64::new(0), min_video_gap_us: AtomicU64::new(0) });
+    let shared = Arc::new(Shared {
+        out: Mutex::new(Outbox::default()),
+        wake: Condvar::new(),
+        quit: AtomicBool::new(false),
+        dropped: AtomicU64::new(0),
+        min_video_gap_us: AtomicU64::new(0),
+        beat_ms: AtomicU64::new(0),
+        started: Instant::now(),
+        quit_asked: AtomicBool::new(false),
+    });
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
     let (ready_tx, ready_rx) = mpsc::channel::<Result<Value, String>>();
 
     let emu = {
         let shared = shared.clone();
-        let (session_cfg, states_dir, game_name, idle_exit) = (cfg.session.clone(), cfg.states_dir.clone(), cfg.game_name.clone(), cfg.idle_exit);
-        std::thread::Builder::new()
-            .name("emulation".into())
-            .stack_size(16 << 20)
-            .spawn(move || emulation(session_cfg, states_dir, game_name, idle_exit, shared, cmd_rx, ready_tx))
-            .expect("emulation thread")
+        std::thread::Builder::new().name("emulation".into()).stack_size(16 << 20).spawn(move || work(shared, cmd_rx, ready_tx)).expect("emulation thread")
     };
     match ready_rx.recv() {
         Ok(Ok(info)) => say(json!({ "ready": info })),
@@ -185,11 +259,38 @@ pub fn run(cfg: ServeConfig) -> i32 {
     };
 
     let _ = listener.set_nonblocking(true);
+    shared.beat();
+    let mut stuck = false;
+    let mut quit_asked_at: Option<Instant> = None;
     while !shared.quit.load(Ordering::SeqCst) {
+        // Watchdog: a core that never returns from a frame can't save or
+        // close itself, so this thread tells the page and ends the process.
+        let since = shared.since_beat();
+        if since > STUCK_AFTER && !stuck {
+            stuck = true;
+            crate::warn!("the game stopped responding ({} s without a frame)", since.as_secs());
+            shared.text(json!({ "type": "stuck", "stuck": true }));
+        } else if since < STUCK_AFTER && stuck {
+            stuck = false;
+            crate::info!("the game is responding again");
+            shared.text(json!({ "type": "stuck", "stuck": false }));
+        }
+        if shared.quit_asked.load(Ordering::Relaxed) && quit_asked_at.is_none() {
+            quit_asked_at = Some(Instant::now());
+        }
+        let asked_long_ago = quit_asked_at.is_some_and(|t| t.elapsed() > STUCK_QUIT_AFTER);
+        if (asked_long_ago && since > STUCK_QUIT_AFTER) || since > STUCK_GIVE_UP {
+            crate::error!("ending the engine: the game stopped responding {} s ago and can't be saved", since.as_secs());
+            shared.text(json!({ "type": "error", "message": "The game stopped responding and was closed. Your saves from before are safe." }));
+            shared.wake.notify_all();
+            std::thread::sleep(Duration::from_millis(300));
+            let _ = std::io::stdout().flush();
+            unsafe { TerminateProcess(GetCurrentProcess(), 3) };
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 let _ = stream.set_nonblocking(false);
-                connect(stream, &cfg, &shared, &cmd_tx);
+                connect(stream, &key, &origins, &shared, &cmd_tx);
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(40)),
             Err(_) => std::thread::sleep(Duration::from_millis(200)),
@@ -216,7 +317,7 @@ fn same_key(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn connect(mut stream: TcpStream, cfg: &ServeConfig, shared: &Arc<Shared>, cmd_tx: &Sender<Command>) {
+fn connect(mut stream: TcpStream, key_wanted: &str, origins: &[String], shared: &Arc<Shared>, cmd_tx: &Sender<Command>) {
     let (req, key) = match ws::read_request(&mut stream) {
         Ok(r) => r,
         Err(_) => {
@@ -225,11 +326,11 @@ fn connect(mut stream: TcpStream, cfg: &ServeConfig, shared: &Arc<Shared>, cmd_t
         }
     };
     let given = req.path.split_once('?').map(|(_, q)| q).unwrap_or("").split('&').find_map(|kv| kv.strip_prefix("key=")).unwrap_or("");
-    if !req.path.starts_with("/session") || !same_key(given, &cfg.key) {
+    if !req.path.starts_with("/session") || !same_key(given, key_wanted) {
         ws::reject(&mut stream, "403 Forbidden");
         return;
     }
-    if !cfg.origins.is_empty() && !req.origin.as_deref().is_some_and(|o| cfg.origins.iter().any(|a| a == o)) {
+    if !origins.is_empty() && !req.origin.as_deref().is_some_and(|o| origins.iter().any(|a| a == o)) {
         ws::reject(&mut stream, "403 Forbidden");
         return;
     }
@@ -268,6 +369,9 @@ fn read_loop(mut stream: TcpStream, generation: u64, shared: Arc<Shared>, cmd_tx
         match msg {
             Ok(ws::Message::Text(t)) => {
                 if let Some(c) = parse_command(&t) {
+                    if matches!(c, Command::Quit) {
+                        shared.quit_asked.store(true, Ordering::Relaxed);
+                    }
                     if cmd_tx.send(c).is_err() {
                         return;
                     }
@@ -302,6 +406,7 @@ fn parse_command(text: &str) -> Option<Command> {
         "resume" => Command::Pause(false),
         "reset" => Command::Reset,
         "save" => Command::Save(n("slot").unwrap_or(0.0) as u32),
+        "delete" => Command::Delete(n("slot").unwrap_or(0.0) as u32),
         "load" => Command::Load(n("slot").unwrap_or(0.0) as u32, n("version").map(|v| v as u32)),
         "versions" => Command::Versions(n("slot").unwrap_or(1.0) as u32),
         "ff" => Command::FastForward(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
@@ -448,9 +553,9 @@ fn save_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32, s
             let (tw, th, small) = shrink(w, h, &rgba, 200);
             let _ = write_png(&thumb_path, tw, th, &small);
         }
-        // Up to the host in the background (states up to 48 MB; Dolphin's 92 MB stay on this PC).
+        // Up to the host in the background (sync.rs applies the size limit after compressing).
         if let Some(sync) = s.sync() {
-            if state.len() <= 48 << 20 {
+            if state.len() <= 512 << 20 {
                 let thumb = std::fs::read(&thumb_path).unwrap_or_default();
                 let (shared, cache, sync2) = (shared.clone(), cache.clone(), sync.clone());
                 sync.push_state(slot, state.clone(), thumb, move |r| match r {
@@ -603,6 +708,10 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
     session.keep_core_loaded();
     let mut native = Native::open();
     let mut info = ready_info(&session, &game_name);
+    // Tell the person when their battery save came from another device.
+    if let Some(p) = session.sram_pull.as_ref().filter(|p| p.from_host) {
+        info["saveFrom"] = json!({ "device": p.device, "backup": p.backup });
+    }
     info["nativeControllers"] = json!(native.available());
     info["guide"] = json!(native.guide);
     shared.out().hello = Some(json!({ "type": "ready", "info": info }).to_string());
@@ -679,6 +788,33 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             }
         }
         Command::Slot(n) => play.slot = n,
+        Command::Delete(slot) => {
+            let path = slot_path(&states_dir, &game_name, slot);
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path.with_extension(format!("state{slot}.png")));
+            host_cache.lock().unwrap_or_else(|e| e.into_inner()).retain(|h| h.slot != slot);
+            let shared2 = shared.clone();
+            let (dir, game) = (states_dir.clone(), game_name.clone());
+            match s.sync() {
+                Some(sync) => {
+                    let cache = host_cache.clone();
+                    let _ = std::thread::Builder::new().name("sync-delete".into()).spawn(move || {
+                        let r = sync.delete_state(slot);
+                        let list = sync.list_states().unwrap_or_default();
+                        shared2.text(list_slots(&dir, &game, &list));
+                        *cache.lock().unwrap_or_else(|e| e.into_inner()) = list;
+                        shared2.text(match r {
+                            Ok(()) => json!({ "type": "deleted", "slot": slot }),
+                            Err(e) => json!({ "type": "error", "message": format!("Deleted on this PC; not on your account yet ({e})") }),
+                        });
+                    });
+                }
+                None => {
+                    shared2.text(list_slots(&dir, &game, &[]));
+                    shared2.text(json!({ "type": "deleted", "slot": slot }));
+                }
+            }
+        }
         Command::Slots => {
             // This PC's slots at once; again with the host's once it answers.
             let cached = host_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -756,6 +892,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
     };
 
     loop {
+        shared.beat();
         while let Ok(c) = cmd_rx.try_recv() {
             handle(c, &mut session, &mut play, &mut rewind, &mut native);
         }
@@ -930,14 +1067,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             audio_out.clear();
             resampler.process(&audio_in, play.rate.adjust(), &mut audio_out);
             if !audio_out.is_empty() {
-                let mut o = shared.out();
-                // A page that stopped reading must not grow this forever (~1 s).
-                let queued: usize = o.audio.iter().map(Vec::len).sum();
-                if queued < OUTPUT_RATE as usize * 2 {
-                    o.audio.push_back(audio_out.clone());
-                }
-                drop(o);
-                shared.wake.notify_one();
+                shared.sound(&audio_out);
             }
         }
 
@@ -1081,9 +1211,18 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             (stat_at, stat_frames, stat_run, stat_late) = (Instant::now(), 0, Duration::ZERO, 0);
         }
 
-        // The battery save, every 30 s when it changed (a crash or a forced stop loses at most that).
+        // The battery save, every 30 s when it changed (a crash or a forced stop loses at most that);
+        // states that didn't reach the host are sent again.
         if sram_at.elapsed() >= Duration::from_secs(30) {
             sram_at = Instant::now();
+            if let Some(sync) = session.sync() {
+                let shared = shared.clone();
+                sync.retry_pending(move |slot, r| {
+                    if r.is_ok() {
+                        shared.text(json!({ "type": "synced", "slot": slot, "version": r.ok().map(|v| v["version"].clone()) }));
+                    }
+                });
+            }
             let now_hash = session.memory(libretro_sys::RETRO_MEMORY_SAVE_RAM).map(fnv);
             if now_hash != sram_hash {
                 sram_hash = now_hash;

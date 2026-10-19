@@ -30,12 +30,31 @@ pub struct HostSlot {
     pub versions: u32,
 }
 
+/// What happened to the battery save before the game started.
+#[derive(Clone, Debug, Default)]
+pub struct SramPull {
+    pub message: String,
+    /// The host's copy was used (it was newer, or this PC had none).
+    pub from_host: bool,
+    /// The PC (or device) the host's copy came from.
+    pub device: Option<String>,
+    /// This PC's copy was kept as `.srm.bak`.
+    pub backup: bool,
+}
+
+/// A state (and picture) that didn't reach the host, sent again later.
+type Pending = (Vec<u8>, Vec<u8>);
+
+/// Biggest compressed state the host keeps.
+pub const MAX_STATE: usize = 48 << 20;
+
 pub struct Sync {
     base: String,
     token: String,
     game: String,
     device: String,
     last_sram_crc: Mutex<Option<u32>>,
+    pending: Mutex<std::collections::HashMap<u32, Pending>>,
     agent: ureq::Agent,
 }
 
@@ -75,7 +94,7 @@ impl Sync {
             b = b.tls_connector(Arc::new(tls));
         }
         let device = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "PC".into());
-        Some(Arc::new(Self { base: base.trim_end_matches('/').to_string(), token: token.to_string(), game, device, last_sram_crc: Mutex::new(None), agent: b.build() }))
+        Some(Arc::new(Self { base: base.trim_end_matches('/').to_string(), token: token.to_string(), game, device, last_sram_crc: Mutex::new(None), pending: Mutex::new(Default::default()), agent: b.build() }))
     }
 
     fn url(&self, tail: &str) -> String {
@@ -115,30 +134,33 @@ impl Sync {
     // ── Battery saves ───────────────────────────────────────────────────
     /// Before the game starts: makes `local` the newer of this PC's and the
     /// host's battery save. Returns what happened, for the log.
-    pub fn pull_sram(&self, local: &Path) -> String {
+    pub fn pull_sram(&self, local: &Path) -> SramPull {
+        let said = |m: String| SramPull { message: m, ..Default::default() };
         let info = match self.get(&format!("/api/savefile/{}/info", self.game)).and_then(Self::json) {
             Ok(v) => v,
             Err(e) if e == "404" => {
                 // Nothing on the host yet: this PC's save goes up after the next save.
-                return "no battery save on the host yet".into();
+                return said("no battery save on the host yet".into());
             }
-            Err(e) => return format!("host not reachable ({e}); using this PC's battery save"),
+            Err(e) => return said(format!("host not reachable ({e}); using this PC's battery save")),
         };
         let host_crc = info["crc"].as_u64().unwrap_or(0) as u32;
         let host_at = info["savedAt"].as_u64().unwrap_or(0);
+        let device = info["device"].as_str().map(str::to_string);
         let local_bytes = std::fs::read(local).ok();
         if let Some(b) = &local_bytes {
             if crc32(b) == host_crc {
                 *self.last_sram_crc.lock().unwrap_or_else(|e| e.into_inner()) = Some(host_crc);
-                return "battery save matches the host".into();
+                return said("battery save matches the host".into());
             }
             if modified_ms(local).unwrap_or(0) >= host_at {
-                return "this PC's battery save is newer; it goes to the host after the next save".into();
+                return said("this PC's battery save is newer; it goes to the host after the next save".into());
             }
         }
         match self.get(&format!("/api/savefile/{}", self.game)).and_then(Self::body) {
             Ok(bytes) if !bytes.is_empty() => {
-                if local_bytes.is_some() {
+                let backup = local_bytes.is_some();
+                if backup {
                     let _ = std::fs::copy(local, local.with_extension("srm.bak"));
                 }
                 if let Some(dir) = local.parent() {
@@ -147,13 +169,13 @@ impl Sync {
                 let tmp = local.with_extension("srm.tmp");
                 if std::fs::write(&tmp, &bytes).and_then(|_| std::fs::rename(&tmp, local)).is_ok() {
                     *self.last_sram_crc.lock().unwrap_or_else(|e| e.into_inner()) = Some(crc32(&bytes));
-                    format!("battery save from the host ({} bytes)", bytes.len())
+                    SramPull { message: format!("battery save from the host ({} bytes)", bytes.len()), from_host: true, device, backup }
                 } else {
-                    "couldn't write the host's battery save; using this PC's".into()
+                    said("couldn't write the host's battery save; using this PC's".into())
                 }
             }
-            Ok(_) => "the host's battery save is empty; using this PC's".into(),
-            Err(e) => format!("couldn't fetch the host's battery save ({e}); using this PC's"),
+            Ok(_) => said("the host's battery save is empty; using this PC's".into()),
+            Err(e) => said(format!("couldn't fetch the host's battery save ({e}); using this PC's")),
         }
     }
 
@@ -191,18 +213,53 @@ impl Sync {
     // ── Save states ─────────────────────────────────────────────────────
     /// Sends a slot up (in the background): LZ4 + the slot's picture.
     /// `done` runs on that thread with the host's answer.
+    /// The host's size limit applies after compression: a 90 MB GameCube
+    /// state is mostly empty memory and compresses well under it. A state
+    /// that doesn't arrive is kept and sent again by `retry_pending`.
     pub fn push_state(self: &Arc<Self>, slot: u32, state: Vec<u8>, thumb: Vec<u8>, done: impl FnOnce(Result<Value, String>) + Send + 'static) {
         let me = self.clone();
         let _ = std::thread::Builder::new().name("sync-state".into()).spawn(move || {
             let packed = lz4_flex::compress_prepend_size(&state);
+            if packed.len() > MAX_STATE {
+                done(Err(format!("this game's saves are too big for your account ({} MB packed); they stay on this PC", packed.len() >> 20)));
+                return;
+            }
             let mut body = Vec::with_capacity(12 + thumb.len() + packed.len());
             body.extend_from_slice(b"SSST");
             body.extend_from_slice(&[1, 1, 0, 0]);
             body.extend_from_slice(&(thumb.len() as u32).to_le_bytes());
             body.extend_from_slice(&thumb);
             body.extend_from_slice(&packed);
-            done(me.put(&format!("/api/engine/states/{}/{slot}", me.game), &body));
+            let r = me.put(&format!("/api/engine/states/{}/{slot}", me.game), &body);
+            let mut pending = me.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if r.is_err() {
+                pending.insert(slot, (state, thumb));
+            } else {
+                pending.remove(&slot);
+            }
+            drop(pending);
+            done(r);
         });
+    }
+
+    /// Sends again the states that didn't reach the host (back online).
+    pub fn retry_pending(self: &Arc<Self>, done: impl Fn(u32, Result<Value, String>) + Send + std::marker::Sync + Clone + 'static) {
+        let waiting: Vec<(u32, Pending)> = self.pending.lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
+        for (slot, (state, thumb)) in waiting {
+            let d = done.clone();
+            self.push_state(slot, state, thumb, move |r| d(slot, r));
+        }
+    }
+
+    /// Deletes a slot (every version) from the host.
+    pub fn delete_state(&self, slot: u32) -> Result<(), String> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner()).remove(&slot);
+        self.agent
+            .delete(&self.url(&format!("/api/engine/states/{}/{slot}", self.game)))
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .call()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     /// The host's slots for this game.

@@ -7,6 +7,7 @@
 pub mod log;
 
 pub mod bios;
+pub mod capture;
 pub mod env;
 pub mod host;
 pub mod hw;
@@ -21,6 +22,7 @@ pub mod sync;
 pub mod timing;
 pub mod vfs;
 pub mod video;
+pub mod vigem;
 pub mod ws;
 
 pub use session::{Content, Session, SessionConfig};

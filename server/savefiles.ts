@@ -5,7 +5,7 @@
  * made on one device carries on on another.
  *
  *   GET  /api/savefile/:gameId        the save (bytes), X-Save-Crc / X-Saved-At headers; 404 if none
- *   GET  /api/savefile/:gameId/info   { crc, size, savedAt } or 404
+ *   GET  /api/savefile/:gameId/info   { crc, size, savedAt, device } or 404
  *   PUT  /api/savefile/:gameId        raw bytes (up to 8 MB) -> { crc, savedAt }
  *
  * Stored in the database (table save_files), so every host serving the site
@@ -47,9 +47,9 @@ export function registerSaveFiles(app: express.Express, deps: {
     const pool = deps.pool(); if (!pool) return res.status(503).json({ error: "Database not connected" });
     try {
       await table(pool);
-      const r = await pool.query("SELECT crc, size, saved_at FROM save_files WHERE user_id=$1 AND game_id=$2", [who.userId, gameIdOf(req)]);
+      const r = await pool.query("SELECT crc, size, saved_at, device FROM save_files WHERE user_id=$1 AND game_id=$2", [who.userId, gameIdOf(req)]);
       if (!r.rows[0]) return res.status(404).json({ error: "No save yet" });
-      res.json({ crc: Number(r.rows[0].crc), size: r.rows[0].size, savedAt: Number(r.rows[0].saved_at) });
+      res.json({ crc: Number(r.rows[0].crc), size: r.rows[0].size, savedAt: Number(r.rows[0].saved_at), device: r.rows[0].device ?? null });
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 

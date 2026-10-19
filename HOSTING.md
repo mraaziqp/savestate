@@ -940,7 +940,7 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
 ## SaveState Engine (games inside the page)
 
 SaveState's own libretro host (`engine/`, design and results in
-`SAVESTATE_ENGINE_SPEC.md`). With launcher v11, Play on a RetroArch-system
+`SAVESTATE_ENGINE_SPEC.md`). With launcher v11+, Play on a RetroArch-system
 game (NES to GameCube) runs the game in `savestate-engine.exe`, which streams
 it into the SaveState page over a local WebSocket; the page's player
 (`EnginePlayer.jsx`) draws it, plays its sound and sends the controls. If the
@@ -964,8 +964,6 @@ player's menu has "Open games in RetroArch instead".
   changes (`%LOCALAPPDATA%\NexusEmuClient\engine`; its log is `data\engine.log`).
 - Self-check on this PC: `savestate-engine selftest --core <core.dll> --game <file>`
   prints a JSON report (picture, save-state integrity, speed).
-- The engine uses RetroArch's cores, `system` folder (BIOS) and `saves` folder,
-  so battery saves are shared with RetroArch.
 - Playing: Xbox-type controllers are read by the engine (rumble included);
   others and the keyboard through the page. Guide or Back with RB save, LB
   load, Start menu, RT fast-forward, LT rewind; keyboard Esc menu, F2/F4
@@ -973,6 +971,32 @@ player's menu has "Open games in RetroArch instead".
   pictures, rewind, run-ahead (when the PC can afford it), fast-forward speed,
   button layout and keyboard keys. `selftest` also measures rewind and
   run-ahead (`--button` picks the button it presses).
+- Standalone emulators (launcher v13): PS3 (RPCS3), Switch (Ryujinx), Wii U
+  (Cemu), Xbox (xemu), PCSX2, PPSSPP and the rest run as before, but when the
+  page asks for the engine the launcher starts them through
+  `savestate-engine capture`: the emulator's window is moved off the screen
+  and shown inside the page (Windows Graphics Capture), and the page's
+  keyboard and controllers reach it as virtual Xbox controllers (needs the
+  ViGEmBus driver; `savestate-engine vigem-test` checks it). Its sound plays
+  on the PC. If capture can't start, the emulator opens in its own window as
+  before. Close in the page closes the emulator (its whole process tree).
+- PS3 games kept as a folder (`.../PS3_GAME/USRDIR/EBOOT.BIN`): launcher v14
+  fetches the whole folder (`/api/games/:id/folder`, every file; "being
+  copied, n %" until done, resumable) or, on the host PC for the owner,
+  plays the library's folder where it is. A host copy without
+  `PS3_GAME/PARAM.SFO` is refused as incomplete. `E:\ROMS\PS3\Uncharted 1`
+  is such a half copy (17 of 21 GB); the library entry now points at the
+  complete one on the Drive (`roms\PS3\Uncharted - Drake's Fortune`).
+- A game that stops responding (a core stuck inside a frame) is reported in
+  the page after 20 s; Close then ends the engine within 8 s, and a game
+  stuck for 5 minutes ends on its own.
+- Play from another device: in a game's menu, "Play on my phone or tablet"
+  (same account) or "Let a friend play" (anyone signed in) gives a 6-letter
+  code and a link (`/?play=CODE`). The other device gets the picture and
+  sound over WebRTC straight from the PC's page and plays as player 2 (or 1).
+  The host only introduces the two (`/api/rtc/rooms`, in memory, 15 minutes),
+  so the PC and the NAS each keep their own codes; both devices must be able
+  to reach each other (no relay server), which the same network always allows.
 
 ## Failover
 

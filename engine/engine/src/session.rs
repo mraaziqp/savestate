@@ -65,6 +65,8 @@ pub struct Session {
     /// The GPU picture's buffer, swapped with the frame's (no copy per frame).
     gpu_pixels: Vec<u8>,
     sync: Option<std::sync::Arc<crate::sync::Sync>>,
+    /// What happened to the battery save before the game started (the host's copy, or this PC's).
+    pub sram_pull: Option<crate::sync::SramPull>,
     /// The content as handed to retro_load_game (a second instance loads it too).
     content_cpath: Option<CString>,
     /// A second instance of the core for run-ahead (see `start_second_instance`).
@@ -224,7 +226,7 @@ impl Session {
             (core.set_input_state)(host::input_state);
             (core.init)();
         }
-        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new(), sync: cfg.sync.clone(), content_cpath: None, secondary: None, keep_loaded: false };
+        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new(), sync: cfg.sync.clone(), sram_pull: None, content_cpath: None, secondary: None, keep_loaded: false };
         if let Err(e) = session.load_content(&cfg) {
             // Dropping `session` runs retro_deinit and unloads the core.
             return Err(e);
@@ -383,7 +385,9 @@ impl Session {
             let sram = cfg.save_dir.join(format!("{stem}.srm"));
             if let Some(sync) = &cfg.sync {
                 let _ = std::fs::create_dir_all(&cfg.save_dir);
-                crate::info!("battery save: {}", sync.pull_sram(&sram));
+                let pull = sync.pull_sram(&sram);
+                crate::info!("battery save: {}", pull.message);
+                self.sram_pull = Some(pull);
             }
             if let Ok(bytes) = std::fs::read(&sram) {
                 self.write_memory(RETRO_MEMORY_SAVE_RAM, &bytes);

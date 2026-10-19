@@ -1894,7 +1894,7 @@ const downloadProgress = new Map(); // progressKey -> { received, total, started
 const DL_STALL_MS = 20_000;
 const DL_MAX_RESUMES = 5;
 
-async function downloadToFile(url, dest, progressKey) {
+async function downloadToFile(url, dest, progressKey, keepName = false) {
   ensureDirSync(path.dirname(dest));
   // Unique per call, not a fixed `${dest}.nexusdl`: two concurrent
   // downloads of the same game (see dedupeLaunch's comment for how that
@@ -2039,7 +2039,7 @@ async function downloadToFile(url, dest, progressKey) {
   // container's magic bytes. Without this, RetroArch receives a .rom that is
   // really a .zip, refuses to identify it, and shows its "Load Content" menu.
   let finalDest = dest;
-  const trueExt = (() => {
+  const trueExt = keepName ? null : (() => {
     if (serverName) {
       const e = path.extname(serverName);
       if (e && e.length <= 8) return e;
@@ -2281,6 +2281,90 @@ function downloadedShare(file) {
       resolve(Number.isFinite(share) && share < 0.999 ? share : null);
     });
   });
+}
+
+// ── Games kept as a folder (an extracted PS3 game) ─────────────────────
+// The library knows one by its EBOOT.BIN, but RPCS3 needs the whole folder
+// above PS3_GAME (hundreds of files, often over 20 GB). An older launcher
+// fetched only the EBOOT.BIN, which RPCS3 refuses ("Invalid file or folder").
+// The host lists the folder (/api/games/<id>/folder) and serves each file;
+// on the host's own PC (the owner) the folder is used where it is.
+const PS3_FOLDER_GAME = /^(.*)[\\/]PS3_GAME[\\/]USRDIR[\\/]EBOOT\.BIN$/i;
+const FOLDER_DONE = '.savestate-folder.json';
+const FOLDER_PARTIAL = '.savestate-folder-partial';
+const folderFetches = new Map(); // folder -> { received, total, error }
+
+function ps3FolderRoot(file) {
+  const m = PS3_FOLDER_GAME.exec(String(file || ''));
+  return m ? m[1] : null;
+}
+const ebootOf = (root) => path.join(root, 'PS3_GAME', 'USRDIR', 'EBOOT.BIN');
+
+// Whole: fetched completely by this launcher, or a folder put there some
+// other way with its PARAM.SFO and EBOOT.BIN (and no fetch of ours unfinished).
+function folderComplete(root) {
+  if (folderFetches.has(root)) return false;
+  if (fs.existsSync(path.join(root, FOLDER_DONE))) return true;
+  if (fs.existsSync(path.join(root, FOLDER_PARTIAL))) return false;
+  return fs.existsSync(path.join(root, 'PS3_GAME', 'PARAM.SFO')) && fs.existsSync(ebootOf(root));
+}
+
+async function fetchGameFolder(base, query, list, root) {
+  const state = { received: 0, total: list.total, error: null };
+  folderFetches.set(root, state);
+  try {
+    ensureDirSync(root);
+    fs.writeFileSync(path.join(root, FOLDER_PARTIAL), '');
+    for (const f of list.files) {
+      const dest = path.resolve(root, ...String(f.path).split('/'));
+      if (!dest.startsWith(path.resolve(root) + path.sep)) continue;
+      let have = -1;
+      try { have = fs.statSync(dest).size; } catch { /* not here yet */ }
+      if (have !== f.size) {
+        if (f.size === 0) {
+          ensureDirSync(path.dirname(dest));
+          fs.writeFileSync(dest, '');
+        } else {
+          await downloadToFile(`${base}/${String(f.path).split('/').map(encodeURIComponent).join('/')}${query}`, dest, null, true);
+        }
+      }
+      state.received += f.size;
+    }
+    fs.writeFileSync(path.join(root, FOLDER_DONE), JSON.stringify({ files: list.files.length, total: list.total, at: new Date().toISOString() }));
+    fs.rmSync(path.join(root, FOLDER_PARTIAL), { force: true });
+    folderFetches.delete(root);
+    invalidateRomIndexes();
+    console.log(`[launcher] game folder complete: ${root} (${list.files.length} files)`);
+  } catch (e) {
+    state.error = e && e.message ? e.message : String(e);
+    console.error(`[launcher] game folder fetch failed: ${state.error}`);
+  }
+}
+
+// Makes a folder game playable: { ok, eboot } or { ok: false, status, json }.
+async function ensureGameFolder(romUrl, root, title) {
+  const progress = (st) => ({ ok: false, status: 409, json: { success: false, code: 'still_downloading', error: `${title || 'This game'} is being copied to this PC (${Math.floor((st.total ? st.received / st.total : 0) * 100)}% of ${(st.total / 1073741824).toFixed(1)} GB so far). It plays once the copy has finished.` } });
+  const running = folderFetches.get(root);
+  if (running && !running.error) return progress(running);
+  if (running) folderFetches.delete(root); // a failed fetch starts again (finished files are kept)
+  if (!romUrl) return { ok: false, status: 400, json: { success: false, error: 'romUrl required to fetch the game' } };
+  let u;
+  try { u = new URL(romUrl); } catch { return { ok: false, status: 400, json: { success: false, error: 'bad romUrl' } }; }
+  const base = `${u.origin}${u.pathname.replace(/\/download(\/.*)?$/, '/folder')}`;
+  let list;
+  try {
+    const r = await fetch(`${base}${u.search}`, { signal: AbortSignal.timeout(60_000) });
+    list = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(list.error || `HTTP ${r.status}`);
+  } catch (e) {
+    return { ok: false, status: 502, json: { success: false, error: `Couldn't get the game's files from the host: ${e && e.message ? e.message : e}` } };
+  }
+  // This PC is the host: play the library's own folder.
+  if (list.hostPath && folderComplete(list.hostPath)) return { ok: true, eboot: ebootOf(list.hostPath) };
+  if (!Array.isArray(list.files) || !list.files.length) return { ok: false, status: 502, json: { success: false, error: "The host's copy of this game has no files" } };
+  if (list.complete === false) return { ok: false, status: 502, json: { success: false, error: `The host's copy of ${title || 'this game'} is incomplete (its PS3_GAME/PARAM.SFO is missing), so it can't be played. Copy the whole game folder to the host again.` } };
+  fetchGameFolder(base, u.search, list, root);
+  return progress(folderFetches.get(root));
 }
 
 function spawnAndVerify(exe, args, waitMs = 1200) {
@@ -2931,15 +3015,34 @@ async function ensureEngine(hostUrl) {
 // Starts the engine for one game and waits until it has loaded it.
 // Resolves { ok, pid, port, key, ready } or { ok: false, error }.
 function startEngine(exe, { core, romFile, origin, gameId, hostUrl, token }) {
+  const key = crypto.randomBytes(24).toString('base64url');
+  const args = ['serve', '--core', core, '--game', romFile, '--key', key,
+    '--system', engineSystemDir, '--saves', engineSavesDir, '--states', engineStatesDir,
+    '--data', path.join(engineDir, 'data')];
+  if (origin) args.push('--origin', origin);
+  // Saves follow the person: the host, the game, and their token (in the
+  // environment, not on the command line other programs can read).
+  if (hostUrl && gameId && token) args.push('--host', hostUrl, '--game-id', String(gameId));
+  return runEngine(exe, args, key, token, 'SaveState Engine');
+}
+
+// A standalone emulator (RPCS3, Ryujinx, Cemu, xemu, PCSX2, PPSSPP, Dolphin)
+// shown inside SaveState: the engine starts it windowed, captures its
+// window and passes the page's controls to it as virtual controllers.
+const EMULATOR_NAMES = { 'pcsx2-qt': 'PCSX2', pcsx2: 'PCSX2', rpcs3: 'RPCS3', ryujinx: 'Ryujinx', cemu: 'Cemu', xemu: 'xemu', ppssppwindows64: 'PPSSPP', ppssppwindows: 'PPSSPP', dolphin: 'Dolphin', xenia: 'Xenia', xenia_canary: 'Xenia' };
+function startCapture(exe, emu, emuArgs, { origin, title }) {
+  const key = crypto.randomBytes(24).toString('base64url');
+  const name = EMULATOR_NAMES[path.basename(emu, path.extname(emu)).toLowerCase()] || path.basename(emu, path.extname(emu));
+  // Windowed: a full-screen emulator would cover the browser instead of showing inside it.
+  const windowed = emuArgs.filter((a) => !['-f', '-fullscreen', '--fullscreen', '-full-screen'].includes(String(a).toLowerCase()));
+  const args = ['capture', '--key', key, '--title', String(title || 'Game'), '--emulator', name, '--data', path.join(engineDir, 'data')];
+  if (origin) args.push('--origin', origin);
+  args.push('--', emu, ...windowed);
+  return runEngine(exe, args, key, '', name, 150_000);
+}
+
+function runEngine(exe, args, key, token, label, waitMs = 90_000) {
   return new Promise((resolve) => {
-    const key = crypto.randomBytes(24).toString('base64url');
-    const args = ['serve', '--core', core, '--game', romFile, '--key', key,
-      '--system', engineSystemDir, '--saves', engineSavesDir, '--states', engineStatesDir,
-      '--data', path.join(engineDir, 'data')];
-    if (origin) args.push('--origin', origin);
-    // Saves follow the person: the host, the game, and their token (in the
-    // environment, not on the command line other programs can read).
-    if (hostUrl && gameId && token) args.push('--host', hostUrl, '--game-id', String(gameId));
     let child;
     try {
       child = spawn(exe, args, { cwd: engineDir, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: { ...process.env, SAVESTATE_TOKEN: token || '' } });
@@ -2949,7 +3052,7 @@ function startEngine(exe, { core, romFile, origin, gameId, hostUrl, token }) {
     }
     let port = 0, done = false, buf = '';
     const finish = (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r); } };
-    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish({ ok: false, error: 'the engine took too long to load the game' }); }, 90_000);
+    const timer = setTimeout(() => { try { child.kill(); } catch { /* gone */ } finish({ ok: false, error: 'the engine took too long to load the game' }); }, waitMs);
     child.stdout.on('data', (d) => {
       buf += d.toString('utf8');
       let i;
@@ -2963,7 +3066,7 @@ function startEngine(exe, { core, romFile, origin, gameId, hostUrl, token }) {
         if (m.ready) {
           trackGame(child, exe, []);
           const rec = runningGames.get(child.pid);
-          if (rec) rec.emulator = 'SaveState Engine';
+          if (rec) rec.emulator = label;
           finish({ ok: true, pid: child.pid, port, key, ready: m.ready });
         }
       }
@@ -3091,6 +3194,15 @@ async function handleLaunch(body, origin) {
     ? mirroredFile
     : findRomAnywhere(cfg, gameId, title, platform);
 
+  // A game kept as a folder (PS3) plays only when the whole folder is here.
+  const folderRoot = ps3FolderRoot(mirroredFile) || ps3FolderRoot(romFile);
+  if (folderRoot && !(ps3FolderRoot(romFile) && folderComplete(ps3FolderRoot(romFile)))) {
+    const got = await ensureGameFolder(romUrl, folderRoot, title);
+    if (!got.ok) return { status: got.status, json: got.json };
+    romFile = got.eboot;
+    mirroredValid = true;
+  }
+
   // Heal ROMs saved under the generic ".rom" fallback extension.
   //
   // romExtFromUrl() derives the extension from the download URL, but the
@@ -3212,6 +3324,18 @@ async function handleLaunch(body, origin) {
       args.push('-batch', '-fullscreen', '-nogui');
     }
     args.push(romFile);
+    // A standalone emulator inside SaveState (capture bridge), when the page asks.
+    if (body.engine && IS_WIN && !isRetroArch(emu) && !netplay) {
+      const exe = await ensureEngine(hostUrl);
+      if (exe) {
+        const run = await startCapture(exe, emu, args, { origin: origin && isTrustedOrigin(origin) ? origin : null, title });
+        if (run.ok) {
+          return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: emu, usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
+        }
+        engineError = run.error;
+        console.error(`[engine] capturing ${path.basename(emu)}: ${run.error}; opening it on its own`);
+      }
+    }
     const { pid, alive, stderr } = await spawnAndVerify(emu, args);
     if (!alive) {
       const plat = String(platform || '').toLowerCase();
@@ -3331,13 +3455,15 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 12,
+    version: 14,
     // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
     // v8: unpacks without bundled modules; copies RetroArch from the host.
     // v9: follows each game until it closes (/launch/status, /launch/stop), full screen, refuses half-downloaded games.
     // v10: Linux: emulators from Flathub, a games folder by typed path; reports its platform.
     // v11: SaveState Engine: RetroArch-system games play inside the SaveState page (/launch engine:true).
     // v12: the engine has its own cores, system files and saves (RetroArch not needed); saves sync with the host.
+    // v13: standalone emulators (RPCS3, Ryujinx, Cemu, xemu, PCSX2, PPSSPP, Dolphin) show inside SaveState too (capture bridge).
+    // v14: games kept as a folder (an extracted PS3 game) are fetched whole, or used in place on the host PC.
     engine: IS_WIN,
     platform: process.platform,
     features: ['setup-consoles', 'bios', 'rom-folder'],
@@ -3559,6 +3685,24 @@ function startEmbeddedLauncher(opts = {}) {
         const existing = mirroredValid
           ? mirroredFile
           : findRomAnywhere(cfg, body.gameId, body.title, body.platform);
+        // A game kept as a folder (PS3): the whole folder, answered once it's
+        // here like a single file (progress through /cache-rom/progress).
+        const folderRoot = ps3FolderRoot(mirroredFile) || ps3FolderRoot(existing);
+        if (folderRoot && !(ps3FolderRoot(existing) && folderComplete(ps3FolderRoot(existing)))) {
+          const got = await ensureGameFolder(body.romUrl, folderRoot, body.title);
+          if (got.ok) { send({ success: true, cached: true, alreadyExisted: true, file: got.eboot, romDirectory: path.dirname(got.eboot) }); return; }
+          if (got.status !== 409) { send(got.json, got.status); return; }
+          const key = body.gameId || folderRoot;
+          const startedAt = Date.now();
+          for (let st = folderFetches.get(folderRoot); st; st = folderFetches.get(folderRoot)) {
+            if (st.error) { downloadProgress.delete(key); send({ success: false, error: `Download failed: ${st.error}` }, 500); return; }
+            downloadProgress.set(key, { received: st.received, total: st.total, startedAt });
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+          downloadProgress.delete(key);
+          send({ success: true, cached: true, alreadyExisted: false, file: ebootOf(folderRoot), romDirectory: folderRoot });
+          return;
+        }
         if (existing) {
           send({ success: true, cached: true, alreadyExisted: true, file: existing, romDirectory: path.dirname(existing) });
           return;
@@ -3848,8 +3992,10 @@ function startEmbeddedLauncher(opts = {}) {
         const body = await readBody(req);
         const rec = runningGames.get(Number(body.pid) || 0);
         if (!rec || rec.endedAt != null) { send({ ok: true, stopped: false }); return; }
-        try { process.kill(rec.pid); } catch { /* already gone */ }
-        if (IS_WIN) execFile('taskkill', ['/PID', String(rec.pid), '/T', '/F'], { windowsHide: true }, () => {});
+        // The whole tree first: once the parent is gone, Windows can no longer
+        // find what it started (a game the engine opened in another emulator).
+        if (IS_WIN) execFile('taskkill', ['/PID', String(rec.pid), '/T', '/F'], { windowsHide: true }, () => { try { process.kill(rec.pid); } catch { /* already gone */ } });
+        else { try { process.kill(rec.pid); } catch { /* already gone */ } }
         send({ ok: true, stopped: true });
         return;
       }

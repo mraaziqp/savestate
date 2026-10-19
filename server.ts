@@ -33,6 +33,7 @@ import { createDrives } from "./server/drives.ts";
 import { createVideoPrep } from "./server/videoprep.ts";
 import { registerSaveFiles } from "./server/savefiles.ts";
 import { registerEngineStates } from "./server/enginestates.ts";
+import { registerRtc } from "./server/rtc.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
@@ -1344,7 +1345,12 @@ async function resolveRomPath(configRoot: string, game: Record<string, any>, ext
   // Found on Drive: use the same file on a local disk when there is one.
   if (found.absolutePath && isCloudPath(found.absolutePath)) {
     const local = romIndex?.names.get(path.basename(found.absolutePath).toLowerCase());
-    if (local && !isCloudPath(local) && !globalIncompleteFiles?.get(local) && await fsAccess(local).then(() => true, () => false)) return { absolutePath: local, relativePath: found.relativePath };
+    // Every extracted PS3 game's file is EBOOT.BIN (an Xbox 360 game's
+    // default.xex): the same name says nothing, so the game's folder must
+    // match too (it picked another, half-copied game before).
+    const tail = (p: string) => p.split(/[\\/]/).slice(-4).join("/").toLowerCase();
+    const sameGame = (p: string) => !/^(eboot\.bin|default\.xex)$/i.test(path.basename(p)) || tail(p) === tail(found.absolutePath!);
+    if (local && !isCloudPath(local) && sameGame(local) && !globalIncompleteFiles?.get(local) && await fsAccess(local).then(() => true, () => false)) return { absolutePath: local, relativePath: found.relativePath };
   }
   return found;
 }
@@ -6275,6 +6281,8 @@ async function startServer() {
   registerSaveFiles(app, { pool: () => (dbConnected && pool ? pool : null), userOf: (req, res) => requireAnyAuth(req, res), log: (level, msg) => log(level, msg, "saves") });
   // SaveState Engine: save states with versions, and player preferences (server/enginestates.ts).
   registerEngineStates(app, { pool: () => (dbConnected && pool ? pool : null), userOf: (req, res) => requireAnyAuth(req, res), log: (level, msg) => log(level, msg, "engine") });
+  // Play from another device: WebRTC introductions (server/rtc.ts).
+  registerRtc(app, { userOf: (req, res) => requireAnyAuth(req, res) });
 
   // The NAS can't convert video while someone watches. When a film has no
   // ready copy (or a quality change is asked for), the request goes to the
@@ -20580,6 +20588,54 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     });
     log("INFO", `ROM download: ${filename}`, "remote");
+  });
+
+  // ── Games kept as a folder (an extracted PS3 game) ────────────
+  // The library knows such a game by its EBOOT.BIN, but RPCS3 needs the
+  // whole folder above PS3_GAME (hundreds of files). A launcher on another
+  // PC lists it here and fetches each file through the second route.
+  const gameFolderOf = async (id: string) => {
+    let game: Record<string, any> | null = null;
+    if (dbConnected && pool) {
+      try { game = (await pool.query("SELECT * FROM games WHERE id=$1", [id])).rows[0] ?? null; } catch { /* fall through */ }
+    }
+    if (!game) game = (mem.games.find((g) => g.id === id) as any) ?? null;
+    if (!game) return null;
+    const config = await getVaultConfig();
+    if (!config.root_path) return null;
+    const resolved = await resolveRomPath(config.root_path, game, getExtraRoots(config));
+    if (!resolved.absolutePath) return null;
+    const m = /^(.*)[\\/]PS3_GAME[\\/]USRDIR[\\/]EBOOT\.BIN$/i.exec(resolved.absolutePath);
+    return m ? { root: path.resolve(m[1]), name: path.basename(m[1]) } : null;
+  };
+  app.get("/api/games/:id/folder", async (req, res) => {
+    const folder = await gameFolderOf(req.params.id);
+    if (!folder) return res.status(404).json({ error: "This game isn't kept as a folder" });
+    const files: { path: string; size: number }[] = [];
+    const walk = async (dir: string): Promise<void> => {
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(full);
+        else if (e.isFile()) files.push({ path: path.relative(folder.root, full).split(path.sep).join("/"), size: (await stat(full)).size });
+      }
+    };
+    try { await walk(folder.root); } catch (e: any) { return res.status(500).json({ error: `Couldn't read the game's folder: ${e.message}` }); }
+    res.setHeader("Cache-Control", "no-store");
+    // The owner's launcher may be on this PC: it can then play the folder
+    // where it is instead of copying it (nobody else is told host paths).
+    const hostPath = (await access.callerOf(req)).admin ? folder.root : undefined;
+    // A PS3 game folder without its PARAM.SFO is an unfinished copy; RPCS3 refuses it.
+    const complete = files.some((f) => f.path.toUpperCase() === "PS3_GAME/PARAM.SFO");
+    res.json({ name: folder.name, files, total: files.reduce((n, f) => n + f.size, 0), complete, hostPath });
+  });
+  app.get("/api/games/:id/folder/*", async (req, res) => {
+    const folder = await gameFolderOf(req.params.id);
+    if (!folder) return res.status(404).json({ error: "This game isn't kept as a folder" });
+    const file = path.resolve(folder.root, String((req.params as any)[0] ?? ""));
+    if (!file.startsWith(folder.root + path.sep)) return res.status(400).json({ error: "Not in the game's folder" });
+    res.sendFile(file, { dotfiles: "allow", cacheControl: false, headers: { "Content-Type": "application/octet-stream", "Cache-Control": "private, no-transform" } }, (err: any) => {
+      if (err && !res.headersSent) res.status(Number(err.status ?? err.statusCode) || 500).json({ error: "Could not read the file" });
+    });
   });
 
   // ── Auto-scan a single file (dropped externally) ──────────────

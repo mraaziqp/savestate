@@ -88,7 +88,7 @@ page draws in its own player (the same full-screen player EmulatorJS uses):
 | Path | Used for | How (as built in Phase 3) |
 |---|---|---|
 | **Raw frames** | every core on this PC, 2D and GPU | Software cores: the core's own format (RGB565 kept 16-bit, XRGB8888; 0RGB1555 repacked to RGB565). GPU cores: the framebuffer read back asynchronously (pixel-pack buffer + fence, collected while the engine waits for the next frame's time), RGBA8, flagged bottom-up for the page to flip. Sent as binary WebSocket messages; the page uploads them to a WebGL2 texture once per display refresh. Measured: GameCube at 640x528 RGBA, 60 pictures/s, about 80 MB/s on loopback, under a frame of delay. |
-| **Encoded video** | moved to Phase 6 (other devices) | On the same PC the raw path already holds 60 fps for GPU cores, so the hardware encoder (Media Foundation/NVENC + WebCodecs) is built with WebRTC in Phase 6, where it is needed: to send the picture to phones, the Vita browser and other PCs. |
+| **Encoded video** | other devices (Phase 6) | Not needed on the same PC: the raw path holds 60 fps for GPU cores and for captured emulators. For other devices (phones, tablets, other PCs) the page's own canvas goes out over WebRTC (`canvas.captureStream`), so Chrome's hardware encoder does the encoding; no encoder of our own was needed (see 13). |
 | **Audio** | everything | Resampled in the engine (windowed sinc) to 48 kHz stereo 16-bit, sent over the same socket into an `AudioWorklet` ring buffer that reports its fill for rate control. |
 | **Input** | everything | Xbox-type controllers are read by the engine itself through XInput (loaded at run time; Guide through XInputGetStateEx), every frame on the emulation thread, with rumble back to the controller. Other controllers (DualSense, Switch Pro...) and the keyboard (remappable) come from the page (Gamepad API), on the ports after the engine's. `gilrs` was not used: its Windows backend pulls in crates this toolchain can't link (see 1). |
 
@@ -96,19 +96,22 @@ The page applies the **shader presets** in WebGL (raw integer scale, CRT
 aperture grille, handheld LCD grid, smooth upscale), so they look the same
 locally and, later, on other devices.
 
-Later upgrades (not in Phases 2-5): **WebRTC** transport so phones, the Vita
-browser and other PCs can play the engine's output (replacing Moonlight),
-and an optional native desktop shell (WebView2 + DirectComposition) for a
-zero-copy GPU path on this PC.
+Phase 6 added **WebRTC** so phones, tablets and other PCs can play what the
+engine (or a captured emulator) shows (see 13). Still possible later: an
+optional native desktop shell (WebView2 + DirectComposition) for a zero-copy
+GPU path on this PC.
 
 ### 2.3 Emulators that are not libretro cores
 RPCS3 (PS3), Ryujinx/Eden (Switch), Cemu (Wii U), xemu (Xbox) and Xenia (Xbox
-360) have no usable libretro core. They get a **capture bridge** (Phase 6,
-after this plan): the engine starts the emulator off to the side, captures
-its window with Windows Graphics Capture, sends it through the encoded-video
-path, and drives it through a ViGEm virtual controller, so these play inside
-SaveState too. PS2 and GameCube/Wii move to their libretro cores (pcsx2,
-dolphin) and stop needing their standalone windows.
+360) have no usable libretro core. They get a **capture bridge** (built in
+Phase 6, see 13): `savestate-engine capture` starts the emulator, moves its
+window off the screen, captures it with Windows Graphics Capture (on the GPU,
+halved there when wider than 1600 pixels), sends it through the same raw
+path as a core's picture, and drives it through a ViGEm virtual Xbox
+controller, so these play inside SaveState too. The same bridge serves any
+standalone emulator the launcher starts (PCSX2 and PPSSPP when installed,
+standalone Dolphin, DuckStation...). GameCube/Wii moved to the dolphin core
+in Phase 5.
 
 ### 2.4 What is taken from RetroArch, and what is left out
 Taken (as reference, reimplemented in Rust): the ABI in `libretro.h`; the
@@ -137,7 +140,8 @@ Efficiency (status after Phase 3):
    interop for now): pixel-pack buffer + fence, collected in the engine's
    idle time before the next frame. The D3D11 interop belongs with the
    hardware encoder in Phase 6.
-4. **Encoder tuned for play** (Phase 6, with WebRTC; see 2.2).
+4. **Encoder tuned for play** (done in Phase 6): the WebRTC video is marked
+   as motion, keeps 60 frames a second over sharpness, up to 12 Mbit/s.
 5. **Pre-warmed worker** (Phase 5): engine start-up measured at 0.2-1.4 s
    including the game, so this is a smaller win than expected.
 6. **Precise pacing** (done): high-resolution waitable timer plus a short
@@ -161,7 +165,9 @@ Power:
    slot (`/api/engine/prefs`), newest copy wins.
 4. **Live stats** (done): fps, time per frame, sound buffer, skipped
    pictures, in the player's Stats overlay.
-5. **Watch and later play together** (Phase 6).
+5. **Watch and play together** (done in Phase 6): a game on this PC can be
+   shared with the person's own phone or tablet, or with a friend, who sees
+   and hears it and plays as player 2 (or 1).
 6. **Curated core options** (done in Phase 2).
 
 ## 3. Layout
@@ -193,16 +199,21 @@ engine/                         Rust workspace (GNU toolchain, see 1)
     src/input.rs                XInput controllers (run-time loaded), layouts, Guide/Back hotkeys, rumble
     src/rewind.rs               rewind ring: XOR deltas + LZ4 within a budget
     src/sync.rs                 the host's copy of saves: battery saves, save states with versions
-  Phase 6 adds:
-    src/encode.rs               Media Foundation hardware encoder (with WebRTC)
+    src/capture.rs              `capture`: a standalone emulator's window (Windows Graphics Capture, D3D11) streamed like a core
+    src/vigem.rs                ViGEmBus virtual Xbox controllers (driver IOCTLs, no SDK), fed by the page's controls
 web-src/app/
-  EnginePlayer.jsx              the in-SaveState player (WebGL2 with the four looks, AudioWorklet, keyboard/gamepads, menu)
-  PlayOverlay.jsx               opens EnginePlayer when the launcher answers with an engine session
+  EnginePlayer.jsx              the in-SaveState player (WebGL2 with the four looks, AudioWorklet, keyboard/gamepads, menu,
+                                capture mode, sharing to another device over WebRTC)
+  RemotePlayer.jsx              the other device's side (?play=<code>): video, sound, keyboard/controllers/touch buttons
+  PlayOverlay.jsx               opens EnginePlayer when the launcher answers with an engine session, RemotePlayer for ?play=
   build.mjs                     patches: Play asks for the engine; the app's controller navigation pauses during a game
-client-launcher.cjs             v11: fetches/updates the engine from the host (SHA-256), runs RetroArch-system
-                                games in it on request, falls back to RetroArch; RetroArch spawning removed in Phase 5
+client-launcher.cjs             v14: fetches/updates the engine from the host (SHA-256), runs RetroArch-system
+                                games in it, standalone emulators through `capture`; RetroArch only as fallback/netplay;
+                                PS3 games kept as a folder fetched whole (or used in place on the host PC)
 server.ts                       /api/client-launcher/engine(/info): serves releases/engine (scripts/publish-engine.mjs)
 server/enginestates.ts          /api/engine/states (save states, 5 versions per slot, in the database) and /api/engine/prefs
+server/rtc.ts                   /api/rtc/rooms: introduces the PC and the other device (offer/answer under a short code)
+server.ts                       /api/games/:id/folder(/*): a folder game's file list and files
 ```
 
 ## 4. Engine <-> page protocol (as built)
@@ -240,6 +251,34 @@ version} / `syncError` {slot, message} after a slot reached the host,
 `nav` {buttons} (the engine's controllers while the menu is open, XInput
 bits); `slots` entries add onHost, versions and device; `status` runahead
 adds copies (1 or 2).
+
+Phase 5 refinements: page -> engine `delete` {slot} (here and on the
+account); engine -> page `deleted` {slot}; `ready` info adds `saveFrom`
+{device, backup} when the account's battery save was newer and used.
+
+Phase 6, both `serve` and `capture`: engine -> page `stuck` {stuck: true}
+after 20 s without the emulation loop coming round (a core stuck inside a
+frame), `stuck` {stuck: false} if it recovers. While stuck, the socket's own
+thread still reads `quit`: 8 s after it the process ends (exit code 3);
+after 5 minutes stuck it ends anyway.
+
+Phase 6, capture (`savestate-engine capture --key K --title T --emulator
+NAME [--origin O]... [--data DIR] -- <emulator> <args>`): the same socket
+and messages. `ready` info adds `capture: true`, `nativeControllers`,
+`virtualControllers` (ViGEmBus present); pictures are fmt 1 (BGRA as
+captured); no `A` messages (the emulator plays its sound on the PC);
+`status` is {capture, fps, dropped, pads (virtual controllers plugged in),
+width, height, canSave: false}. Page -> engine `in` goes to virtual Xbox
+controllers (one per port, plugged in on its first press); `quit` closes
+the emulator (WM_CLOSE, then after 3 s the whole process tree).
+
+Phase 6, another device (WebRTC, between two pages; the engine is not
+involved): the PC page sends its canvas (60 frames/s) and the game's sound
+as media tracks; a data channel "controls" (unordered, no retransmits)
+carries `{"t":"in","b","a","g"}` from the other device, and `{"t":"bye"}`
+from the PC when it stops sharing. Signalling through `/api/rtc/rooms` (see
+server/rtc.ts): codes of 6 letters, 15 minutes, one device per code, the
+owner's own account only unless shared with "anyone".
 
 Phase 4 engine -> page additions: `pads` {native} when the engine's own
 controllers change, `menu` (a controller hotkey asked for the menu), `ff`
@@ -301,13 +340,14 @@ and writes the battery save every 30 s when it changed.
 | 3 | WebSocket stream, raw video (encoded video moved to 6), HW render context, DRC audio, `EnginePlayer.jsx` with shaders | A game plays inside SaveState in the browser at a steady 60 fps with no audio crackle; HW core (dolphin) shows its picture (results in 10) |
 | 4 | Native controllers, mappings, chords, rewind, fast-forward, run-ahead | Controller works with no setup; rewind 60 s; run-ahead measured |
 | 5 | Saves/states/thumbnails to the host with versions, pause overlay, launcher switched to the engine (RetroArch kept only as fallback and for netplay) | Play from Games opens inside SaveState; RetroArch not installed or needed (results in 12) |
-| 6 (after) | Capture bridge for RPCS3/Switch/Wii U/Xbox; WebRTC for other devices | PS3 game plays inside SaveState |
+| 6 | Capture bridge for RPCS3/Switch/Wii U/Xbox (and every standalone emulator); WebRTC for other devices | PS3 game plays inside SaveState (results in 13) |
 
 ## 7. Honest limits
 
-- Latency: raw-frame path adds well under a frame; the encoded path adds
-  about 1-2 frames (NVENC low-latency + WebCodecs), comparable to Moonlight
-  on a LAN.
+- Latency: the raw-frame path adds well under a frame; a captured emulator
+  adds about one frame (the capture); another device over WebRTC adds the
+  network plus Chrome's encoder and the other device's decoder, comparable
+  to Moonlight on a LAN.
 - Not every core supports VFS streaming or serialization (needed for rewind
   and run-ahead); those features turn off per core with a reason shown.
 - PS2 (pcsx2 core) and GameCube (dolphin core) are heavy and render through
@@ -328,6 +368,20 @@ and writes the battery save every 30 s when it changed.
 - RetroArch is no longer installed for engine games. It remains in use where
   it is already installed for netplay and as the fallback when the engine
   can't start a game.
+- Captured emulators (Phase 6): their sound plays on the PC itself, not
+  through the page, so a friend on another device sees a captured game but
+  doesn't hear it (cores' sound does go along). Saving and loading use the
+  emulator's own keys or the game's saves; SaveState's slots, rewind,
+  run-ahead and fast-forward are cores-only; the menu doesn't pause a
+  captured emulator. On Windows 10, Windows draws a yellow border around a
+  captured window (it is off the screen, so nobody sees it); Windows 11
+  lets the engine turn it off. Virtual controllers need the ViGEmBus driver
+  (the person's own controllers work with the emulator directly without it).
+  Switch games need the person's own keys and firmware in Ryujinx.
+- Another device: there is no relay (TURN) server, so the two devices must be
+  able to reach each other directly: the same network always works; across
+  the internet it depends on both routers. A code lets one device in at a
+  time.
 
 ## 8. Checklist
 
@@ -336,8 +390,8 @@ and writes the battery save every 30 s when it changed.
 - [x] Phase 2: core host and headless runner; results in 9 (approved 2026-10-19)
 - [x] Phase 3: games play inside the SaveState page; results in 10 (approved 2026-10-19)
 - [x] Phase 4: controllers, hotkeys, rewind, run-ahead; results in 11 (approved 2026-10-19)
-- [x] Phase 5: the engine stands alone, saves follow the person; results in 12 (awaiting approval)
-- [ ] Phase 6
+- [x] Phase 5: the engine stands alone, saves follow the person; results in 12 (approved 2026-10-19)
+- [x] Phase 6: capture bridge (PS3 plays inside SaveState) and other devices over WebRTC; results in 13 (awaiting approval)
 
 ## 9. Phase 2 results (2026-10-19)
 
@@ -612,3 +666,89 @@ Phase 5:
   all pass, including Dolphin.
 - The pause overlay is the player's menu (Phase 3-4): it pauses the game,
   and holds the slots, rewind, run-ahead, looks, controls and closing.
+
+## 13. Phase 5 refinements and Phase 6 results (2026-10-19)
+
+Phase 5 refinements:
+- Saves that don't make it to the account are kept and sent again every
+  30 s (a host restart or a dropped connection no longer loses them); the
+  page hears `synced` when they arrive.
+- The 48 MB limit for the account applies after LZ4 compression, so states
+  that compress under it go up (raw states up to 512 MB are kept on the PC).
+- A slot can be deleted from the menu, here and on the account, after a
+  confirmation that says which. Tested in Chrome: saved Fire Red to slot 4,
+  it reached the account (version 1), "Delete slot 4" then "Yes, delete slot
+  4 (here and on your account)" emptied it on this PC and on the host.
+- When the account's battery save was newer and used, the page says which
+  device it came from and that this PC's copy is kept as a backup
+  (`/api/savefile` info now returns the device). Not exercised in a browser
+  here: it needs a newer save from another device than the one on this PC,
+  and making one would replace a real save.
+- Run-ahead on a second instance and the menu by controller (see 12).
+
+Phase 6, the capture bridge (`capture.rs`, `vigem.rs`, launcher v13):
+- `savestate-engine capture` starts the emulator (full-screen flags removed),
+  finds its game window among the process tree (the largest visible
+  top-level window), moves it past the right edge of the screens, gives the
+  focus back to the browser, and captures the window's client area with
+  Windows Graphics Capture on the GPU (D3D11; frames wider than 1600 pixels
+  halved there with a mip level). The picture goes out on the same socket
+  as a core's (BGRA). It follows a new game window (emulators often replace
+  their first one) and puts the window back on the screen if a parked
+  window stops giving frames (some emulators stop drawing off-screen).
+- The page's keyboard and controllers become virtual Xbox 360 controllers
+  through the ViGEmBus driver (its IOCTLs directly; no SDK), one per player,
+  plugged in on the first press; the state is sent again for 3 s after
+  plugging in, because XInput misses the first reports. The person's own
+  controllers keep working with the emulator directly.
+- Close sends WM_CLOSE, waits 3 s, then ends the emulator's whole process
+  tree (PCSX2 asks for confirmation on close); the launcher's stop does the
+  same, before stopping the engine, so nothing is orphaned.
+- **Proof, PS3:** in Chrome, Play on Uncharted: Drake's Fortune (RPCS3,
+  through launcher v14) opened it inside the SaveState page in 9.6 s: the
+  game's loading screen (the turning coin) at 960x540 (captured at
+  1920x1080 and halved on the GPU), 51.6 pictures/s in the page; Enter on
+  the keyboard reached RPCS3 as a virtual controller; Close ended RPCS3.
+  Directly (without the page), 58.9 pictures/s with no dropped frames.
+- PS2 (PCSX2, Ape Escape 2) in Chrome: 57.3 pictures/s in the page, the
+  keyboard reached PCSX2 as a controller, Close ended it.
+- Found on the way: the host swapped a Drive game for a local file with the
+  same name, and every extracted PS3 game's file is EBOOT.BIN, so Uncharted
+  resolved to another, half-copied folder (17 of 21 GB, no PARAM.SFO), and
+  RPCS3 said "Invalid file or folder". The swap now also requires the
+  game's folder to match for EBOOT.BIN/default.xex. The launcher had also
+  fetched only the 9 MB EBOOT.BIN of a 21 GB game: launcher v14 lists the
+  folder (`/api/games/:id/folder`) and fetches every file (shown as "being
+  copied, n %", resumable), refuses a host copy without PARAM.SFO with that
+  reason, and on the host's own PC (the owner) plays the library's folder
+  where it is.
+
+Phase 6, other devices (WebRTC, `EnginePlayer.jsx`, `RemotePlayer.jsx`,
+`server/rtc.ts`):
+- In a game's menu, "Play on my phone or tablet" (same account) or "Let a
+  friend play" (anyone signed in) gives a code and a link. The PC's page
+  sends its canvas (with the chosen look) at 60 frames/s, motion-tuned, up
+  to 12 Mbit/s, and the game's sound; Chrome encodes it on the GPU, so no
+  encoder of our own was needed. The other device's keyboard, controllers
+  or on-screen buttons come back on a data channel as player 2 (or 1).
+  Nothing of the game passes through the host.
+- Tested with two Chromes (the "phone" at 844x390 with touch): the picture
+  arrived 1.8-2.1 s after opening the link, at 58 frames/s; the phone's
+  Start reached the engine as player 2; the PC showed "Also on another
+  device"; stopping sharing told the phone at once ("The game on the PC
+  stopped sharing"); closing ended the engine.
+
+Phase 6, crash isolation:
+- A watchdog in the socket thread (see 4). Tested by freezing the engine's
+  emulation thread from outside during Fire Red: after 20 s the page said
+  the game stopped responding; when the thread ran again the notice went;
+  frozen again, Close ended the engine in 5.5 s.
+- The regression found Dolphin's core can spin forever inside its own
+  save-state code when states are saved and loaded every frame (2 of ~14
+  selftests; sampled: a wait loop in dolphin_libretro.dll with every other
+  thread idle). Play never does that with states this big (run-ahead is
+  off over 16 MB, rewind over 32 MB); the selftest now follows the same rule.
+
+Tests: unit tests 20 passed (adds the ViGEm report mapping). Selftest
+regression: all pass (NES, Game Boy, GBA, Neo Geo local and streamed,
+GameCube; the Neo Geo game without its BIOS refused with the reason).
