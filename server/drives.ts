@@ -53,7 +53,9 @@ type OffloadJob = {
   status: JobStatus; createdAt: number; startedAt: number | null; finishedAt: number | null;
   stats: { bytes: number; totalBytes: number; transfers: number; totalTransfers: number; checks: number; totalChecks: number; errors: number; speed: number; eta: number | null; current: string[] };
   lastError: string | null;
-  verify: null | { at: number; matched: number; missing: number; differ: number; errors: number; matchedBytes: number; problems: string[] };
+  verify: null | { at: number; matched: number; missing: number; differ: number; errors: number; matchedBytes: number; problems: string[];
+    /** Every file the check could not confirm (up to 2,000): a retry checks only these again. */
+    recheck?: string[] };
   deleted: null | { at: number; files: number; bytes: number; skipped: number };
   /** Re-run every day so files added to the folder later get backed up too (copy only, never deletes). */
   keepSynced?: boolean;
@@ -532,39 +534,62 @@ export function createDrives(deps: DrivesDeps) {
       jobRc.delete(job.id);
       if (job.status === "paused") { saveNow(); return pump(); }
       if (restarting.delete(job.id)) { job.status = "queued"; saveNow(); return pump(); }
-      if (code === 0) { job.attempts = 0; job.carriedBytes = 0; job.stats = { ...job.stats, bytes: 0 }; void runVerify(job); return; }
+      if (code === 0) {
+        job.attempts = 0; job.carriedBytes = 0; job.stats = { ...job.stats, bytes: 0 };
+        // A retry of an incomplete upload: the files already confirmed by
+        // checksum stay confirmed (anything changed since was sent again by
+        // this copy), so only the ones that failed are checked again. A full
+        // check of F:\movies (435 GB) took hours and ran again on every retry.
+        const prev = job.verify;
+        const only = prev?.recheck?.length && prev.recheck.length === prev.missing + prev.differ + prev.errors ? prev.recheck : undefined;
+        void runVerify(job, only);
+        return;
+      }
       failed(job, job.lastError ?? `rclone stopped with code ${code}`);
       saveNow();
       pump();
     });
   }
 
-  async function runVerify(job: OffloadJob) {
+  async function runVerify(job: OffloadJob, only?: string[]) {
     const bin = await findRclone();
     if (!bin) return;
     job.status = "verifying";
     saveNow();
     await mkdir(reportsDir, { recursive: true });
-    const report = path.join(reportsDir, `${job.id}.txt`);
+    // A re-check writes its own report: a full check still finishing from
+    // before a restart wrote into the same file and mixed up the counts.
+    const report = path.join(reportsDir, only ? `${job.id}.recheck-result.txt` : `${job.id}.txt`);
+    const prev = only ? job.verify : null;
+    let onlyArgs: string[] = [];
+    if (only) {
+      const list = path.join(reportsDir, `${job.id}.recheck.txt`);
+      await writeFile(list, only.map((f) => `${f}\n`).join(""));
+      onlyArgs = [`--files-from-raw=${list}`];
+    }
     // One-way: every file in the folder on this PC must be on Drive with the
     // same size and MD5. Files only on Drive are fine.
     const proc = spawn(bin, ["check", job.source, `${job.remote}:${job.dest}`, "--one-way", `--combined=${report}`, "--checkers=8",
-      "--use-json-log", "--log-level=ERROR", ...excludeArgs(), ...dupeArgs(job)], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+      "--use-json-log", "--log-level=ERROR", ...excludeArgs(), ...dupeArgs(job), ...onlyArgs], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
     running.set(job.id, proc);
     proc.stderr!.on("data", () => {});
     proc.on("close", async () => {
       running.delete(job.id);
       if (job.status === "paused") { saveNow(); return pump(); }
       const lines = (await readFile(report, "utf8").catch(() => "")).split(/\r?\n/).filter(Boolean);
-      const v = { at: Date.now(), matched: 0, missing: 0, differ: 0, errors: 0, matchedBytes: 0, problems: [] as string[] };
+      const v = { at: Date.now(), matched: 0, missing: 0, differ: 0, errors: 0, matchedBytes: 0, problems: [] as string[], recheck: [] as string[] };
       for (const l of lines) {
         const mark = l[0], rel = l.slice(2);
         if (mark === "=") v.matched++;
         else if (mark === "+") { v.missing++; if (v.problems.length < 50) v.problems.push(`Not on Drive: ${rel}`); }
         else if (mark === "*") { v.differ++; if (v.problems.length < 50) v.problems.push(`Different on Drive: ${rel}`); }
         else if (mark === "!") { v.errors++; if (v.problems.length < 50) v.problems.push(`Could not check: ${rel}`); }
+        if ("+*!".includes(mark) && v.recheck.length < 2000) v.recheck.push(rel);
       }
       for (const l of lines) if (l[0] === "=") v.matchedBytes += (await stat(path.join(job.source, l.slice(2))).catch(() => null))?.size ?? 0;
+      // Only the failed files were checked: the earlier confirmations still count.
+      if (prev && lines.length) { v.matched += prev.matched; v.matchedBytes += prev.matchedBytes; }
+      else if (prev && !lines.length) { v.matched = prev.matched; v.matchedBytes = prev.matchedBytes; v.missing = prev.missing; v.differ = prev.differ; v.errors = prev.errors; v.problems = prev.problems; v.recheck = prev.recheck ?? []; }
       job.verify = v;
       job.status = v.missing || v.differ || v.errors ? "incomplete" : "verified";
       job.lastError = null;
@@ -806,9 +831,43 @@ export function createDrives(deps: DrivesDeps) {
     for (const j of jobs) {
       if (j.status === "copying" || j.status === "verifying") { j.status = "queued"; resumed++; }
       if (j.status === "deleting") j.status = "verified";
+      // Checks from before the re-check list was kept: when every problem was
+      // listed (fewer than the 50 kept), the list can be rebuilt from them.
+      const v = j.verify;
+      if (v && !v.recheck && v.problems.length && v.problems.length === v.missing + v.differ + v.errors && v.problems.length < 50) {
+        v.recheck = v.problems.map((p) => p.replace(/^(Not on Drive|Different on Drive|Could not check): /, ""));
+      }
     }
     if (resumed) deps.log("INFO", `Resuming ${resumed} interrupted upload(s)`);
+    // A final check cut off by a restart stayed "running" for good, so the
+    // folder could never be freed. It starts again (one at a time; they read
+    // the whole folder).
+    const finals = jobs.filter((j) => j.final?.running);
+    for (const j of finals) j.final!.running = false;
     saveNow();
+    if (finals.length) {
+      deps.log("INFO", `Running ${finals.length} final check(s) again (interrupted by a restart)`);
+      void (async () => {
+        await new Promise((r) => setTimeout(r, 60_000));
+        for (const j of finals) if (["verified", "kept"].includes(j.status)) await runFinalCheck(j).catch(() => {});
+      })();
+    }
+    // An upload's rclone outlives a server restart (Windows doesn't end child
+    // processes with their parent). Nobody reads its result any more, and it
+    // competed with the resumed copy for the disk and the uplink: end it.
+    if (process.platform === "win32" && jobs.length) {
+      const sources = jobs.map((j) => j.source.toLowerCase());
+      execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='rclone.exe'\" | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"],
+        { windowsHide: true, timeout: 20_000 }, (_e, out) => {
+          for (const line of String(out ?? "").split(/\r?\n/)) {
+            const [pid, cmd = ""] = line.split("\t");
+            const m = /\s(copy|check|sync)\s+"?([^"]+?)"?\s+"?[\w-]+:/i.exec(cmd);
+            if (!m || !Number(pid) || !sources.includes(m[2].toLowerCase())) continue;
+            try { process.kill(Number(pid)); deps.log("INFO", `Ended an upload left running by the last server (${m[1]} ${m[2]})`); } catch { /* gone */ }
+          }
+        });
+    }
     setTimeout(pump, 30_000).unref?.();
   })();
 

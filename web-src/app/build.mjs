@@ -901,6 +901,30 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   if (hub !== before) writeFileSync(file, hub);
 }
 
+// 3e. Movies & TV: the whole library (MediaLibrary.jsx). Films were only
+//     reachable through search (the per-genre rows were empty: the library
+//     sends no genres for films), and the series grid buried the page. The
+//     component is pasted between markers, so editing it carries over.
+{
+  const file = path.join(assets, find("MediaHub-"));
+  let hub = readFileSync(file, "utf8");
+  const before = hub;
+  const src = readFileSync(path.join(here, "MediaLibrary.jsx"), "utf8");
+  const code = esbuild.transformSync(src, { loader: "jsx", jsxFactory: "__nxh", jsxFragment: "__nxFrag", minify: true, target: "es2020" }).code;
+  const helpers = 'var __nxReact=r,__nxFrag=r.Fragment,__nxh=(t,p,...c)=>{const{key:k,...q}=p||{};if(c.length>1)return(0,e.jsxs)(t,{...q,children:c},k);if(c.length===1)q.children=c[0];return(0,e.jsx)(t,q,k)};';
+  const block = `/*nx-library:start*/${helpers}${code}/*nx-library:end*/`;
+  const old = /\/\*nx-library:start\*\/[\s\S]*?\/\*nx-library:end\*\//;
+  if (old.test(hub)) hub = hub.replace(old, () => block);
+  else {
+    if (!hub.includes("function Qn({movies:n,seriesGroups:o,")) throw new Error('patch "library component": anchor not found');
+    hub = hub.replace("function Qn({movies:n,seriesGroups:o,", () => `${block}function Qn({movies:n,seriesGroups:o,`);
+  }
+  hub = patch(hub, "library replaces the series grid", "(0,e.jsx)(NxLibrary,{movies:Qe,series:ee,",
+    'ee.length>0&&(0,e.jsxs)("div",{className:"space-y-3",children:[(0,e.jsxs)("h3",{className:"text-sm font-black uppercase tracking-wider flex items-center gap-2",children:[(0,e.jsx)("span",{className:"w-1 h-3.5 rounded-full",style:{background:"linear-gradient(180deg, #A855F7, #6366f1)",boxShadow:"0 0 10px rgba(168,85,247,0.7)"}}),(0,e.jsx)(Vt,{className:"w-4 h-4 text-purple-300"}),(0,e.jsx)("span",{className:"text-gradient-accent",children:"TV Series"})]}),(0,e.jsx)("div",{className:"grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3",children:ee.map(([s,l])=>(0,e.jsx)(en,{title:s,episodes:l,onSelect:()=>Pe({title:s,episodes:l}),onDeleteSeries:ze},s))})]})',
+    '(Qe.length>0||ee.length>0)&&(0,e.jsx)(NxLibrary,{movies:Qe,series:ee,Movie:Gt,Series:en,titleOf:kt,yearOf:mr,onPlayMovie:B,onDeleteMovie:Ce,onOpenMovie:Z,onOpenSeries:(s,l)=>Pe({title:s,episodes:l}),onDeleteSeries:ze})');
+  if (hub !== before) writeFileSync(file, hub);
+}
+
 // 4. index.html loads the boot script ahead of the app.
 {
   const file = path.join(dist, "index.html");

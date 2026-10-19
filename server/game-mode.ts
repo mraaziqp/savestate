@@ -118,6 +118,24 @@ export function createGameMode(deps: GameModeDeps) {
   let game: { pid: number; name: string; reason: string } | null = null;
   let since: number | null = null;
   let torrentsThrottled = false;
+  // Kept on disk: a server restart during a game used to forget that the
+  // torrents were slowed for it, and they stayed at the alternative limit
+  // (10 KB/s) for good. After a restart with no game running, it is undone.
+  const throttleFile = path.join(deps.persistDir, "game-mode-throttle.json");
+  const setThrottled = (on: boolean) => {
+    torrentsThrottled = on;
+    writeFile(throttleFile, JSON.stringify({ throttled: on, at: new Date().toISOString() })).catch(() => {});
+  };
+  readFile(throttleFile, "utf8").then((raw) => {
+    if (!JSON.parse(raw)?.throttled) return;
+    torrentsThrottled = true;
+    setTimeout(async () => {
+      if (active || !torrentsThrottled || !deps.throttleTorrents) return;
+      await deps.throttleTorrents(false).catch(() => false);
+      setThrottled(false);
+      deps.log("INFO", "Game mode: torrents back to full speed (slowed for a game before the server restarted)");
+    }, 90_000).unref?.();
+  }).catch(() => {});
   let helper: ChildProcess | null = null;
   let helperBackoff = 5_000;
   let goneAt = 0;
@@ -174,8 +192,8 @@ export function createGameMode(deps: GameModeDeps) {
     setPriorities(next);
     if (deps.throttleTorrents) {
       // Only undo a throttle this module applied, never one the owner set by hand.
-      if (next) torrentsThrottled = await deps.throttleTorrents(true).catch(() => false);
-      else if (torrentsThrottled) { await deps.throttleTorrents(false).catch(() => false); torrentsThrottled = false; }
+      if (next) { if (!torrentsThrottled) setThrottled(await deps.throttleTorrents(true).catch(() => false)); }
+      else if (torrentsThrottled) { await deps.throttleTorrents(false).catch(() => false); setThrottled(false); }
     }
     deps.log("INFO", next ? `Game mode on: ${why}` : `Game mode off: ${why}`);
     deps.announce?.(status());

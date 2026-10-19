@@ -12,7 +12,7 @@
  * qbt-config.json in server.ts); this only reads and fills them.
  */
 import type express from "express";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, statfs } from "node:fs/promises";
 import path from "node:path";
 import type { Caller } from "./access.ts";
 import { receipt, addLiveSource } from "./receipts.ts";
@@ -119,10 +119,21 @@ async function arrHealth(id: "sonarr" | "radarr", url: string, key: string) {
       && Date.now() - new Date(r.time).getTime() < 2 * 86400_000
       // Only since it last started: a repaired install should stop being reported.
       && (!status?.startTime || new Date(r.time).getTime() > new Date(status.startTime).getTime()));
-    if (cantSend.length) {
-      const why = String(cantSend[0].exception ?? cantSend[0].message ?? "").split("\n")[0].slice(0, 200);
-      out.problems.unshift({ level: "bad", text: `${APPS[id].label} can't send downloads to qBittorrent (${cantSend.length} failed in the last 2 days): ${why}`,
+    // A torrent site that answers "too many requests" (Knaben does when several
+    // releases are grabbed at once) or hands back a bad link is not qBittorrent's
+    // fault: the release is simply tried again on the next search.
+    const siteRefused = (r: any) => /TooManyRequests|\b429\b|parse magnet|magnetlink|\b40[34]\b|\b50[0-9]\b/i.test(String(r.exception ?? ""));
+    const fromSites = cantSend.filter(siteRefused);
+    const broken = cantSend.filter((r: any) => !siteRefused(r));
+    if (broken.length) {
+      const why = String(broken[0].exception ?? broken[0].message ?? "").split("\n")[0].slice(0, 200);
+      out.problems.unshift({ level: "bad", text: `${APPS[id].label} can't send downloads to qBittorrent (${broken.length} failed in the last 2 days): ${why}`,
         fix: /assembly|FileNotFound/i.test(why) ? `${APPS[id].label}'s program files are damaged: reinstall it from the official site (settings are kept).` : "Check the download client in its Settings > Download Clients." });
+    }
+    if (fromSites.length) {
+      const sites = [...new Set(fromSites.map((r: any) => /from Indexer (.+?) \(Prowlarr\)/.exec(String(r.message ?? ""))?.[1]).filter(Boolean))];
+      out.problems.push({ level: "warn", text: `${fromSites.length} release(s) couldn't be fetched in the last 2 days because ${sites.length ? sites.join(", ") : "a torrent site"} refused (too many requests at once, or a broken link).`,
+        fix: `Nothing to do: ${APPS[id].label} tries them again on its next search (SaveState re-searches missing titles twice a day).` });
     }
     if (out.queue.stuck) out.problems.push({ level: "warn", text: `${out.queue.stuck} download(s) need attention in ${APPS[id].label}'s queue (import blocked or warning).`, fix: `Open ${APPS[id].label} > Activity > Queue.` });
     for (const h of health as any[]) {
@@ -196,12 +207,15 @@ const MAX_SENT_PER_RUN = Number(process.env.NEXUS_DEEP_MAX_PER_RUN ?? 3) || 3;
 const MAX_MISSING_PER_SHOW = Number(process.env.NEXUS_DEEP_MAX_MISSING ?? 150) || 150;
 // Never let a grab eat the last of the library disk.
 const KEEP_FREE_BYTES = 50 * 1024 ** 3;
+// The disk guard (below): downloads pause under GUARD_LOW free, carry on above GUARD_OK.
+const GUARD_LOW = 5 * 1024 ** 3;
+const GUARD_OK = 15 * 1024 ** 3;
 const norm = (s: string) => s.toLowerCase().replace(/&/g, " and ").replace(/['’]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 const pad = (n: number) => String(n).padStart(2, "0");
 
 export function createDownloader(deps: DownloaderDeps) {
   const stateFile = path.join(deps.persistDir, "deep-search.json");
-  let tried: Record<string, { at: number; result: string }> = {};
+  let tried: Record<string, { at: number; result: string; title?: string }> = {};
   let lastRun: { at: number; checked: number; sent: string[]; running: boolean } = { at: 0, checked: 0, sent: [], running: false };
   readFile(stateFile, "utf8").then((t) => { const j = JSON.parse(t); tried = j.tried ?? {}; lastRun = { ...lastRun, ...(j.lastRun ?? {}), running: false }; }).catch(() => {});
   const saveState = () => writeFile(stateFile, JSON.stringify({ tried, lastRun })).catch(() => {});
@@ -212,8 +226,24 @@ export function createDownloader(deps: DownloaderDeps) {
       return r.ok ? ((await r.json()) as any[]) : [];
     } catch { return []; }
   }
+  // Some sites (Knaben) give only a Prowlarr link in the magnet field, which
+  // redirects to the real magnet. Sonarr and Radarr try to read that link as a
+  // magnet ("Failed to parse magnetlink") and drop the release, so the real
+  // magnet is looked up first.
+  async function realMagnet(link: unknown): Promise<string | null> {
+    const s = String(link ?? "");
+    if (!s) return null;
+    if (s.startsWith("magnet:")) return s;
+    try {
+      const r = await fetch(s, { redirect: "manual", signal: AbortSignal.timeout(30000) });
+      const loc = r.headers.get("location") ?? "";
+      return loc.startsWith("magnet:") ? loc : null;
+    } catch { return null; }
+  }
   async function push(app: { url: string; key: string }, rel: any): Promise<{ approved: boolean; why: string }> {
-    const body = { title: rel.title, downloadUrl: rel.downloadUrl || rel.magnetUrl, magnetUrl: rel.magnetUrl, protocol: "torrent", publishDate: rel.publishDate, indexer: rel.indexer, seeders: rel.seeders, size: rel.size };
+    const magnet = await realMagnet(rel.magnetUrl);
+    const downloadUrl = rel.downloadUrl || (magnet ? undefined : rel.magnetUrl);
+    const body = { title: rel.title, downloadUrl, magnetUrl: magnet ?? undefined, protocol: "torrent", publishDate: rel.publishDate, indexer: rel.indexer, seeders: rel.seeders, size: rel.size };
     try {
       const r = await fetch(`${app.url.replace(/\/$/, "")}/api/v3/release/push`, { method: "POST", headers: { "X-Api-Key": app.key, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(60000) });
       const out = await r.json().catch(() => null);
@@ -281,7 +311,7 @@ export function createDownloader(deps: DownloaderDeps) {
               const d = await push(S, c);
               if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${s.title} S${pad(season)}${one ? `E${pad(one.episodeNumber)}` : ""}`); receipt({ kind: "search", title: `Found and sent to Sonarr: ${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); break; }
             }
-            tried[key] = { at: Date.now(), result };
+            tried[key] = { at: Date.now(), result, title: `${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}` };
             deps.log("INFO", `Deep search ${s.title} S${pad(season)} (${missing.length} missing): ${result}`);
           }
         }
@@ -303,16 +333,20 @@ export function createDownloader(deps: DownloaderDeps) {
           if (!m.monitored || m.hasFile || !m.isAvailable || busy.has(m.id) || (tried[key] && Date.now() - tried[key].at < DAY)) continue;
           budget--; lastRun.checked++;
           const seen = new Map<string, any>();
-          for (const q of [`${m.title} ${m.year}`, `${m.title} (${m.year})`]) { for (const r of await prowlarrSearch(prowlarr, q, "2000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
           const t = norm(m.title);
-          const candidates = [...seen.values()].filter((r) => (r.seeders ?? 0) >= MIN_SEEDERS && norm(r.title).startsWith(t + " ") && r.title.includes(String(m.year)) && (Number(r.size) || 0) < freeFor(m.path ?? "") - KEEP_FREE_BYTES)
+          const pick = () => [...seen.values()].filter((r) => (r.seeders ?? 0) >= MIN_SEEDERS && norm(r.title).startsWith(t + " ") && r.title.includes(String(m.year)) && (Number(r.size) || 0) < freeFor(m.path ?? "") - KEEP_FREE_BYTES)
             .sort((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0));
-          let result = candidates.length ? "nothing approved" : "no well-seeded copy found";
+          for (const q of [`${m.title} ${m.year}`, `${m.title} (${m.year})`]) { for (const r of await prowlarrSearch(prowlarr, q, "2000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+          // Shorts and TV films are often filed as TV ("Too Many Cooks (2014
+          // Adult Swim) ... TV Short"), where Radarr never looks.
+          if (!pick().length) { for (const r of await prowlarrSearch(prowlarr, `${m.title} ${m.year}`, "5000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+          const candidates = pick();
+          let result = candidates.length ? "nothing approved" : "no well-seeded copy found (or not enough disk space)";
           for (const c of candidates.slice(0, 4)) {
             const d = await push(R, c);
             if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${m.title} (${m.year})`); receipt({ kind: "search", title: `Found and sent to Radarr: ${m.title} (${m.year})`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); break; }
           }
-          tried[key] = { at: Date.now(), result };
+          tried[key] = { at: Date.now(), result, title: `${m.title} (${m.year})` };
           deps.log("INFO", `Deep search ${m.title} (${m.year}): ${result}`);
         }
       }
@@ -331,13 +365,65 @@ export function createDownloader(deps: DownloaderDeps) {
     const cookie = cfg ? await deps.qbtLogin(cfg).catch(() => null) : null;
     if (cfg && cookie !== null) {
       const list = await fetch(`${cfg.host}/api/v2/torrents/info?filter=downloading`, { headers: cookie ? { Cookie: cookie } : {}, signal: AbortSignal.timeout(6000) }).then((r) => r.json()).catch(() => []);
+      const low = guard.free != null && guard.free < GUARD_OK;
+      const doing = (t: any) => t.state === "stalledDL" ? "Waiting for people to download from"
+        : t.state === "error" || t.state === "missingFiles" ? (low ? "Stopped: the download disk is full" : "Stopped with an error")
+        : /^(paused|stopped)DL$/.test(t.state) ? (guard.paused.includes(t.hash) ? `Paused until the download disk has room (${((guard.free ?? 0) / 1024 ** 3).toFixed(0)} GB free)` : "Paused")
+        : /^(queued|checking)/.test(t.state) ? "Waiting its turn" : "Downloading";
       for (const t of list as any[]) out.push({ kind: "download", title: t.name, progress: t.progress,
-        detail: `${t.state === "stalledDL" ? "Waiting for people to download from" : "Downloading"} · ${t.num_seeds} seeding · ${(t.size / 1024 ** 3).toFixed(1)} GB`, speed: t.dlspeed, eta: t.eta > 0 && t.eta < 8640000 ? t.eta : null, status: t.state });
+        detail: `${doing(t)} · ${t.num_seeds} seeding · ${(t.size / 1024 ** 3).toFixed(1)} GB`, speed: t.dlspeed, eta: t.eta > 0 && t.eta < 8640000 ? t.eta : null, status: t.state });
     }
     return out;
   });
   setTimeout(() => void deepSearch().catch(() => {}), 20 * 60_000).unref?.();
   setInterval(() => void deepSearch().catch(() => {}), 6 * 3600_000).unref?.();
+
+  // ── Disk guard ──
+  // qBittorrent writes until its disk is full, and then every download stops
+  // with an error (F: filled on 2026-10-19 once the speed limit came off).
+  // Below 5 GB free SaveState pauses the downloads; with 15 GB free they carry
+  // on, and ones the full disk stopped are started again.
+  const guardFile = path.join(deps.persistDir, "disk-guard.json");
+  const guard: { paused: string[]; free: number | null } = { paused: [], free: null };
+  readFile(guardFile, "utf8").then((t) => { guard.paused = JSON.parse(t).paused ?? []; }).catch(() => {});
+  const saveGuard = () => writeFile(guardFile, JSON.stringify({ paused: guard.paused })).catch(() => {});
+  async function diskGuard() {
+    const cfg = await deps.loadQbt().catch(() => null);
+    const cookie = cfg ? await deps.qbtLogin(cfg).catch(() => null) : null;
+    if (!cfg || cookie === null) return;
+    const headers: Record<string, string> = { Referer: cfg.host, ...(cookie ? { Cookie: cookie } : {}) };
+    const get = (p: string) => fetch(`${cfg.host}/api/v2/${p}`, { headers, signal: AbortSignal.timeout(10000) }).then((r) => r.json());
+    // qBittorrent 5 calls them stop/start; 4 called them pause/resume.
+    const act = async (verb: "stop" | "start", hashes: string[]) => {
+      const body = new URLSearchParams({ hashes: hashes.join("|") });
+      const r = await fetch(`${cfg.host}/api/v2/torrents/${verb}`, { method: "POST", headers, body, signal: AbortSignal.timeout(10000) }).catch(() => null);
+      if (!r || r.status === 404) await fetch(`${cfg.host}/api/v2/torrents/${verb === "stop" ? "pause" : "resume"}`, { method: "POST", headers, body, signal: AbortSignal.timeout(10000) }).catch(() => {});
+    };
+    const prefs = await get("app/preferences").catch(() => null);
+    const info = prefs?.save_path ? await statfs(prefs.save_path).catch(() => null) : null;
+    if (!info) return;
+    const free = info.bavail * info.bsize;
+    guard.free = free;
+    const list = ((await get("torrents/info").catch(() => [])) as any[]);
+    if (free < GUARD_LOW) {
+      const busy = list.filter((t) => t.amount_left > 0 && !/^(paused|stopped)/.test(t.state)).map((t) => t.hash);
+      if (!busy.length) return;
+      await act("stop", busy);
+      guard.paused = [...new Set([...guard.paused, ...busy])];
+      void saveGuard();
+      deps.log("WARN", `Download disk nearly full (${(free / 1024 ** 3).toFixed(1)} GB free): paused ${busy.length} download(s)`);
+      receipt({ kind: "download", status: "warn", title: "Downloads paused: the download disk is nearly full", detail: `${(free / 1024 ** 3).toFixed(1)} GB free on ${prefs.save_path}. They carry on by themselves at ${GUARD_OK / 1024 ** 3} GB free (Cloud Drives > Upload & verify frees space).` });
+    } else if (free > GUARD_OK) {
+      const stuck = list.filter((t) => t.amount_left > 0 && (t.state === "error" || guard.paused.includes(t.hash))).map((t) => t.hash);
+      if (stuck.length) {
+        await act("start", stuck);
+        deps.log("INFO", `Download disk has room again (${(free / 1024 ** 3).toFixed(0)} GB free): started ${stuck.length} download(s)`);
+      }
+      if (guard.paused.length) { guard.paused = []; void saveGuard(); }
+    }
+  }
+  setTimeout(() => void diskGuard().catch(() => {}), 60_000).unref?.();
+  setInterval(() => void diskGuard().catch(() => {}), 2 * 60_000).unref?.();
 
   async function qbtHealth() {
     const cfg = await deps.loadQbt();
@@ -390,6 +476,22 @@ export function createDownloader(deps: DownloaderDeps) {
       ]);
       res.setHeader("Cache-Control", "no-store");
       const recent = Object.entries(tried).sort((a, b) => b[1].at - a[1].at).slice(0, 12).map(([k, v]) => ({ key: k, ...v }));
+      // Entries from before names were kept: look the names up once.
+      if (recent.some((r) => !r.title) && arr) {
+        const [series, movies] = await Promise.all([
+          recent.some((r) => r.key.startsWith("tv:")) && arr.sonarrUrl ? arrGet(arr.sonarrUrl, arr.sonarrApiKey, "v3", "series", 30000).catch(() => []) : [],
+          recent.some((r) => r.key.startsWith("movie:")) && arr.radarrUrl ? arrGet(arr.radarrUrl, arr.radarrApiKey, "v3", "movie", 30000).catch(() => []) : [],
+        ]);
+        for (const r of recent) {
+          if (r.title) continue;
+          const [kind, id, season] = r.key.split(":");
+          const hit = (kind === "tv" ? (series as any[]) : (movies as any[])).find((x) => String(x.id) === id);
+          if (!hit) continue;
+          r.title = kind === "tv" ? `${hit.title} season ${season}` : `${hit.title} (${hit.year})`;
+          tried[r.key].title = r.title;
+        }
+        void saveState();
+      }
       res.json({ apps: [qbittorrent, prowlarr, sonarr, radarr], deep: { ...lastRun, recent } });
     });
 

@@ -175,7 +175,7 @@ export function DownloaderSetup() {
                 <ul style={{ margin: "8px 0 0", paddingLeft: 0, listStyle: "none", display: "grid", gap: 4, fontSize: 12.5 }}>
                   {data.deep.recent.map((r) => (
                     <li key={r.key}><span className={`nxa-pill ${r.result.startsWith("sent") ? "ok" : ""}`} style={{ marginRight: 6 }}>{r.result.startsWith("sent") ? "Found" : "Not yet"}</span>
-                      {r.result.startsWith("sent") ? r.result.replace(/^sent: /, "") : `${r.key.startsWith("tv") ? "Season" : "Film"} ${r.key.split(":").slice(1).join(" ")}: ${r.result}`}</li>
+                      {r.result.startsWith("sent") ? r.result.replace(/^sent: /, "") : `${r.title ?? `${r.key.startsWith("tv") ? "Season" : "Film"} ${r.key.split(":").slice(1).join(" ")}`}: ${r.result}`}</li>
                   ))}
                 </ul>
               )}

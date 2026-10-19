@@ -14232,7 +14232,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const crawling = (t: { state: string; progress: number; eta: number; dlspeed: number; added_on: number }) =>
       (t.state === "downloading" || t.state === "forcedDL") && t.progress < 0.9 && Date.now() / 1000 - t.added_on > 6 * 3600
       && (t.eta > 3 * 86400 || t.dlspeed < 20 * 1024);
-    const stalled = torrents.filter((t) => ["stalledDL", "error", "missingFiles", "metaDL"].includes(t.state) || crawling(t));
+    // Slow or stopped for a reason on this side, not the release's: qBittorrent
+    // on its alternative speed limit (game mode, or left on: 10 KB/s for every
+    // torrent, on 2026-10-19), or its disk full (every torrent in "error").
+    // Judging releases then blocklisted good ones.
+    const limited = await fetch(`${qbt.host}/api/v2/transfer/speedLimitsMode`, { headers: { Cookie: qbt.cookie }, signal: AbortSignal.timeout(10_000) })
+      .then((r) => r.text()).then((t) => t.trim() === "1").catch(() => false);
+    if (limited) return { checked: 0, acted };
+    const savePath = await fetch(`${qbt.host}/api/v2/app/preferences`, { headers: { Cookie: qbt.cookie }, signal: AbortSignal.timeout(10_000) })
+      .then((r) => r.json()).then((p: any) => String(p?.save_path ?? "")).catch(() => "");
+    const diskLow = savePath ? await statfs(savePath).then((s) => s.bavail * s.bsize < 15 * 1024 ** 3).catch(() => false) : false;
+    const stalled = torrents.filter((t) => ["stalledDL", "metaDL"].includes(t.state) || (!diskLow && ["error", "missingFiles"].includes(t.state)) || crawling(t));
 
     // Forget entries that recovered, so a torrent that stalls again next month
     // starts from strike 1 rather than jumping straight to blocklisting.
@@ -22708,18 +22718,24 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         files.push({ path: full, size: st.size, mtime: st.mtimeMs });
       }
 
-      if (total <= HLS_CACHE_MAX_BYTES) return;
+      // The cache shares its disk with downloads: when that disk runs low it
+      // gives its space back first (F: filled up with the cache at its cap).
+      let cap = HLS_CACHE_MAX_BYTES;
+      const fsInfo = await statfs(HLS_CACHE_DIR).catch(() => null);
+      const LOW = 20 * 1024 ** 3;
+      if (fsInfo) { const free = fsInfo.bavail * fsInfo.bsize; if (free < LOW) cap = Math.max(0, Math.min(cap, total - (LOW - free))); }
+      if (total <= cap) return;
 
       files.sort((a, b) => a.mtime - b.mtime);
       let freed = 0;
       let removed = 0;
       for (const f of files) {
-        if (total - freed <= HLS_CACHE_MAX_BYTES) break;
+        if (total - freed <= cap) break;
         await unlink(f.path).catch(() => {});
         freed += f.size;
         removed++;
       }
-      log("INFO", `HLS cache pruned: removed ${removed} segment(s), freed ${(freed / 1024 ** 3).toFixed(2)} GB (cap ${(HLS_CACHE_MAX_BYTES / 1024 ** 3).toFixed(0)} GB)`, "media");
+      log("INFO", `HLS cache pruned: removed ${removed} segment(s), freed ${(freed / 1024 ** 3).toFixed(2)} GB (cap ${(cap / 1024 ** 3).toFixed(1)} GB)`, "media");
     } catch (err) {
       log("WARN", `HLS cache prune failed: ${(err as Error)?.message ?? err}`, "media");
     }
@@ -22728,7 +22744,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // Once shortly after boot to clear whatever the last run left behind, then
   // hourly. unref so a pending timer never holds shutdown open.
   setTimeout(() => { pruneHlsCache().catch(() => {}); }, 30_000).unref?.();
-  setInterval(() => { pruneHlsCache().catch(() => {}); }, 60 * 60 * 1000).unref?.();
+  setInterval(() => { pruneHlsCache().catch(() => {}); }, 10 * 60 * 1000).unref?.();
 
   // ── Fast-start segment map ────────────────────────────────────────────
   // Uniform 6s segments meant the player could not draw a frame until a whole

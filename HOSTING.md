@@ -426,6 +426,13 @@ offered, and the server only accepts it, after a pass less than a week old;
 it deletes the files on `<job>.final.txt` (confirmed duplicates included)
 that haven't changed since the check, and asks first.
 
+A final check cut off by a server restart is started again by itself (it
+used to stay "running" for good, so the folder could never be freed). An
+upload that came back incomplete re-checks only the files that failed on its
+retry (`recheck` in the job; a full check of F:\movies, 435 GB, took hours
+and ran again on every retry, holding up every upload behind it). Copies and
+checks left running by the previous server are ended when it starts.
+
 ## Deleting films and episodes
 
 Delete (card trash icon, a film's details, "Delete series") asks first and
@@ -867,6 +874,44 @@ rules. At most `NEXUS_DEEP_MAX_PER_RUN` (3) grabs a run; shows with more than
 left free. When downloads "sit", first compare qBittorrent's newest torrent
 with Sonarr's log: in October 2026 Sonarr had lost its program files and
 could not hand anything to qBittorrent (the health card now says so).
+Releases pushed by deep search get their real magnet (some sites, Knaben,
+give a Prowlarr link in the magnet field, which Sonarr/Radarr reject as
+"Failed to parse magnetlink"); films are also looked for under TV
+categories, where shorts and TV films are filed.
+
+**When downloads crawl, check qBittorrent's alternative speed limit first**
+(`/api/v2/transfer/speedLimitsMode` = 1 means every torrent shares 10 KB/s).
+Game mode turns it on while a game runs; it used to forget that across a
+server restart and leave it on (2026-10-19), so it is kept in
+`game-mode-throttle.json` now and undone after a restart with no game
+running. The stuck-download watchdog skips its run while the limit is on,
+and doesn't count "error" torrents against a release while the disk is low.
+
+**Disk guard** (`server/downloader.ts`): below 5 GB free on qBittorrent's
+save path, SaveState pauses the downloads (`disk-guard.json`); at 15 GB free
+it starts them again, with any the full disk stopped. Sonarr's and Radarr's
+library folders are hard links to the torrents on the same disk, so
+removing finished torrents frees nothing; uploading and freeing folders
+(Cloud Drives > Upload & verify) does. The streaming cache gives its space
+back when its disk has under 20 GB free, and the film converter removes
+working folders a restart left behind.
+
+"Sonarr can't send downloads to qBittorrent" is only reported for real
+client failures; a site refusing ("429 Too Many Requests" from Knaben when
+several releases are grabbed at once) is a warning, and the release is tried
+again on the next search.
+
+## Movies & TV library
+
+The Movies & TV page is the compiled `MediaHub` chunk (its source was lost).
+Films used to appear only in "Recently Added", "Recommended" and per-genre
+rows, and the library sends no genres for films, so most films were only
+findable by search, under a series grid of very large cards.
+`web-src/app/MediaLibrary.jsx` replaces that grid with "Your library":
+Movies / TV Series tabs, sorting (recently added, A to Z, year), compact
+cards (the page's own: play, details, delete as before) and "Show more /
+Show all". `web-src/app/build.mjs` (3e) compiles it and pastes it into the
+chunk between `/*nx-library:start*/` markers, so edits carry over.
 
 ## Media uploads
 

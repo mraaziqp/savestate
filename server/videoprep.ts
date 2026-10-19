@@ -28,7 +28,7 @@
 import type express from "express";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { stat, mkdir, rm, readFile, writeFile, statfs } from "node:fs/promises";
+import { stat, mkdir, rm, readFile, writeFile, statfs, readdir } from "node:fs/promises";
 import path from "node:path";
 import { addLiveSource, addCompletedSource, humanBytes } from "./receipts.ts";
 
@@ -285,6 +285,18 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       if (checked) deps.log("INFO", `video prep: checked ${checked} film(s); ${[...rows.values()].filter((r) => r.status === "queued").length} to prepare`);
     } finally { scanning = false; lastScanAt = Date.now(); }
   }
+
+  // A server restart mid-conversion leaves its working folder behind (the
+  // source copy and a half-made film): 17 of them filled 17 GB of the disk
+  // downloads use. Nothing is converting when the server starts, so they go.
+  void (async () => {
+    for (const dir of [process.env.NEXUS_VIDEO_PREP_TMP?.trim(), path.join(deps.persistDir, "tmp", "video-prep")].filter(Boolean) as string[]) {
+      const names = await readdir(dir).catch(() => [] as string[]);
+      let removed = 0;
+      for (const n of names) if (/^\d{10,}$/.test(n)) { await rm(path.join(dir, n), { recursive: true, force: true }).then(() => removed++, () => {}); }
+      if (removed) deps.log("INFO", `video prep: removed ${removed} working folder(s) left by a restart`);
+    }
+  })();
 
   async function tempDir(need: number): Promise<string | null> {
     for (const dir of [process.env.NEXUS_VIDEO_PREP_TMP?.trim(), path.join(deps.persistDir, "tmp", "video-prep")].filter(Boolean) as string[]) {
