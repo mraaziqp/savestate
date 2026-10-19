@@ -17,6 +17,7 @@ pub mod rewind;
 pub mod audio;
 pub mod serve;
 pub mod session;
+pub mod sync;
 pub mod timing;
 pub mod vfs;
 pub mod video;

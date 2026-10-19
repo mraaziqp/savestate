@@ -32,6 +32,7 @@ import { createPayfast } from "./server/payfast.ts";
 import { createDrives } from "./server/drives.ts";
 import { createVideoPrep } from "./server/videoprep.ts";
 import { registerSaveFiles } from "./server/savefiles.ts";
+import { registerEngineStates } from "./server/enginestates.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
@@ -6272,6 +6273,8 @@ async function startServer() {
   // Game saves that follow you between devices: the PS Vita app and the
   // browser player (server/savefiles.ts).
   registerSaveFiles(app, { pool: () => (dbConnected && pool ? pool : null), userOf: (req, res) => requireAnyAuth(req, res), log: (level, msg) => log(level, msg, "saves") });
+  // SaveState Engine: save states with versions, and player preferences (server/enginestates.ts).
+  registerEngineStates(app, { pool: () => (dbConnected && pool ? pool : null), userOf: (req, res) => requireAnyAuth(req, res), log: (level, msg) => log(level, msg, "engine") });
 
   // The NAS can't convert video while someone watches. When a film has no
   // ready copy (or a quality change is asked for), the request goes to the
@@ -20398,7 +20401,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // ── Save State Cloud Sync ──────────────────────────────────────────────────
   app.get("/api/emulator/savestates/:gameId", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
-    const dir = path.join(PERSIST_DIR, 'savestates', String(auth.userId), req.params.gameId);
+    const dir = path.join(PERSIST_DIR, 'savestates', String(auth.userId), String(req.params.gameId).replace(/[^a-zA-Z0-9_-]/g, '') || '_');
     let files: string[] = [];
     try { files = await readdir(dir); } catch { /* no states yet */ }
     const states = await Promise.all(
@@ -20430,7 +20433,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const { slot = 'auto', data } = req.body as { slot?: string; data: string };
     if (!data) return res.status(400).json({ error: 'data (base64) required' });
     const cleanSlot = String(slot).replace(/[^a-zA-Z0-9]/g, '') || 'auto';
-    const dir = path.join(PERSIST_DIR, 'savestates', String(auth.userId), req.params.gameId);
+    const dir = path.join(PERSIST_DIR, 'savestates', String(auth.userId), String(req.params.gameId).replace(/[^a-zA-Z0-9_-]/g, '') || '_');
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, `${cleanSlot}.state`), Buffer.from(data, 'base64'));
 
@@ -20455,7 +20458,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/emulator/savestates/:gameId/:slot", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
     const cleanSlot = String(req.params.slot).replace(/[^a-zA-Z0-9]/g, '') || 'cloud';
-    const fp = path.join(PERSIST_DIR, 'savestates', String(auth.userId), req.params.gameId, `${cleanSlot}.state`);
+    const fp = path.join(PERSIST_DIR, 'savestates', String(auth.userId), String(req.params.gameId).replace(/[^a-zA-Z0-9_-]/g, '') || '_', `${cleanSlot}.state`);
     try {
       await fsAccess(fp);
       res.setHeader("Content-Type", "application/octet-stream");
@@ -20482,7 +20485,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.delete("/api/emulator/savestates/:gameId/:slot", async (req, res) => {
     const auth = requireAnyAuth(req, res); if (!auth) return;
     const cleanSlot = String(req.params.slot).replace(/[^a-zA-Z0-9]/g, '') || 'cloud';
-    const fp = path.join(PERSIST_DIR, 'savestates', String(auth.userId), req.params.gameId, `${cleanSlot}.state`);
+    const fp = path.join(PERSIST_DIR, 'savestates', String(auth.userId), String(req.params.gameId).replace(/[^a-zA-Z0-9_-]/g, '') || '_', `${cleanSlot}.state`);
     await unlink(fp).catch(() => {});
     if (dbConnected && pool) {
       try {

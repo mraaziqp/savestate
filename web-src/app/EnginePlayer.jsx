@@ -14,10 +14,14 @@
 //   controls Xbox-type controllers are read by the engine itself (XInput);
 //            the keyboard (remappable) and other controllers (Gamepad API) are
 //            read here and sent when they change. Guide or Back with RB save,
-//            LB load, Start menu, RT fast-forward, LT rewind; Esc menu, Tab
-//            fast-forward, ` rewind, F2 save, F4 load
+//            LB load, Start menu, RT fast-forward, LT rewind, d-pad left/right
+//            save slot; Esc menu, Tab fast-forward, ` rewind, F2 save, F4 load.
+//            In the menu the d-pad moves, A chooses, B goes back.
+//   saves    slots are kept on this PC and sent to the person's account (the
+//            host keeps earlier versions); preferences follow them too
+//            (/api/engine/prefs)
 import React, { useEffect, useRef, useState, useCallback } from "react";
-import { useStyles, Icon } from "./lib.jsx";
+import { useStyles, Icon, token } from "./lib.jsx";
 
 const CSS = `
 .nxe{position:fixed;inset:0;z-index:5600;background:#000;color:#fff;display:block;user-select:none;-webkit-user-select:none}
@@ -55,6 +59,11 @@ const CSS = `
 .nxe-chip{position:absolute;right:14px;bottom:14px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.15);padding:8px 12px;border-radius:12px;font:600 13px system-ui,sans-serif;cursor:pointer}
 .nxe-wait{position:absolute;inset:0;display:grid;place-items:center;color:#aab;font:600 14px system-ui,sans-serif}
 .nxe-rw{position:absolute;top:14px;right:14px;background:rgba(0,0,0,.65);padding:6px 10px;border-radius:10px;font:700 13px system-ui,sans-serif}
+.nxe-slot{position:relative}
+.nxe-slot i{position:absolute;top:8px;right:8px;font-style:normal;font-size:11px;background:rgba(0,0,0,.6);border-radius:6px;padding:1px 5px}
+.nxe-vers{display:grid;gap:6px}
+.nxe-vers .nxe-btn{justify-content:space-between;font-size:13px;padding:8px 10px}
+.nxe-card button:focus-visible,.nxe-card button:focus{outline:2px solid #8fa2ff;outline-offset:2px}
 `;
 
 // libretro joypad ids, in order: B Y Select Start Up Down Left Right A X L R L2 R2 L3 R3
@@ -163,7 +172,45 @@ class NxSound extends AudioWorkletProcessor {
 }
 registerProcessor("nx-sound", NxSound);`;
 
-const save = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+const PREF = /^nx_engine(_|$)/;
+const allPrefs = () => {
+  const o = {};
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (PREF.test(k) && k !== "nx_engine_prefs_at") o[k] = localStorage.getItem(k); } } catch { /* private mode */ }
+  return o;
+};
+let prefsTimer = 0;
+// Sent to the account a moment after the last change.
+const pushPrefs = () => {
+  clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => {
+    fetch("/api/engine/prefs", { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` }, body: JSON.stringify({ prefs: allPrefs() }) })
+      .then((r) => r.json()).then((r) => { if (r.updatedAt) { try { localStorage.setItem("nx_engine_prefs_at", String(r.updatedAt)); } catch { /* private mode */ } } }).catch(() => {});
+  }, 1500);
+};
+const save = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } if (PREF.test(k)) pushPrefs(); };
+
+// Menu navigation by controller: the nearest button in a direction.
+const menuButtons = () => [...document.querySelectorAll(".nxe-card button:not(:disabled)")];
+const moveFocus = (dir) => {
+  const list = menuButtons();
+  if (!list.length) return;
+  const cur = list.includes(document.activeElement) ? document.activeElement : null;
+  if (!cur) { list[0].focus(); return; }
+  const r = cur.getBoundingClientRect();
+  const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+  let best = null, bestScore = Infinity;
+  for (const el of list) {
+    if (el === cur) continue;
+    const q = el.getBoundingClientRect();
+    const dx = q.left + q.width / 2 - cx, dy = q.top + q.height / 2 - cy;
+    const vertical = dir === "up" || dir === "down";
+    const ok = dir === "up" ? dy < -4 : dir === "down" ? dy > 4 : dir === "left" ? dx < -4 : dx > 4;
+    if (!ok) continue;
+    const score = (vertical ? Math.abs(dy) : Math.abs(dx)) + (vertical ? Math.abs(dx) : Math.abs(dy)) * 2;
+    if (score < bestScore) { bestScore = score; best = el; }
+  }
+  if (best) { best.focus(); best.scrollIntoView({ block: "nearest" }); }
+};
 const load = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
 const loadKeys = () => { try { const k = JSON.parse(localStorage.getItem("nx_engine_keys") ?? "null"); return k && typeof k === "object" ? k : { ...DEFAULT_KEYS }; } catch { return { ...DEFAULT_KEYS }; } };
 const keyName = (code) => code.replace(/^Key/, "").replace(/^Digit/, "").replace(/^Arrow/, "").replace("Right", " R").replace("Left", " L").replace("Shift R", "R-Shift").trim();
@@ -205,12 +252,16 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   const [keysPanel, setKeysPanel] = useState(false);
   const [keymap, setKeymap] = useState(st.current.keymap);
   const [listening, setListening] = useState(null);
+  const [versions, setVersions] = useState(null);
   const lookRef = useRef(look);
   lookRef.current = look;
   const prefs = useRef({});
   prefs.current = { runahead, rewindOn, ffSpeed, labels, slot };
 
   const send = useCallback((m) => { const s = sock.current; if (s && s.readyState === 1) s.send(JSON.stringify(m)); }, []);
+  // Menu actions the controllers use (set every render: they close over current state).
+  st.current.menuBack = () => { if (versions) setVersions(null); else if (keysPanel) setKeysPanel(false); else setMenu(false); };
+  st.current.stepSlot = (d) => { const n = ((prefs.current.slot - 1 + d + 4) % 4) + 1; setSlot(n); save("nx_engine_slot", String(n)); send({ t: "slot", n }); flash(`Slot ${n}`); };
   const flash = useCallback((text) => { setToast(text); clearTimeout(flash.t); flash.t = setTimeout(() => setToast(null), 2200); }, []);
 
   // ── Socket, picture, sound and controls ───────────────────────────────
@@ -299,8 +350,19 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         else if (m.type === "status") { setStatus(m); S.nativeCount = m.pads ?? 0; }
         else if (m.type === "pads") { if (m.native > S.nativeCount) flash("Controller connected"); else if (m.native < S.nativeCount) flash("Controller disconnected"); S.nativeCount = m.native; }
         else if (m.type === "saved") { flash(`Saved to slot ${m.slot}`); send({ t: "slots" }); }
-        else if (m.type === "loaded") flash(`Loaded slot ${m.slot}`);
+        else if (m.type === "synced") { flash(`Slot ${m.slot} is on your account too`); send({ t: "slots" }); }
+        else if (m.type === "syncError") flash(m.message);
+        else if (m.type === "loaded") flash(m.version ? `Loaded an earlier save of slot ${m.slot}` : `Loaded slot ${m.slot}${m.from === "host" ? " (from your account)" : ""}`);
         else if (m.type === "slots") setSlots(m.slots);
+        else if (m.type === "versions") setVersions({ slot: m.slot, list: m.versions ?? [] });
+        else if (m.type === "slot") { setSlot(m.n); save("nx_engine_slot", String(m.n)); flash(`Slot ${m.n}`); }
+        else if (m.type === "nav") {
+          // The engine's controllers while the menu is open (XInput bits).
+          const b = m.buttons;
+          if (b & 0x1) moveFocus("up"); if (b & 0x2) moveFocus("down"); if (b & 0x4) moveFocus("left"); if (b & 0x8) moveFocus("right");
+          if (b & 0x1000) document.activeElement?.click?.();
+          if (b & 0x2000 || b & 0x10) S.menuBack?.();
+        }
         else if (m.type === "menu") setMenu((x) => !x);
         else if (m.type === "ff") { if (m.on) flash(`Fast-forward${prefs.current.ffSpeed ? ` ${prefs.current.ffSpeed}×` : ""}`); }
         else if (m.type === "rumble") S.rumble[m.port] = { strong: m.strong / 65535, weak: m.weak / 65535, at: 0 };
@@ -396,6 +458,8 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
           if (pressed & (1 << 5)) fire(() => hotkey("save"));
           if (pressed & (1 << 4)) fire(() => hotkey("load"));
           if (pressed & (1 << 9)) fire(() => hotkey("menu"));
+          if (pressed & (1 << 15)) fire(() => S.stepSlot?.(1));
+          if (pressed & (1 << 14)) fire(() => S.stepSlot?.(-1));
           if (rt && !P.rawRt && !P.hkRt) fire(() => { P.hkRt = true; setFf(true); });
           if (lt && !P.rawLt && !P.hkLt) fire(() => { P.hkLt = true; setRw(true); });
         }
@@ -404,6 +468,19 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         if ((P.prev & (1 << 16)) && !guide && !P.used) hotkey("menu");
         if (!back) P.combo = false;
         P.prev = bits; P.rawLt = lt; P.rawRt = rt;
+        // In the menu: the d-pad (or stick) moves, A chooses, B or Start goes back.
+        if (S.menuOpen) {
+          const ax = g.axes[0] ?? 0, ay = g.axes[1] ?? 0;
+          const stick = (Math.abs(ay) > 0.6 ? (ay < 0 ? 1 << 12 : 1 << 13) : 0) | (Math.abs(ax) > 0.6 ? (ax < 0 ? 1 << 14 : 1 << 15) : 0);
+          const nav = (bits | (stick << 0)) & ~(P.navPrev ?? 0);
+          P.navPrev = bits | stick;
+          if (nav & (1 << 12)) moveFocus("up");
+          if (nav & (1 << 13)) moveFocus("down");
+          if (nav & (1 << 14)) moveFocus("left");
+          if (nav & (1 << 15)) moveFocus("right");
+          if (nav & 1) document.activeElement?.click?.();
+          if (nav & (1 << 1) || nav & (1 << 9)) S.menuBack?.();
+        } else P.navPrev = bits;
         const hidden = guide || P.combo;
         let b = 0;
         const a = [0, 0, 0, 0], tr = [0, 0];
@@ -496,12 +573,32 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Preferences from the person's account, when newer than this browser's.
+  useEffect(() => {
+    let gone = false;
+    fetch("/api/engine/prefs", { headers: { Authorization: `Bearer ${token()}` } }).then((r) => (r.ok ? r.json() : null)).then((r) => {
+      if (gone || !r?.prefs || !(r.updatedAt > Number(load("nx_engine_prefs_at", "0")))) return;
+      try { for (const [k, v] of Object.entries(r.prefs)) if (PREF.test(k) && typeof v === "string") localStorage.setItem(k, v); localStorage.setItem("nx_engine_prefs_at", String(r.updatedAt)); } catch { return; }
+      const n = Number(load("nx_engine_slot", "1")) || 1; setSlot(n); send({ t: "slot", n });
+      setLook(load(`nx_engine_look_${plat}`, look));
+      const ra = Number(load(`nx_engine_runahead_${plat}`, "0")) || 0; setRunahead(ra); send({ t: "runahead", frames: ra });
+      const rw = load("nx_engine_rewind", "1") === "1"; setRewindOn(rw); send({ t: "rewinding", enabled: rw });
+      const ff = Number(load("nx_engine_ffspeed", "4")); setFfSpeed(ff); send({ t: "ffspeed", x: ff });
+      const lb = load("nx_engine_layout", "position") === "labels"; setLabels(lb); st.current.labels = lb; send({ t: "layout", labels: lb });
+      const km = loadKeys(); st.current.keymap = km; setKeymap(km);
+      setStats(load("nx_engine_stats", "0") === "1");
+    }).catch(() => {});
+    return () => { gone = true; };
+    // Once per game.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // The menu pauses the game and shows the save slots as they are now.
   useEffect(() => {
     st.current.menuOpen = menu;
     send({ t: menu ? "pause" : "resume" });
     if (menu) send({ t: "slots" });
-    else { setKeysPanel(false); st.current.listen = null; setListening(null); }
+    else { setKeysPanel(false); setVersions(null); st.current.listen = null; setListening(null); }
   }, [menu, send]);
 
   // The pointer hides while playing.
@@ -549,7 +646,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
       {rewinding && !menu && <div className="nxe-rw">◀◀ Rewinding</div>}
       {stats && status && !menu && (
         <div className="nxe-stats" style={{ position: "absolute", left: 12, bottom: 12, background: "rgba(0,0,0,.6)", padding: "6px 9px", borderRadius: 10 }}>
-          <span>{status.fps} fps · {status.frameMs} ms/frame{status.runahead?.frames ? ` · run-ahead ${status.runahead.frames}` : ""}</span>
+          <span>{status.fps} fps · {status.frameMs} ms/frame{status.runahead?.frames ? ` · run-ahead ${status.runahead.frames}${status.runahead.copies === 2 ? " (2 copies)" : ""}` : ""}</span>
           <span>sound {status.audioFillMs} / {status.audioTargetMs} ms{status.dropped ? ` · ${status.dropped} skipped` : ""}</span>
           {rw?.on && <span>rewind {rw.seconds} s kept ({rw.megabytes} MB)</span>}
         </div>
@@ -568,7 +665,8 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
                 {[1, 2, 3, 4].map((n) => {
                   const s = slots?.find((x) => x.slot === n);
                   return (
-                    <button key={n} className={`nxe-slot ${slot === n ? "on" : ""}`} onClick={() => chooseSlot(n)} aria-pressed={slot === n}>
+                    <button key={n} className={`nxe-slot ${slot === n ? "on" : ""}`} onClick={() => chooseSlot(n)} aria-pressed={slot === n} title={s?.onHost ? `On your account${s.device ? ` (last from ${s.device})` : ""}` : undefined}>
+                      {s?.onHost && <i>☁</i>}
                       <div style={s?.thumb ? { backgroundImage: `url(data:image/png;base64,${s.thumb})` } : undefined}>{s?.thumb ? "" : "Empty"}</div>
                       <span>Slot {n}</span>
                       <small>{s?.saved ? ago(s.saved) : "—"}</small>
@@ -579,9 +677,21 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
               <div className="nxe-grid">
                 <button className="nxe-btn" disabled={status?.canSave === false} onClick={() => { send({ t: "save", slot }); setMenu(false); }}><Icon name="down" /> Save to slot {slot}</button>
                 <button className="nxe-btn" disabled={status?.canSave === false || !slots?.find((x) => x.slot === slot)?.saved} onClick={() => { send({ t: "load", slot }); setMenu(false); }}><Icon name="refresh" /> Load slot {slot}</button>
+                {(slots?.find((x) => x.slot === slot)?.versions ?? 0) > 1 && <button className="nxe-btn" onClick={() => send({ t: "versions", slot })}><Icon name="cloud" /> Earlier saves</button>}
                 <button className="nxe-btn" onClick={() => { send({ t: "reset" }); setMenu(false); }}><Icon name="bolt" /> Restart</button>
                 <button className="nxe-btn" onClick={fullscreen}><Icon name="ext" /> Full screen</button>
               </div>
+              {versions && (
+                <div className="nxe-vers">
+                  <h4>Earlier saves of slot {versions.slot} (on your account)</h4>
+                  {versions.list.length === 0 && <p>None yet.</p>}
+                  {versions.list.map((v, i) => (
+                    <button key={v.version} className="nxe-btn" onClick={() => { send({ t: "load", slot: versions.slot, version: v.version }); setVersions(null); setMenu(false); }}>
+                      <span>{i === 0 ? "Newest" : `${i + 1} saves ago`} · {ago(Math.round(v.savedAt / 1000))}</span><small>{v.device ?? ""}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
               <h4>Look</h4>
               <div className="nxe-row" role="group" aria-label="Look">
                 {LOOKS.map(([k, label]) => <button key={k} className={`nxe-btn ${look === k ? "on" : ""}`} onClick={() => chooseLook(k)}>{label}</button>)}
@@ -610,7 +720,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
               </div>
               <p>
                 {status?.pads ? `${status.pads} controller${status.pads > 1 ? "s" : ""} read directly. ` : ""}
-                Controllers: Guide or Back with RB save, LB load, Start menu, hold RT fast-forward, hold LT rewind. Keyboard: Esc menu, F2 save, F4 load, hold Tab fast-forward, hold ` rewind.
+                Controllers: Guide or Back with RB save, LB load, Start menu, left/right change slot, hold RT fast-forward, hold LT rewind; in this menu the d-pad moves, A chooses, B goes back. Keyboard: Esc menu, F2 save, F4 load, hold Tab fast-forward, hold ` rewind.
               </p>
               <div className="nxe-grid">
                 <button className="nxe-btn" onClick={() => setKeysPanel(true)}><Icon name="key" /> Keyboard keys</button>

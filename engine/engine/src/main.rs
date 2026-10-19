@@ -32,7 +32,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  savestate-engine info --core <core.dll>\n  savestate-engine serve --core <core.dll> --game <file|url> --key <key> [--port 0] [--origin <page origin>]... [--data <dir>] [--system <dir>] [--saves <dir>] [--states <dir>] [--host <url>] [--token <jwt>] [--name <file name>] [--option key=value]... [--idle <seconds>]\n  savestate-engine selftest --core <core.dll> --game <file|url> [--frames 120] [--png out.png]\n      [--data <dir>] [--system <dir>] [--button down|up|left|right|a|b|start] [--host <url>] [--token <jwt>] [--name <file name for a URL>] [--option key=value]... [--no-stream] [--verbose]"
+        "usage:\n  savestate-engine info --core <core.dll>\n  savestate-engine serve --core <core.dll> --game <file|url> --key <key> [--port 0] [--origin <page origin>]... [--data <dir>] [--system <dir>] [--saves <dir>] [--states <dir>] [--host <url>] [--token <jwt>] [--name <file name>] [--option key=value]... [--idle <seconds>] [--game-id <id>] (token in SAVESTATE_TOKEN)\n  savestate-engine selftest --core <core.dll> --game <file|url> [--frames 120] [--png out.png]\n      [--data <dir>] [--system <dir>] [--button down|up|left|right|a|b|start] [--host <url>] [--token <jwt>] [--name <file name for a URL>] [--option key=value]... [--no-stream] [--verbose]"
     );
     std::process::exit(2)
 }
@@ -159,6 +159,12 @@ fn serve(args: &Args) -> i32 {
         options: options_of(args),
         username: "SaveState".into(),
         stream_content: !args.has("no-stream"),
+        // The host link for saves: --host, --game-id, and the person's token
+        // in SAVESTATE_TOKEN (kept off the command line, which other programs can read).
+        sync: match (args.get("host"), args.get("game-id"), std::env::var("SAVESTATE_TOKEN").ok().or_else(|| args.get("token").map(str::to_string))) {
+            (Some(h), Some(g), Some(t)) => savestate_engine::sync::Sync::new(h, &t, g),
+            _ => None,
+        },
     };
     let key = args.get("key").filter(|k| k.len() >= 16).unwrap_or_else(|| {
         eprintln!("serve needs --key (16+ characters)");
@@ -200,6 +206,7 @@ fn selftest(args: &Args) -> i32 {
         options,
         username: "SaveState".into(),
         stream_content: !args.has("no-stream"),
+        sync: None,
     };
 
     let t_load = Instant::now();
@@ -386,28 +393,85 @@ fn selftest(args: &Args) -> i32 {
         };
         if let Ok(start) = session.serialize() {
             let mut buf = Vec::new();
-            let mut branch = |s: &mut Session, ahead: u32, press: bool| -> Vec<u64> {
+            // Pictures per frame, and a hash of all the sound, for 30 frames.
+            // Each branch starts alike: 20 warm-up frames from the starting
+            // point, then back to it, so sound state a core keeps outside its
+            // save states is the same at every start (not left over from the
+            // branch before).
+            let settle = |s: &mut Session| {
                 let _ = s.unserialize(&start);
+                for _ in 0..20 {
+                    s.run_frame(false);
+                    s.finish_frame(2_000_000);
+                }
+                let _ = s.unserialize(&start);
+                let _ = s.take_audio();
+            };
+            let mut branch = |s: &mut Session, ahead: u32, press: bool| -> (Vec<u64>, u64) {
+                settle(s);
                 let input = savestate_engine::host::PortInput { buttons: if press { 1 << button } else { 0 }, ..Default::default() };
                 let mut hashes = Vec::new();
+                let mut sound: u64 = 0xcbf29ce484222325;
                 for _ in 0..30 {
                     s.set_input(0, input);
                     let _ = s.run_frame_ahead(ahead, false, &mut buf);
                     s.finish_frame(2_000_000);
                     hashes.push(host::lock().frame.hash());
+                    for v in s.take_audio() {
+                        sound = (sound ^ v as u16 as u64).wrapping_mul(0x100000001b3);
+                    }
                 }
                 s.set_input(0, Default::default());
-                hashes
+                (hashes, sound)
             };
             let mut lag = Vec::new();
             let mut cost = Vec::new();
+            let mut sounds = Vec::new();
             for ahead in 0..=2u32 {
                 let t = Instant::now();
-                let base = branch(&mut session, ahead, false);
-                let pressed = branch(&mut session, ahead, true);
+                let (base, sound) = branch(&mut session, ahead, false);
+                sounds.push(sound);
+                let (pressed, _) = branch(&mut session, ahead, true);
                 cost.push(((t.elapsed().as_secs_f64() * 1000.0 / 60.0) * 100.0).round() / 100.0);
                 // Frames the button was held before the picture differed (1 = the very next picture).
                 lag.push(base.iter().zip(&pressed).position(|(a, b)| a != b).map(|i| i as u32 + 1));
+            }
+            // Does saving a state by itself change this core's sound? (Then no
+            // run-ahead or rewind can keep it exact: the core's save flushes sound.)
+            let save_changes_sound = {
+                settle(&mut session);
+                let mut sound: u64 = 0xcbf29ce484222325;
+                let mut tmp = Vec::new();
+                for _ in 0..30 {
+                    session.run_frame(false);
+                    session.finish_frame(2_000_000);
+                    let _ = session.serialize_into(&mut tmp);
+                    for v in session.take_audio() {
+                        sound = (sound ^ v as u16 as u64).wrapping_mul(0x100000001b3);
+                    }
+                }
+                sound != sounds[0]
+            };
+            // The same with a second instance (exact sound): run-ahead 1 and 2 again.
+            let second;
+            match session.start_second_instance() {
+                Ok(()) => {
+                    let mut lag2 = Vec::new();
+                    let mut sounds2 = Vec::new();
+                    for ahead in 1..=2u32 {
+                        let (base, sound) = branch(&mut session, ahead, false);
+                        let (pressed, _) = branch(&mut session, ahead, true);
+                        sounds2.push(sound == sounds[0]);
+                        lag2.push(base.iter().zip(&pressed).position(|(a, b)| a != b).map(|i| i as u32 + 1));
+                    }
+                    // Exact sound is required unless the core's own saves change it.
+                    phase4_ok &= save_changes_sound || sounds2.iter().all(|x| *x);
+                    second = serde_json::json!({
+                        "framesUntilPictureChanges": { "runahead1": lag2[0], "runahead2": lag2[1] },
+                        "soundExact": { "runahead1": sounds2[0], "runahead2": sounds2[1] },
+                    });
+                }
+                Err(e) => second = serde_json::json!({ "unavailable": e }),
             }
             let _ = session.unserialize(&start);
             // Each frame ahead should show the change one frame sooner.
@@ -418,6 +482,11 @@ fn selftest(args: &Args) -> i32 {
                 "button": args.get("button").unwrap_or("down"),
                 "framesUntilPictureChanges": { "runahead0": lag[0], "runahead1": lag[1], "runahead2": lag[2] },
                 "msPerFrame": { "runahead0": cost[0], "runahead1": cost[1], "runahead2": cost[2] },
+                // Same sound with run-ahead as without: the core keeps all its sound
+                // state in its save states (otherwise run-ahead can make it crackle).
+                "soundExact": { "runahead1": sounds[1] == sounds[0], "runahead2": sounds[2] == sounds[0] },
+                "secondInstance": second,
+                "savingChangesSound": save_changes_sound,
             });
         }
     }

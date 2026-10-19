@@ -49,7 +49,11 @@ const os = require('os');
 const crypto = require('crypto');
 const { spawn, execFile } = require('child_process');
 
-const PORT = 17373;
+// NEXUS_LAUNCHER_PORT: a second launcher for tests (the app always uses 17373).
+const PORT = Number(process.env.NEXUS_LAUNCHER_PORT) || 17373;
+// NEXUS_NO_RETROARCH=1: behave as if RetroArch weren't installed (checks that
+// SaveState Engine plays RetroArch-system games on its own).
+const NO_RETROARCH = process.env.NEXUS_NO_RETROARCH === '1';
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 
@@ -711,7 +715,7 @@ function getEmulatorPath(platform) {
   // because RetroArch was installed, with no PS2-capable core or emulator
   // anywhere. Launching then either opened RetroArch with no core loaded or
   // crashed, while the UI had already claimed everything was ready.
-  if (retro && !STANDALONE_ONLY_PLATFORMS.has(p)) return retro;
+  if (retro && !STANDALONE_ONLY_PLATFORMS.has(p) && !NO_RETROARCH) return retro;
   return null;
 }
 
@@ -2774,7 +2778,115 @@ function dedupeLaunch(body, run) {
 // SHA-256) into <client root>/engine.
 const engineDir = path.join(clientRoot, 'engine');
 const engineExe = path.join(engineDir, 'savestate-engine.exe');
+// The engine's own folders: it needs nothing from RetroArch.
+const engineCoresDir = path.join(engineDir, 'cores');
+const engineSystemDir = path.join(engineDir, 'system');
+const engineSavesDir = path.join(engineDir, 'saves');
+const engineStatesDir = path.join(engineDir, 'states');
 let engineChecked = 0;
+
+// RetroArch, when it's installed (cores, system files and saves are copied
+// from it once, so nothing is downloaded twice and progress carries over).
+function installedRetroArch() {
+  const ra = getEmulatorPath('nes');
+  return ra && isRetroArch(ra) ? ra : null;
+}
+
+// A core for the engine: from RetroArch's cores when present, otherwise the
+// host's mirror or libretro's buildbot (coreDownloadUrls), into engine/cores.
+async function ensureEngineCore(coreId) {
+  const file = path.join(engineCoresDir, `${coreId}_libretro${CORE_EXT}`);
+  if (fs.existsSync(file)) return { ok: true, path: file };
+  ensureDirSync(engineCoresDir);
+  const ra = installedRetroArch();
+  const local = ra ? firstExisting(getCoreDirs(ra).map((d) => path.join(d, `${coreId}_libretro${CORE_EXT}`))) : null;
+  if (local) {
+    try { fs.copyFileSync(local, file); return { ok: true, path: file, from: 'retroarch' }; } catch { /* download instead */ }
+  }
+  let last = '';
+  for (const url of coreDownloadUrls(coreId)) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+      if (!res.ok) { last = `HTTP ${res.status}`; continue; }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length < 4096) { last = 'not a core'; continue; }
+      await extractZip(buf, engineCoresDir);
+      if (fs.existsSync(file)) return { ok: true, path: file, from: url.includes('/api/emulator/native-core/') ? 'host' : 'buildbot' };
+      last = 'the download had no core in it';
+    } catch (e) { last = e && e.message ? e.message : String(e); }
+  }
+  return { ok: false, error: `Couldn't get the ${coreId} core (${last || 'no source reachable'})` };
+}
+
+// System files for the engine: a core's supporting files (Dolphin's Sys
+// folder) and the BIOS files the person added (Set up games) or RetroArch
+// has, copied into engine/system when missing.
+async function ensureEngineSystemFiles(coreId) {
+  ensureDirSync(engineSystemDir);
+  const ra = installedRetroArch();
+  const raSystem = ra ? path.join(path.dirname(ra), 'system') : null;
+  const spec = CORE_SYSTEM_FILES[coreId];
+  if (spec && !fs.existsSync(path.join(engineSystemDir, spec.marker))) {
+    const top = spec.marker.split(path.sep)[0];
+    if (raSystem && fs.existsSync(path.join(raSystem, spec.marker))) {
+      try { fs.cpSync(path.join(raSystem, top), path.join(engineSystemDir, top), { recursive: true, force: false }); } catch { /* download below */ }
+    }
+    if (!fs.existsSync(path.join(engineSystemDir, spec.marker))) {
+      try {
+        const res = await fetch(spec.url, { signal: AbortSignal.timeout(180_000) });
+        if (res.ok) await extractZip(Buffer.from(await res.arrayBuffer()), engineSystemDir);
+      } catch (e) { console.error('[engine] system files:', e && e.message ? e.message : e); }
+    }
+  }
+  const cfg = loadConfig();
+  for (const dir of [raSystem, path.join(cfg.emulationRoot || clientRoot, 'bios')]) {
+    if (!dir || !fs.existsSync(dir)) continue;
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!ent.isFile()) continue;
+      const to = path.join(engineSystemDir, ent.name);
+      if (fs.existsSync(to)) continue;
+      try { if (fs.statSync(path.join(dir, ent.name)).size < 64 * 1024 * 1024) fs.copyFileSync(path.join(dir, ent.name), to); } catch { /* skip */ }
+    }
+  }
+  // PlayStation 2 BIOS for the PCSX2 core.
+  const ps2 = raSystem && path.join(raSystem, 'pcsx2', 'bios');
+  if (ps2 && fs.existsSync(ps2)) { try { fs.cpSync(ps2, path.join(engineSystemDir, 'pcsx2', 'bios'), { recursive: true, force: false }); } catch { /* skip */ } }
+}
+
+// A battery save RetroArch kept for this game comes along once.
+// Folders some cores keep their saves in (memory cards, EEPROMs, caches),
+// inside RetroArch's saves folder: Dolphin's user folder holds the GameCube
+// memory cards and its shader cache.
+const CORE_SAVE_DIRS = { dolphin: ['User'], fbneo: ['fbneo'], pcsx2: ['pcsx2'], ppsspp: ['PPSSPP'], flycast: ['dc'], citra: ['Citra'] };
+
+function carryOverRetroArchSave(romFile, coreId) {
+  const ra = installedRetroArch();
+  if (!ra) return;
+  // A core's save folder comes over once (missing files only: nothing the engine wrote is replaced).
+  for (const dir of CORE_SAVE_DIRS[coreId] ?? []) {
+    const from = path.join(path.dirname(ra), 'saves', dir);
+    const done = path.join(engineSavesDir, `.from-retroarch-${dir}`);
+    if (!fs.existsSync(from) || fs.existsSync(done)) continue;
+    try {
+      ensureDirSync(engineSavesDir);
+      fs.cpSync(from, path.join(engineSavesDir, dir), { recursive: true, force: false, preserveTimestamps: true });
+      fs.writeFileSync(done, new Date().toISOString());
+    } catch (e) { console.error('[engine] carrying over', dir, e && e.message ? e.message : e); }
+  }
+  const stem = path.parse(romFile).name;
+  const to = path.join(engineSavesDir, `${stem}.srm`);
+  const from = path.join(path.dirname(ra), 'saves', `${stem}.srm`);
+  if (!fs.existsSync(to) && fs.existsSync(from)) {
+    try {
+      ensureDirSync(engineSavesDir);
+      fs.copyFileSync(from, to);
+      // Keep its time: the engine compares it with the host's copy to pick the
+      // newer, and an old save must not look new just because it was copied.
+      const st = fs.statSync(from);
+      fs.utimesSync(to, st.atime, st.mtime);
+    } catch { /* skip */ }
+  }
+}
 
 async function ensureEngine(hostUrl) {
   if (!IS_WIN) return null;
@@ -2818,18 +2930,19 @@ async function ensureEngine(hostUrl) {
 
 // Starts the engine for one game and waits until it has loaded it.
 // Resolves { ok, pid, port, key, ready } or { ok: false, error }.
-function startEngine(exe, { core, romFile, retroarchDir, origin }) {
+function startEngine(exe, { core, romFile, origin, gameId, hostUrl, token }) {
   return new Promise((resolve) => {
     const key = crypto.randomBytes(24).toString('base64url');
     const args = ['serve', '--core', core, '--game', romFile, '--key', key,
-      '--system', path.join(retroarchDir, 'system'),
-      '--saves', path.join(retroarchDir, 'saves'),
-      '--states', path.join(retroarchDir, 'states'),
+      '--system', engineSystemDir, '--saves', engineSavesDir, '--states', engineStatesDir,
       '--data', path.join(engineDir, 'data')];
     if (origin) args.push('--origin', origin);
+    // Saves follow the person: the host, the game, and their token (in the
+    // environment, not on the command line other programs can read).
+    if (hostUrl && gameId && token) args.push('--host', hostUrl, '--game-id', String(gameId));
     let child;
     try {
-      child = spawn(exe, args, { cwd: engineDir, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+      child = spawn(exe, args, { cwd: engineDir, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: { ...process.env, SAVESTATE_TOKEN: token || '' } });
     } catch (e) {
       resolve({ ok: false, error: String(e && e.message ? e.message : e) });
       return;
@@ -2873,7 +2986,14 @@ async function handleLaunch(body, origin) {
   // just to hit a failure that was already knowable up front.
   let emu = getEmulatorPath(platform);
   const { hostUrl, token } = getHostUrlAndToken(body);
-  if (!emu) {
+  // SaveState Engine plays RetroArch-system games (and GameCube/Wii, even
+  // with standalone Dolphin installed) inside the page with its own cores, so
+  // RetroArch isn't installed for them. PS2/PSP keep their standalone
+  // emulators when present. Netplay still uses RetroArch.
+  const platKey = String(platform || '').toLowerCase();
+  const engineFor = !!(body.engine && IS_WIN && PLATFORM_CORES[platKey] && !netplay
+    && (!emu || isRetroArch(emu) || platKey === 'gamecube' || platKey === 'wii'));
+  if (!emu && !engineFor) {
     // "Auto setup" previously only ever covered RetroArch — a PS2/PS3/PSP/
     // Wii U game just failed outright here with no attempt to get the user
     // unblocked, even though the whole point of Play is that nothing needs
@@ -2911,6 +3031,9 @@ async function handleLaunch(body, origin) {
     if (!emu) {
       return { status: 404, json: { success: false, error: `No emulator found for '${platform}'. Place emulator in ${emuRoot}/<EmulatorName>/, or set its path in Client Setup.` } };
     }
+  }
+  if (!emu && engineFor && !IS_WIN) {
+    return { status: 404, json: { success: false, error: `No emulator found for '${platform}'.` } };
   }
   // A RetroArch platform can have the emulator itself but not yet the
   // specific core it needs (fresh RetroArch install, or a core Play has
@@ -3021,6 +3144,29 @@ async function handleLaunch(body, origin) {
     }
     romFile = await extractRomIfArchived(romFile, platform);
 
+    // Inside SaveState (SaveState Engine), with the engine's own core and files.
+    let engineError = null;
+    if (engineFor) {
+      const coreId = PLATFORM_CORES[platKey];
+      const exe = await ensureEngine(hostUrl);
+      const core = exe ? await ensureEngineCore(coreId) : { ok: false, error: 'SaveState Engine isn\u2019t available from the host' };
+      if (exe && core.ok) {
+        await ensureEngineSystemFiles(coreId);
+        carryOverRetroArchSave(romFile, coreId);
+        const run = await startEngine(exe, { core: core.path, romFile, origin: origin && isTrustedOrigin(origin) ? origin : null, gameId, hostUrl, token });
+        if (run.ok) {
+          return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: 'SaveState Engine', usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
+        }
+        engineError = run.error;
+      } else {
+        engineError = core.error;
+      }
+      console.error(`[engine] ${path.basename(romFile)}: ${engineError}`);
+      // The installed emulator (RetroArch, or standalone Dolphin) is the
+      // fallback; with none, say why.
+      if (!emu) return { status: 500, json: { success: false, error: `SaveState Engine couldn\u2019t start ${title || 'the game'}: ${engineError}` } };
+    }
+
     // Full screen and no emulator menus, so a game looks like part of SaveState.
     const plat = String(platform || '').toLowerCase();
     const args = [];
@@ -3066,20 +3212,6 @@ async function handleLaunch(body, origin) {
       args.push('-batch', '-fullscreen', '-nogui');
     }
     args.push(romFile);
-    // Inside SaveState, when the page asks and the engine can run it.
-    let engineError = null;
-    if (body.engine && isRetroArch(emu) && !netplay) {
-      const exe = await ensureEngine(hostUrl);
-      const core = getCorePath(emu, platform);
-      if (exe && core) {
-        const run = await startEngine(exe, { core, romFile, retroarchDir: path.dirname(emu), origin: origin && isTrustedOrigin(origin) ? origin : null });
-        if (run.ok) {
-          return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: 'SaveState Engine', usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
-        }
-        engineError = run.error;
-        console.error(`[engine] ${path.basename(romFile)}: ${run.error}; opening RetroArch instead`);
-      }
-    }
     const { pid, alive, stderr } = await spawnAndVerify(emu, args);
     if (!alive) {
       const plat = String(platform || '').toLowerCase();
@@ -3199,12 +3331,13 @@ function healthPayload() {
   return {
     ok: true,
     port: PORT,
-    version: 11,
+    version: 12,
     // v7: guided setup (/setup-consoles, /bios-check, /bios-add, /add-rom-folder).
     // v8: unpacks without bundled modules; copies RetroArch from the host.
     // v9: follows each game until it closes (/launch/status, /launch/stop), full screen, refuses half-downloaded games.
     // v10: Linux: emulators from Flathub, a games folder by typed path; reports its platform.
     // v11: SaveState Engine: RetroArch-system games play inside the SaveState page (/launch engine:true).
+    // v12: the engine has its own cores, system files and saves (RetroArch not needed); saves sync with the host.
     engine: IS_WIN,
     platform: process.platform,
     features: ['setup-consoles', 'bios', 'rom-folder'],

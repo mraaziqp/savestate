@@ -398,6 +398,7 @@ pub struct retro_input_descriptor {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct retro_game_info_ext {
     pub full_path: *const c_char,
     pub archive_path: *const c_char,

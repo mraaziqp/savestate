@@ -45,6 +45,8 @@ pub struct SessionConfig {
     pub username: String,
     /// Stream big games through the VFS when the core supports it.
     pub stream_content: bool,
+    /// The host's copy of this game's saves (battery saves follow the person).
+    pub sync: Option<std::sync::Arc<crate::sync::Sync>>,
 }
 
 pub struct Session {
@@ -62,6 +64,18 @@ pub struct Session {
     deinit_done: bool,
     /// The GPU picture's buffer, swapped with the frame's (no copy per frame).
     gpu_pixels: Vec<u8>,
+    sync: Option<std::sync::Arc<crate::sync::Sync>>,
+    /// The content as handed to retro_load_game (a second instance loads it too).
+    content_cpath: Option<CString>,
+    /// A second instance of the core for run-ahead (see `start_second_instance`).
+    secondary: Option<Secondary>,
+    keep_loaded: bool,
+}
+
+/// The second instance: its own copy of the DLL (its own globals) and its own host state.
+struct Secondary {
+    core: Core,
+    host: Box<host::HostState>,
 }
 
 fn dir_cstring(p: &Path) -> CString {
@@ -210,7 +224,7 @@ impl Session {
             (core.set_input_state)(host::input_state);
             (core.init)();
         }
-        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new() };
+        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new(), sync: cfg.sync.clone(), content_cpath: None, secondary: None, keep_loaded: false };
         if let Err(e) = session.load_content(&cfg) {
             // Dropping `session` runs retro_deinit and unloads the core.
             return Err(e);
@@ -325,6 +339,7 @@ impl Session {
             let h = host::lock();
             (h.vfs_version, h.hw_requested, h.hw_granted)
         };
+        self.content_cpath = c_path.clone();
         if !ok {
             if hw_requested.is_some() && !hw_granted {
                 return Err(needs_gpu_message(&info.library_name));
@@ -366,6 +381,10 @@ impl Session {
         if let Some(name) = file_name {
             let stem = Path::new(&name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or(name);
             let sram = cfg.save_dir.join(format!("{stem}.srm"));
+            if let Some(sync) = &cfg.sync {
+                let _ = std::fs::create_dir_all(&cfg.save_dir);
+                crate::info!("battery save: {}", sync.pull_sram(&sram));
+            }
             if let Ok(bytes) = std::fs::read(&sram) {
                 self.write_memory(RETRO_MEMORY_SAVE_RAM, &bytes);
             }
@@ -413,6 +432,11 @@ impl Session {
             self.run_frame(real_time);
             return Ok(());
         }
+        if let Some(mut sec) = self.secondary.take() {
+            let r = self.run_ahead_second(&mut sec, ahead, real_time, state);
+            self.secondary = Some(sec);
+            return r;
+        }
         // Bits: 1 picture, 2 sound, 4 fast save states (a run-ahead save), 8 sound hard off.
         let set = |av: i32, ctx: i32| {
             let mut h = host::lock();
@@ -434,6 +458,50 @@ impl Session {
         let restored = if saved.is_ok() { self.unserialize(state) } else { Ok(()) };
         set(3, RETRO_SAVESTATE_CONTEXT_NORMAL);
         saved.and(restored)
+    }
+
+    /// Run-ahead on two instances: this one plays the real frame (sound, no
+    /// picture) and is never rewound; its state goes to the second instance,
+    /// which runs the hidden frames and supplies the picture.
+    fn run_ahead_second(&mut self, sec: &mut Secondary, ahead: u32, real_time: bool, state: &mut Vec<u8>) -> Result<(), String> {
+        host::lock().av_enable = 2;
+        self.run_frame(real_time);
+        host::lock().av_enable = 3;
+        // Not marked as a "fast save state" (bit 4): measured, mGBA's Game Boy
+        // sound stops matching when it is.
+        host::lock().savestate_context = RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_BINARY;
+        let saved = self.serialize_into(state);
+        host::lock().savestate_context = RETRO_SAVESTATE_CONTEXT_NORMAL;
+        saved?;
+        let input = host::lock().input;
+        sec.host.input = input;
+        sec.host.savestate_context = RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_BINARY;
+        host::swap(&mut sec.host);
+        let loaded = unsafe { (sec.core.unserialize)(state.as_ptr() as *const c_void, state.len()) };
+        if loaded {
+            let frame_time = host::lock().frame_time;
+            for i in 0..ahead {
+                host::lock().av_enable = if i + 1 == ahead { 1 | 4 | 8 } else { 4 | 8 };
+                if let Some(ft) = frame_time {
+                    unsafe { (ft.callback)(ft.reference) };
+                }
+                unsafe { (sec.core.run)() };
+            }
+            host::lock().audio.clear();
+        }
+        host::swap(&mut sec.host);
+        if !loaded {
+            return Err("the second instance refused the state".into());
+        }
+        // The second instance's picture is the one to show.
+        let mut h = host::lock();
+        if sec.host.frame.serial != 0 {
+            let next = h.frame.serial.max(sec.host.frame.serial) + 1;
+            std::mem::swap(&mut h.frame, &mut sec.host.frame);
+            h.frame.serial = next;
+            sec.host.frame.serial = 0;
+        }
+        Ok(())
     }
 
     /// A save state into `buf` (reused: no allocation once it's big enough).
@@ -482,6 +550,78 @@ impl Session {
     /// Keep the core's DLL loaded after the session ends (see `Core::keep_loaded`).
     pub fn keep_core_loaded(&mut self) {
         self.core.keep_loaded();
+        self.keep_loaded = true;
+    }
+
+    /// Starts a second instance of the core for run-ahead: a copy of the DLL
+    /// (so its own globals) with its own host state, the same game and the
+    /// same options. With it, run-ahead plays the real frame on this instance
+    /// and never rewinds it, and runs the hidden frames on the second one, so
+    /// cores that keep sound outside their save states (mGBA, FinalBurn Neo)
+    /// sound exactly as without run-ahead. Not for GPU cores (one GL context).
+    pub fn start_second_instance(&mut self) -> Result<(), String> {
+        if self.secondary.is_some() {
+            return Ok(());
+        }
+        if crate::hw::active() {
+            return Err("games drawn with the graphics card use single-copy run-ahead".into());
+        }
+        let core = Core::load_copy(&self.core.path, "runahead")?;
+        let mut st = {
+            let h = host::lock();
+            let mut st = host::HostState::new();
+            st.options = Options::new(h.options.current().clone());
+            st.dirs = h.dirs.clone();
+            st.frame.format = h.frame.format;
+            st.content_overrides = h.content_overrides.iter().map(|o| host::ContentOverride { extensions: o.extensions.clone(), need_fullpath: o.need_fullpath, persistent_data: o.persistent_data }).collect();
+            st.game_info_ext = h.game_info_ext.as_ref().map(host::GameInfoExt::duplicate);
+            st
+        };
+        let (data_ptr, data_len) = match &self._data {
+            Some(d) => (d.as_ptr() as *const c_void, d.len()),
+            None => (std::ptr::null(), 0),
+        };
+        let path = self.content_cpath.as_ref().map(|p| p.as_ptr()).unwrap_or(std::ptr::null());
+        host::swap(&mut st);
+        let loaded = unsafe {
+            (core.set_environment)(crate::env::environment);
+            (core.set_video_refresh)(host::video_refresh);
+            (core.set_audio_sample)(host::audio_sample);
+            (core.set_audio_sample_batch)(host::audio_sample_batch);
+            (core.set_input_poll)(host::input_poll);
+            (core.set_input_state)(host::input_state);
+            (core.init)();
+            let game = retro_game_info { path, data: data_ptr, size: data_len, meta: std::ptr::null() };
+            let ok = (core.load_game)(if path.is_null() && data_ptr.is_null() { std::ptr::null() } else { &game });
+            if ok {
+                for port in 0..2 {
+                    (core.set_controller_port_device)(port, RETRO_DEVICE_JOYPAD);
+                }
+            } else {
+                (core.deinit)();
+            }
+            ok
+        };
+        host::swap(&mut st);
+        if !loaded {
+            return Err("the second copy of the core wouldn't load the game".into());
+        }
+        crate::info!("run-ahead: second instance of {} started", self.info.library_name);
+        self.secondary = Some(Secondary { core, host: Box::new(st) });
+        Ok(())
+    }
+
+    /// Run-ahead uses a second instance (exact sound) rather than one.
+    pub fn second_instance(&self) -> bool {
+        self.secondary.is_some()
+    }
+
+    /// Sets a core option on every instance.
+    pub fn set_option(&mut self, key: &str, value: &str) {
+        host::lock().options.set(key, value);
+        if let Some(sec) = self.secondary.as_mut() {
+            sec.host.options.set(key, value);
+        }
     }
 
     /// The core draws with the graphics card.
@@ -560,13 +700,22 @@ impl Session {
         }
     }
 
-    /// Writes the battery save (to a temporary file, then renamed into place).
+    /// Writes the battery save (to a temporary file, then renamed into place)
+    /// and sends it to the host in the background when it changed.
     pub fn save_sram(&self) -> Result<Option<PathBuf>, String> {
         let (Some(path), Some(mem)) = (&self.sram_path, self.memory(RETRO_MEMORY_SAVE_RAM)) else { return Ok(None) };
         let tmp = path.with_extension("srm.tmp");
         std::fs::write(&tmp, mem).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+        if let Some(sync) = &self.sync {
+            sync.push_sram(mem);
+        }
         Ok(Some(path.clone()))
+    }
+
+    /// The host link, for save states.
+    pub fn sync(&self) -> Option<std::sync::Arc<crate::sync::Sync>> {
+        self.sync.clone()
     }
 
     /// Disk control: how many images, and which is inserted.
@@ -587,11 +736,26 @@ impl Drop for Session {
                 if let Err(e) = self.save_sram() {
                     crate::warn!("couldn't write the battery save: {e}");
                 }
+                // Closing: send it up now rather than on a thread the process may not wait for.
+                if let (Some(sync), Some(mem)) = (&self.sync, self.memory(RETRO_MEMORY_SAVE_RAM)) {
+                    sync.push_sram_now(mem);
+                }
                 crate::hw::notify_destroy();
                 unsafe { (self.core.unload_game)() };
             }
             unsafe { (self.core.deinit)() };
             self.deinit_done = true;
+        }
+        if let Some(mut sec) = self.secondary.take() {
+            host::swap(&mut sec.host);
+            unsafe {
+                (sec.core.unload_game)();
+                (sec.core.deinit)();
+            }
+            host::swap(&mut sec.host);
+            if self.keep_loaded {
+                sec.core.keep_loaded();
+            }
         }
         crate::hw::destroy_context();
         ACTIVE.store(false, Ordering::SeqCst);

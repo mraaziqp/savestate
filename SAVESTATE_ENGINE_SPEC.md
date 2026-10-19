@@ -149,15 +149,16 @@ Efficiency (status after Phase 3):
    LZ4 (pure Rust, `lz4_flex`; zstd needs a C compiler), 256 MB budget.
 
 Power:
-1. **Run-ahead** (done in Phase 4, single instance, RetroArch's default):
-   the hidden frames run in the same core between a save and a restore. The
-   second-instance variant needs a second set of callbacks routed to a
-   second host state (libretro callbacks carry no user pointer); it is left
-   for when a core turns out to need it.
+1. **Run-ahead** (done in Phase 4; second instance added in Phase 5's
+   refinements): software cores run the hidden frames on a second copy of the
+   core (its own DLL copy and its own host state, swapped in around its calls
+   since libretro callbacks carry no instance pointer), so the real instance
+   is never rewound and its sound stays exact; GPU cores use one instance.
 2. **Disc streaming** (done in Phase 2): VFS v3 over range requests with a
    block cache on disk.
-3. **Per-game profiles on the host** (Phase 5); the page already remembers
-   the look per console and the save slot.
+3. **Preferences on the account** (done in Phase 5): look and run-ahead per
+   console, rewind, fast-forward speed, button layout, keyboard keys, save
+   slot (`/api/engine/prefs`), newest copy wins.
 4. **Live stats** (done): fps, time per frame, sound buffer, skipped
    pictures, in the player's Stats overlay.
 5. **Watch and later play together** (Phase 6).
@@ -191,6 +192,7 @@ engine/                         Rust workspace (GNU toolchain, see 1)
     src/main.rs                 `info`, `selftest`, `serve`
     src/input.rs                XInput controllers (run-time loaded), layouts, Guide/Back hotkeys, rumble
     src/rewind.rs               rewind ring: XOR deltas + LZ4 within a budget
+    src/sync.rs                 the host's copy of saves: battery saves, save states with versions
   Phase 6 adds:
     src/encode.rs               Media Foundation hardware encoder (with WebRTC)
 web-src/app/
@@ -200,6 +202,7 @@ web-src/app/
 client-launcher.cjs             v11: fetches/updates the engine from the host (SHA-256), runs RetroArch-system
                                 games in it on request, falls back to RetroArch; RetroArch spawning removed in Phase 5
 server.ts                       /api/client-launcher/engine(/info): serves releases/engine (scripts/publish-engine.mjs)
+server/enginestates.ts          /api/engine/states (save states, 5 versions per slot, in the database) and /api/engine/prefs
 ```
 
 ## 4. Engine <-> page protocol (as built)
@@ -229,6 +232,14 @@ Page -> engine, JSON text: `{"t":"in","p":port,"b":buttons,"a":[lx,ly,rx,ry],"g"
 it goes}, `rewind` {on} (held), `rewinding` {enabled}, `runahead` {frames},
 `layout` {labels}, `audio` {fill, target} (10 a second), `display` {hz},
 `option` {key, value}, `quit`.
+
+Phase 5 additions: page -> engine `load` {slot, version} (an earlier
+version from the host), `versions` {slot}; engine -> page `synced` {slot,
+version} / `syncError` {slot, message} after a slot reached the host,
+`versions` {slot, versions}, `slot` {n} (a controller changed the slot),
+`nav` {buttons} (the engine's controllers while the menu is open, XInput
+bits); `slots` entries add onHost, versions and device; `status` runahead
+adds copies (1 or 2).
 
 Phase 4 engine -> page additions: `pads` {native} when the engine's own
 controllers change, `menu` (a controller hotkey asked for the menu), `ff`
@@ -289,7 +300,7 @@ and writes the battery save every 30 s when it changed.
 | 2 | `libretro-sys`, loader, switchboard, options, VFS, BIOS/dirs, headless runner | Loads real cores from `C:\RetroArch-Win64\cores` with real games; 120 frames; frame 120 saved as PNG; serialize -> run -> unserialize gives identical game memory and frames (results in 9) |
 | 3 | WebSocket stream, raw video (encoded video moved to 6), HW render context, DRC audio, `EnginePlayer.jsx` with shaders | A game plays inside SaveState in the browser at a steady 60 fps with no audio crackle; HW core (dolphin) shows its picture (results in 10) |
 | 4 | Native controllers, mappings, chords, rewind, fast-forward, run-ahead | Controller works with no setup; rewind 60 s; run-ahead measured |
-| 5 | Saves/states/thumbnails to the host with versions, pause overlay, launcher switched to the engine, RetroArch spawning removed | Play from Games opens inside SaveState; RetroArch not installed or needed |
+| 5 | Saves/states/thumbnails to the host with versions, pause overlay, launcher switched to the engine (RetroArch kept only as fallback and for netplay) | Play from Games opens inside SaveState; RetroArch not installed or needed (results in 12) |
 | 6 (after) | Capture bridge for RPCS3/Switch/Wii U/Xbox; WebRTC for other devices | PS3 game plays inside SaveState |
 
 ## 7. Honest limits
@@ -309,6 +320,14 @@ and writes the battery save every 30 s when it changed.
   provides OpenGL); they are refused with that reason, and remembered.
 - A PC with browser hardware acceleration turned off draws the page's WebGL
   on the CPU; GPU-heavy cores then slow down (measured in 10).
+- What follows the person to other PCs is a core's battery save (libretro
+  SRAM) and its save states up to 48 MB. Saves some cores keep in their own
+  folders (GameCube memory cards in Dolphin's User folder, PCSX2/PPSSPP
+  memory cards) stay on the PC they were made on; they are carried over from
+  RetroArch once. GameCube save states (about 90 MB) also stay on the PC.
+- RetroArch is no longer installed for engine games. It remains in use where
+  it is already installed for netplay and as the fallback when the engine
+  can't start a game.
 
 ## 8. Checklist
 
@@ -316,8 +335,8 @@ and writes the battery save every 30 s when it changed.
 - [x] Prerequisite: a working Rust toolchain (GNU toolchain instead of the Build Tools, see 1)
 - [x] Phase 2: core host and headless runner; results in 9 (approved 2026-10-19)
 - [x] Phase 3: games play inside the SaveState page; results in 10 (approved 2026-10-19)
-- [x] Phase 4: controllers, hotkeys, rewind, run-ahead; results in 11 (awaiting approval)
-- [ ] Phase 5
+- [x] Phase 4: controllers, hotkeys, rewind, run-ahead; results in 11 (approved 2026-10-19)
+- [x] Phase 5: the engine stands alone, saves follow the person; results in 12 (awaiting approval)
 - [ ] Phase 6
 
 ## 9. Phase 2 results (2026-10-19)
@@ -525,3 +544,71 @@ Phase 4:
 - Unit tests: 18 passed (adds controller mapping by position and label,
   stick dead zones, Guide and Back hotkeys including a Guide dropout, rewind
   exactness and budget, states that change size).
+
+## 12. Phase 4 refinements and Phase 5 results (2026-10-19)
+
+Phase 4 refinements:
+- Run-ahead on a second instance (see 2.5). Measured with `selftest`, from
+  the same moment and the same 20 warm-up frames for every branch, comparing
+  the sound with run-ahead to the sound without it:
+
+  | Core | Saving alone changes its sound | Exact sound with run-ahead, one instance / two |
+  |---|---|---|
+  | FCEUmm (NES) | no | yes / yes |
+  | mGBA (GBA, Fire Red) | no | no / **yes** |
+  | mGBA (Game Boy) | yes | no / partly (run-ahead 2 exact) |
+  | FinalBurn Neo (Metal Slug 2) | yes | no / no |
+
+  Where saving a state by itself changes a core's sound (the core flushes its
+  sound when it saves), no frontend can keep it bit-exact; RetroArch has the
+  same limit. Input lag removed is unchanged (each frame ahead, one frame).
+  Marking the run-ahead save as a "fast save state" (bit 4) made mGBA's Game
+  Boy sound worse, so it isn't set.
+- The menu by controller: the d-pad (or stick) moves to the nearest button
+  in that direction, A chooses, B or Start goes back; the engine forwards its
+  own controllers' presses while paused. Guide or Back with d-pad left/right
+  changes the save slot. Tested with a virtual Xbox controller in Chrome:
+  Back+Start opened the menu, two d-pad presses moved the focus, B closed
+  it, Back+Right changed to slot 2.
+
+Phase 5:
+- The engine stands alone. Launcher v12 runs RetroArch-system games (and
+  GameCube/Wii even with standalone Dolphin installed) in the engine with its
+  own folders: engine/cores (copied from RetroArch when present, otherwise
+  the host's mirror or libretro's buildbot), engine/system (a core's support
+  files such as Dolphin's Sys folder, the person's BIOS files from Set up
+  games, RetroArch's when present), engine/saves and engine/states. On first
+  use a game's battery save and a core's save folder (Dolphin's User folder
+  with the GameCube memory cards and shader cache, FinalBurn Neo's, PCSX2's,
+  PPSSPP's, Flycast's, Citra's) come over from RetroArch once, keeping their
+  file times. RetroArch is not installed for engine games; it stays the
+  fallback where installed, and for netplay. PS2 and PSP keep their
+  standalone emulators when installed.
+- Proof (a "fresh PC"): a second launcher with an empty client folder,
+  RetroArch treated as absent (`NEXUS_NO_RETROARCH=1`, port 17374), pressed
+  Play on Fire Red: it fetched the game, the engine and the mGBA core
+  (94 s, mostly the 16 MB game through Google Drive), played at 60
+  pictures/s, saved slot 3 to the host (version 1, with its picture and the
+  PC's name) and sent the battery save up when the game closed.
+- Saves follow the person (sync.rs, server/enginestates.ts):
+  - battery saves through `/api/savefile` (the same saves the browser
+    player and the PS Vita app use): before a game starts, the newer of this
+    PC's copy and the host's is used (the one replaced kept as `.srm.bak`);
+    after each battery save (every 30 s when changed, and on closing) it
+    goes up in the background;
+  - save states up to 48 MB go up after saving, LZ4-compressed with their
+    picture; the host keeps the 5 newest versions of each slot in the
+    database (so the PC and the NAS share them); loading uses the newer of
+    the two copies; the menu marks slots on the account and lists earlier
+    versions to load;
+  - preferences through `/api/engine/prefs`.
+  Proof: on this PC, after the "fresh PC" saved slot 3, the menu showed slot
+  3 as on the account with its picture; loading it came from the host;
+  saving again made version 2; "Earlier saves" listed versions 2 and 1 and
+  version 1 loaded; choosing the CRT look reached the account.
+- The old `/api/emulator/savestates` routes used the game id in a file path
+  unchecked; it is now limited to safe characters.
+- Unit tests: 19 passed (adds CRC-32 against zlib's). Selftest regression:
+  all pass, including Dolphin.
+- The pause overlay is the player's menu (Phase 3-4): it pauses the game,
+  and holds the slots, rewind, run-ahead, looks, controls and closing.

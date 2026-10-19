@@ -70,6 +70,9 @@ type SetState = unsafe extern "system" fn(u32, *mut XInputVibration) -> u32;
 pub enum Hotkey {
     Save,
     Load,
+    /// The next / previous save slot (Guide or Back with the d-pad right / left).
+    SlotNext,
+    SlotPrev,
     Menu,
     FastForward(bool),
     Rewind(bool),
@@ -209,6 +212,12 @@ impl Chords {
             if pressed & XI_START != 0 {
                 fired(Hotkey::Menu, out);
             }
+            if pressed & XI_RIGHT != 0 {
+                fired(Hotkey::SlotNext, out);
+            }
+            if pressed & XI_LEFT != 0 {
+                fired(Hotkey::SlotPrev, out);
+            }
             if rt && !self.raw_rt && !self.hk_rt {
                 self.hk_rt = true;
                 fired(Hotkey::FastForward(true), out);
@@ -262,11 +271,14 @@ pub struct Native {
     pub guide: bool,
     slots: [Slot; 4],
     pub layout: Layout,
+    /// Buttons newly pressed on any controller in the last poll (XInput bits),
+    /// for driving the menu while the game is paused.
+    pub nav: u16,
 }
 
 impl Native {
     pub fn open() -> Self {
-        let mut n = Native { _lib: None, get: None, set: None, guide: false, slots: std::array::from_fn(|_| Slot { connected: false, checked: None, pad: XInputGamepad::default(), chords: Chords::default(), rumble: (0, 0) }), layout: Layout::Position };
+        let mut n = Native { _lib: None, get: None, set: None, guide: false, slots: std::array::from_fn(|_| Slot { connected: false, checked: None, pad: XInputGamepad::default(), chords: Chords::default(), rumble: (0, 0) }), layout: Layout::Position, nav: 0 };
         for name in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
             let Ok(lib) = (unsafe { libloading::Library::new(name) }) else { continue };
             unsafe {
@@ -298,6 +310,7 @@ impl Native {
     pub fn poll(&mut self, hotkeys: &mut Vec<Hotkey>) -> Vec<Option<PortInput>> {
         let Some(get) = self.get else { return Vec::new() };
         let mut out = Vec::new();
+        self.nav = 0;
         let now = Instant::now();
         for (i, s) in self.slots.iter_mut().enumerate() {
             if !s.connected && s.checked.is_some_and(|t| now.duration_since(t) < Duration::from_secs(1)) {
@@ -311,6 +324,7 @@ impl Native {
                 continue;
             }
             s.connected = true;
+            self.nav |= st.pad.buttons & !s.pad.buttons;
             if st.pad != s.pad && trace() {
                 crate::log::emit(crate::log::Level::Info, "pads", &format!("slot {i}: buttons {:04x} lt {} rt {}", st.pad.buttons, st.pad.left_trigger, st.pad.right_trigger));
             }

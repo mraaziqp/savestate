@@ -24,7 +24,7 @@ pub struct PortInput {
     pub triggers: [i16; 2],
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Dirs {
     pub system: CString,
     pub save: CString,
@@ -41,6 +41,25 @@ pub struct GameInfoExt {
 // SAFETY: the raw pointers in `info` point into `strings` (owned here) or into
 // the session's content buffer, which outlives this value.
 unsafe impl Send for GameInfoExt {}
+
+impl GameInfoExt {
+    /// A copy with its own strings (for a second instance of the core).
+    pub fn duplicate(&self) -> Self {
+        let strings = self.strings.clone();
+        let remap = |p: *const std::ffi::c_char| -> *const std::ffi::c_char {
+            self.strings.iter().position(|s| s.as_ptr() == p).map(|i| strings[i].as_ptr()).unwrap_or(p)
+        };
+        let mut info = self.info;
+        info.full_path = remap(info.full_path);
+        info.archive_path = remap(info.archive_path);
+        info.archive_file = remap(info.archive_file);
+        info.dir = remap(info.dir);
+        info.name = remap(info.name);
+        info.ext = remap(info.ext);
+        info.meta = remap(info.meta);
+        Self { strings, info }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct FrameTimeCallback {
@@ -96,7 +115,7 @@ pub struct HostState {
 unsafe impl Send for HostState {}
 
 impl HostState {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             frame: Frame::default(),
             audio: Vec::with_capacity(4096),
@@ -139,6 +158,14 @@ static HOST: OnceLock<Mutex<HostState>> = OnceLock::new();
 /// the engine aborts on panic anyway (panic = "abort").
 pub fn lock() -> MutexGuard<'static, HostState> {
     HOST.get_or_init(|| Mutex::new(HostState::new())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Exchanges the active host state with `other`. A second instance of the
+/// core (run-ahead) has its own state: it's swapped in around that
+/// instance's calls, which all happen on the emulation thread, so the
+/// callbacks (which carry no instance pointer) reach the right one.
+pub fn swap(other: &mut HostState) {
+    std::mem::swap(&mut *lock(), other);
 }
 
 /// Starts a fresh state for a new session.

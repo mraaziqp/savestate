@@ -949,6 +949,15 @@ player's menu has "Open games in RetroArch instead".
 
 - Build: `engine\build.cmd --release` (Rust's GNU toolchain; no Visual Studio).
   Tests: `cargo test` with the toolchain's `self-contained` folder on PATH.
+- Launcher v12 gives the engine its own folders under
+  `%LOCALAPPDATA%\NexusEmuClient\engine` (cores, system, saves, states): it
+  doesn't need RetroArch. RetroArch saves and core save folders (Dolphin's
+  memory cards) come over once on first use.
+- Saves follow the person: battery saves through `/api/savefile`, save
+  states (up to 48 MB, 5 versions per slot) through `/api/engine/states`,
+  preferences through `/api/engine/prefs`, all in the database. The engine
+  gets the person's token from the launcher in its environment
+  (`SAVESTATE_TOKEN`), never on its command line.
 - Publish: `node scripts/publish-engine.mjs` copies the build to
   `releases\engine` (served by `/api/client-launcher/engine` and `/info`).
   Launchers check every 10 minutes and replace their copy when the SHA-256

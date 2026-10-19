@@ -76,7 +76,10 @@ enum Command {
     Pause(bool),
     Reset,
     Save(u32),
-    Load(u32),
+    /// A slot; a version to load an earlier one from the host.
+    Load(u32, Option<u32>),
+    /// The host's earlier versions of a slot.
+    Versions(u32),
     Slot(u32),
     Slots,
     FastForward(bool),
@@ -299,7 +302,8 @@ fn parse_command(text: &str) -> Option<Command> {
         "resume" => Command::Pause(false),
         "reset" => Command::Reset,
         "save" => Command::Save(n("slot").unwrap_or(0.0) as u32),
-        "load" => Command::Load(n("slot").unwrap_or(0.0) as u32),
+        "load" => Command::Load(n("slot").unwrap_or(0.0) as u32, n("version").map(|v| v as u32)),
+        "versions" => Command::Versions(n("slot").unwrap_or(1.0) as u32),
         "ff" => Command::FastForward(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
         "ffspeed" => Command::FfSpeed(n("x").unwrap_or(0.0)),
         "rewind" => Command::Rewind(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
@@ -426,7 +430,9 @@ fn slot_path(states_dir: &std::path::Path, game: &str, slot: u32) -> PathBuf {
     states_dir.join(format!("{game}.state{slot}"))
 }
 
-fn save_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32) -> Value {
+type HostCache = Arc<Mutex<Vec<crate::sync::HostSlot>>>;
+
+fn save_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32, shared: &Arc<Shared>, cache: &HostCache) -> Value {
     let path = slot_path(states_dir, game, slot);
     let r = s.serialize().and_then(|state| {
         std::fs::create_dir_all(states_dir).map_err(|e| e.to_string())?;
@@ -437,9 +443,26 @@ fn save_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32) -
             let hs = host::lock();
             (hs.frame.width, hs.frame.height, hs.frame.to_rgba())
         };
+        let thumb_path = path.with_extension(format!("state{slot}.png"));
         if w > 0 && h > 0 {
             let (tw, th, small) = shrink(w, h, &rgba, 200);
-            let _ = write_png(&path.with_extension(format!("state{slot}.png")), tw, th, &small);
+            let _ = write_png(&thumb_path, tw, th, &small);
+        }
+        // Up to the host in the background (states up to 48 MB; Dolphin's 92 MB stay on this PC).
+        if let Some(sync) = s.sync() {
+            if state.len() <= 48 << 20 {
+                let thumb = std::fs::read(&thumb_path).unwrap_or_default();
+                let (shared, cache, sync2) = (shared.clone(), cache.clone(), sync.clone());
+                sync.push_state(slot, state.clone(), thumb, move |r| match r {
+                    Ok(v) => {
+                        shared.text(json!({ "type": "synced", "slot": slot, "version": v["version"] }));
+                        if let Ok(list) = sync2.list_states() {
+                            *cache.lock().unwrap_or_else(|e| e.into_inner()) = list;
+                        }
+                    }
+                    Err(e) => shared.text(json!({ "type": "syncError", "slot": slot, "message": format!("Saved on this PC; not on the host yet ({e})") })),
+                });
+            }
         }
         Ok(state.len())
     });
@@ -449,22 +472,57 @@ fn save_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32) -
     }
 }
 
-fn load_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32) -> Value {
-    let r = std::fs::read(slot_path(states_dir, game, slot)).map_err(|_| "there's no save in that slot".to_string()).and_then(|b| s.unserialize(&b));
+fn modified_ms(p: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(p).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
+}
+
+/// Loads a slot: an earlier version from the host when asked; otherwise the
+/// newer of this PC's copy and the host's (the host's is kept here after).
+fn load_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32, version: Option<u32>, cache: &HostCache) -> Value {
+    let path = slot_path(states_dir, game, slot);
+    let host_at = cache.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|h| h.slot == slot).map(|h| h.saved_at);
+    let local_at = modified_ms(&path);
+    let from_host = version.is_some() || matches!((local_at, host_at), (None, Some(_))) || matches!((local_at, host_at), (Some(l), Some(h)) if h > l + 2000);
+    let r = if from_host {
+        match s.sync() {
+            Some(sync) => sync.fetch_state(slot, version).and_then(|(state, _)| {
+                if version.is_none() {
+                    let _ = std::fs::create_dir_all(states_dir);
+                    let _ = std::fs::write(&path, &state);
+                }
+                s.unserialize(&state).map(|_| "host")
+            }),
+            None => Err("this game isn't linked to the host".into()),
+        }
+    } else {
+        std::fs::read(&path).map_err(|_| "there's no save in that slot".to_string()).and_then(|b| s.unserialize(&b)).map(|_| "pc")
+    };
     match r {
-        Ok(()) => json!({ "type": "loaded", "slot": slot }),
+        Ok(from) => json!({ "type": "loaded", "slot": slot, "version": version, "from": from }),
         Err(e) => json!({ "type": "error", "message": format!("Couldn't load: {e}") }),
     }
 }
 
-/// Slots 1-4: when each was saved and its picture (PNG, base64).
-fn list_slots(states_dir: &std::path::Path, game: &str) -> Value {
+/// Slots 1-4: when each was saved, its picture (PNG, base64), and whether
+/// the host has it (with how many versions), merging this PC and the host.
+fn list_slots(states_dir: &std::path::Path, game: &str, host: &[crate::sync::HostSlot]) -> Value {
     let slots: Vec<Value> = (1..=4u32)
         .map(|slot| {
             let path = slot_path(states_dir, game, slot);
-            let saved = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
-            let thumb = saved.and_then(|_| std::fs::read(path.with_extension(format!("state{slot}.png"))).ok()).map(|b| ws::base64(&b));
-            json!({ "slot": slot, "saved": saved, "thumb": thumb })
+            let local_at = modified_ms(&path);
+            let local_thumb = local_at.and_then(|_| std::fs::read(path.with_extension(format!("state{slot}.png"))).ok()).map(|b| ws::base64(&b));
+            let h = host.iter().find(|h| h.slot == slot);
+            let host_newer = matches!((local_at, h), (None, Some(_))) || matches!((local_at, h), (Some(l), Some(h)) if h.saved_at > l + 2000);
+            let saved = if host_newer { h.map(|h| h.saved_at) } else { local_at };
+            let thumb = if host_newer { h.and_then(|h| h.thumb.clone()).or(local_thumb) } else { local_thumb.or_else(|| h.and_then(|h| h.thumb.clone())) };
+            json!({
+                "slot": slot,
+                "saved": saved.map(|ms| ms / 1000),
+                "thumb": thumb,
+                "onHost": h.is_some(),
+                "versions": h.map(|h| h.versions).unwrap_or(0),
+                "device": h.and_then(|h| h.device.clone()),
+            })
         })
         .collect();
     json!({ "type": "slots", "slots": slots })
@@ -584,6 +642,16 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
     let mut native_count = 0usize;
     let mut was_rewinding = false;
     let mut rewind_held = 0u32;
+    // The host's slots for this game, fetched in the background (load uses them to pick the newer copy).
+    let host_cache: HostCache = Arc::new(Mutex::new(Vec::new()));
+    if let Some(sync) = session.sync() {
+        let cache = host_cache.clone();
+        let _ = std::thread::Builder::new().name("sync-list".into()).spawn(move || {
+            if let Ok(list) = sync.list_states() {
+                *cache.lock().unwrap_or_else(|e| e.into_inner()) = list;
+            }
+        });
+    }
 
     let handle = |c: Command, s: &mut Session, play: &mut Play, rewind: &mut Option<Rewind>, native: &mut Native| match c {
         Command::Input(port, input) => {
@@ -603,15 +671,41 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
                 r.clear();
             }
         }
-        Command::Save(slot) => shared.text(save_slot(s, &states_dir, &game_name, slot)),
-        Command::Load(slot) => {
-            shared.text(load_slot(s, &states_dir, &game_name, slot));
+        Command::Save(slot) => shared.text(save_slot(s, &states_dir, &game_name, slot, &shared, &host_cache)),
+        Command::Load(slot, version) => {
+            shared.text(load_slot(s, &states_dir, &game_name, slot, version, &host_cache));
             if let Some(r) = rewind.as_mut() {
                 r.clear();
             }
         }
         Command::Slot(n) => play.slot = n,
-        Command::Slots => shared.text(list_slots(&states_dir, &game_name)),
+        Command::Slots => {
+            // This PC's slots at once; again with the host's once it answers.
+            let cached = host_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            shared.text(list_slots(&states_dir, &game_name, &cached));
+            if let Some(sync) = s.sync() {
+                let (shared, cache, dir, game) = (shared.clone(), host_cache.clone(), states_dir.clone(), game_name.clone());
+                let _ = std::thread::Builder::new().name("sync-list".into()).spawn(move || {
+                    if let Ok(list) = sync.list_states() {
+                        shared.text(list_slots(&dir, &game, &list));
+                        *cache.lock().unwrap_or_else(|e| e.into_inner()) = list;
+                    }
+                });
+            }
+        }
+        Command::Versions(slot) => {
+            if let Some(sync) = s.sync() {
+                let shared = shared.clone();
+                let _ = std::thread::Builder::new().name("sync-versions".into()).spawn(move || {
+                    shared.text(match sync.versions(slot) {
+                        Ok(v) => json!({ "type": "versions", "slot": slot, "versions": v }),
+                        Err(e) => json!({ "type": "versions", "slot": slot, "versions": [], "error": e }),
+                    });
+                });
+            } else {
+                shared.text(json!({ "type": "versions", "slot": slot, "versions": [] }));
+            }
+        }
         Command::FastForward(on) => {
             play.ff = on;
             host::lock().fastforward = on;
@@ -625,7 +719,16 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
                 *rewind = None;
             }
         }
-        Command::RunAhead(k) => play.runahead = k,
+        Command::RunAhead(k) => {
+            play.runahead = k;
+            // Run-ahead on a second instance keeps the sound exact (see
+            // Session::start_second_instance); one instance if that can't start.
+            if k > 0 && !s.uses_gpu() && !s.second_instance() {
+                if let Err(e) = s.start_second_instance() {
+                    crate::info!("run-ahead on one instance: {e}");
+                }
+            }
+        }
         Command::Layout(l) => {
             play.layout = l;
             native.layout = l;
@@ -641,9 +744,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             let gap = if (20.0..=500.0).contains(&hz) { 1e6 / hz * 0.8 } else { 0.0 };
             shared.min_video_gap_us.store(gap as u64, Ordering::Relaxed);
         }
-        Command::SetOption(k, v) => {
-            host::lock().options.set(&k, &v);
-        }
+        Command::SetOption(k, v) => s.set_option(&k, &v),
         Command::Connected => play.connected = true,
         Command::Disconnected(generation) => {
             if shared.out().generation == generation {
@@ -667,11 +768,14 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             }
             if play.connected {
                 idle_since = Instant::now();
-                // The Guide button still opens and closes the menu while paused.
+                // While paused (the menu is open) the engine's controllers
+                // drive the menu: their new presses go to the page.
                 hotkeys.clear();
                 native.poll(&mut hotkeys);
                 if hotkeys.contains(&Hotkey::Menu) {
                     shared.text(json!({ "type": "menu" }));
+                } else if native.nav != 0 {
+                    shared.text(json!({ "type": "nav", "buttons": native.nav }));
                 }
             }
             match cmd_rx.recv_timeout(Duration::from_millis(30)) {
@@ -693,9 +797,14 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         }
         for h in hotkeys.drain(..) {
             match h {
-                Hotkey::Save => shared.text(save_slot(&session, &states_dir, &game_name, play.slot)),
+                Hotkey::Save => shared.text(save_slot(&session, &states_dir, &game_name, play.slot, &shared, &host_cache)),
+                Hotkey::SlotNext | Hotkey::SlotPrev => {
+                    let up = h == Hotkey::SlotNext;
+                    play.slot = if up { play.slot % 4 + 1 } else { (play.slot + 2) % 4 + 1 };
+                    shared.text(json!({ "type": "slot", "n": play.slot }));
+                }
                 Hotkey::Load => {
-                    shared.text(load_slot(&session, &states_dir, &game_name, play.slot));
+                    shared.text(load_slot(&session, &states_dir, &game_name, play.slot, None, &host_cache));
                     if let Some(r) = rewind.as_mut() {
                         r.clear();
                     }
@@ -962,6 +1071,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
                     "megabytes": rewind.as_ref().map(|r| r.bytes() >> 20).unwrap_or(0),
                 },
                 "runahead": {
+                    "copies": if session.second_instance() { 2 } else { 1 },
                     "max": c.runahead_max(frame_ms, frame_period.as_secs_f64() * 1000.0),
                     "frames": play.runahead.min(c.runahead_max(frame_ms, frame_period.as_secs_f64() * 1000.0)),
                 },
