@@ -250,6 +250,20 @@ a move, check that the `NexusArchive` folder is still shared with it.
   itself to the adaptive stream. Desktop Chrome reports native HLS support;
   the player still uses hls.js there, because the native player never steps
   down on a weak link.
+- Quality picking (2026-10-19): films sat at 720p for their whole length on a
+  13 Mbit/s link, because the player assumed 1.5 Mbit/s, stepped up only at
+  1.67x a level's bitrate, and the master playlist declared averages at 75%
+  of the peak. The master now declares a realistic average (70% of the cap),
+  and the player (build.mjs 3f) starts from 5 Mbit/s and steps up at hls.js's
+  own 1.43x: 1080p from about 8 Mbit/s. Measured on Drive films: first
+  picture 1.5 s warm, 4-6 s cold, no stalls in a minute.
+- Most films live on Drive, so the fastest start is a prepared copy
+  (videoprep.ts, "Films ready for every device"): it plays as-is at full
+  quality with no live conversion. The queue is long (1,021 of 1,881 films on
+  2026-10-19) because each copy is uploaded back to Drive over the home line;
+  pressing Play on a film moves it to the front.
+- The HLS cache never prunes segments used in the last 30 minutes, and gives
+  space back only below 8 GB free on its disk.
 
 ## Accounts, access and plans
 
@@ -896,6 +910,10 @@ removing finished torrents frees nothing; uploading and freeing folders
 back when its disk has under 20 GB free, and the film converter removes
 working folders a restart left behind.
 
+"Get it" in What to Watch and Discover (web-src/watch/ui.jsx) asks for the
+quality (Radarr/Sonarr quality profiles, HD-1080p by default, the last
+choice remembered per films/series), as Downloads > Search & Add does.
+
 "Sonarr can't send downloads to qBittorrent" is only reported for real
 client failures; a site refusing ("429 Too Many Requests" from Knaben when
 several releases are grabbed at once) is a warning, and the release is tried
@@ -980,7 +998,15 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
   empty folder and run `iexpress /N /Q savestate.sed` with an SED whose
   `AppLaunched` is `cmd.exe /c SaveState-Setup.cmd`. PCs that already have the
   launcher get a new one by running the installer again (the launcher does
-  not update itself).
+  not update itself). The setup's embedded script was identical to the live
+  one on 2026-10-19 (extract it with `SaveState-Setup-<v>.exe /Q /C /T:<dir>`
+  and compare), so it installs the current launcher and engine.
+- The launcher writes `launcher.log` next to itself
+  (`%LOCALAPPDATA%\NexusEmuClient`): one line per launch with how long each
+  step took. The page asks it at 127.0.0.1:17373 first and 17374 only when
+  that can't be reached (it used to ask four addresses at once, and a game
+  card's Play button launched twice).
+- **macOS** has no installer: Get the App points to the web app (Install App).
 
 ## SaveState Engine (games inside the page)
 
