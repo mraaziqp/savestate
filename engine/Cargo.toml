@@ -1,0 +1,21 @@
+# SaveState Engine: SaveState's own libretro host (see SAVESTATE_ENGINE_SPEC.md).
+[workspace]
+members = ["libretro-sys", "engine"]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+
+# A panic must never unwind into a core's C code: abort instead. Each game runs
+# in its own engine process, so an abort ends that game only.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1

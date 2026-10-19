@@ -1,0 +1,6 @@
+# The GNU toolchain links with its own bundled linker, so the engine builds
+# without Visual Studio. Cores are loaded through the plain C ABI, so an
+# MSVC-built core DLL works the same from a GNU-built engine.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"
+profile = "minimal"

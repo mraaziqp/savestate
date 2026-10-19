@@ -1,0 +1,8 @@
+[package]
+name = "libretro-sys"
+description = "The libretro ABI (include/libretro.h, API version 1) for SaveState Engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

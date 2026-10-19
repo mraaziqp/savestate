@@ -1,0 +1,27 @@
+[package]
+name = "savestate-engine"
+description = "SaveState's own libretro host: loads cores and runs games inside SaveState"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "savestate_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "savestate-engine"
+path = "src/main.rs"
+
+# Pure-Rust dependencies only: the engine builds without a C compiler.
+[dependencies]
+libretro-sys = { path = "../libretro-sys" }
+libloading = "0.8"
+png = "0.17"
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
