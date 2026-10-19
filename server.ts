@@ -20635,7 +20635,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // where it is instead of copying it (nobody else is told host paths).
     const hostPath = (await access.callerOf(req)).admin ? folder.root : undefined;
     // A PS3 game folder without its PARAM.SFO is an unfinished copy; RPCS3 refuses it.
-    const complete = files.some((f) => f.path.toUpperCase() === "PS3_GAME/PARAM.SFO");
+    // So is one whose EBOOT.BIN is zeros (an interrupted copy that had set the
+    // size first: E:\ROMS\PS3\Uncharted 1, 2026-10-19): a real one starts
+    // "SCE\0" (signed) or "\x7fELF".
+    const head = await readFile(path.join(folder.root, "PS3_GAME", "USRDIR", "EBOOT.BIN")).then((b) => b.subarray(0, 4).toString("latin1")).catch(() => "");
+    const complete = files.some((f) => f.path.toUpperCase() === "PS3_GAME/PARAM.SFO") && (head === "SCE\0" || head === "\x7fELF");
     res.json({ name: folder.name, files, total: files.reduce((n, f) => n + f.size, 0), complete, hostPath });
   });
   app.get("/api/games/:id/folder/*", async (req, res) => {

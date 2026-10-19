@@ -354,7 +354,7 @@ fn capture(cfg: CaptureConfig, shared: Arc<Shared>, cmd_rx: Receiver<Command>, r
     crate::info!("capture: started {} (pid {pid})", cfg.exe.display());
 
     // Its game window (emulators can take a while to show it).
-    let until = Instant::now() + Duration::from_secs(120);
+    let until = Instant::now() + Duration::from_secs(240);
     let mut hwnd = None;
     while Instant::now() < until {
         if let Ok(Some(status)) = child.try_wait() {

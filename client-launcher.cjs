@@ -2306,7 +2306,19 @@ function folderComplete(root) {
   if (folderFetches.has(root)) return false;
   if (fs.existsSync(path.join(root, FOLDER_DONE))) return true;
   if (fs.existsSync(path.join(root, FOLDER_PARTIAL))) return false;
-  return fs.existsSync(path.join(root, 'PS3_GAME', 'PARAM.SFO')) && fs.existsSync(ebootOf(root));
+  return fs.existsSync(path.join(root, 'PS3_GAME', 'PARAM.SFO')) && ebootLooksReal(ebootOf(root));
+}
+// An interrupted copy can leave EBOOT.BIN at full size but all zeros; a real
+// one starts "SCE\0" (signed) or "\x7fELF".
+function ebootLooksReal(file) {
+  try {
+    const fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(4);
+    fs.readSync(fd, head, 0, 4, 0);
+    fs.closeSync(fd);
+    const h = head.toString('latin1');
+    return h === 'SCE\x00' || h === '\x7fELF';
+  } catch { return false; }
 }
 
 async function fetchGameFolder(base, query, list, root) {
@@ -2362,7 +2374,7 @@ async function ensureGameFolder(romUrl, root, title) {
   // This PC is the host: play the library's own folder.
   if (list.hostPath && folderComplete(list.hostPath)) return { ok: true, eboot: ebootOf(list.hostPath) };
   if (!Array.isArray(list.files) || !list.files.length) return { ok: false, status: 502, json: { success: false, error: "The host's copy of this game has no files" } };
-  if (list.complete === false) return { ok: false, status: 502, json: { success: false, error: `The host's copy of ${title || 'this game'} is incomplete (its PS3_GAME/PARAM.SFO is missing), so it can't be played. Copy the whole game folder to the host again.` } };
+  if (list.complete === false) return { ok: false, status: 502, json: { success: false, error: `The host's copy of ${title || 'this game'} is incomplete or damaged (its PS3_GAME/PARAM.SFO is missing, or its EBOOT.BIN is empty), so it can't be played. Copy the whole game folder to the host again.` } };
   fetchGameFolder(base, u.search, list, root);
   return progress(folderFetches.get(root));
 }
@@ -3038,7 +3050,7 @@ function startCapture(exe, emu, emuArgs, { origin, title }) {
   const args = ['capture', '--key', key, '--title', String(title || 'Game'), '--emulator', name, '--data', path.join(engineDir, 'data')];
   if (origin) args.push('--origin', origin);
   args.push('--', emu, ...windowed);
-  return runEngine(exe, args, key, '', name, 150_000);
+  return runEngine(exe, args, key, '', name, 270_000);
 }
 
 function runEngine(exe, args, key, token, label, waitMs = 90_000) {

@@ -1025,13 +1025,21 @@ player's menu has "Open games in RetroArch instead".
   ViGEmBus driver; `savestate-engine vigem-test` checks it). Its sound plays
   on the PC. If capture can't start, the emulator opens in its own window as
   before. Close in the page closes the emulator (its whole process tree).
+  A first boot from a new folder can take minutes (RPCS3 builds its caches),
+  so capture waits up to 4 minutes for the game window. RPCS3's "Welcome"
+  dialog is turned off (`infoBoxEnabledWelcome=false` in
+  `E:\RPCS3\GuiConfigs\CurrentSettings.ini`); it showed at every start and
+  kept the game window from being found.
 - PS3 games kept as a folder (`.../PS3_GAME/USRDIR/EBOOT.BIN`): launcher v14
   fetches the whole folder (`/api/games/:id/folder`, every file; "being
   copied, n %" until done, resumable) or, on the host PC for the owner,
   plays the library's folder where it is. A host copy without
-  `PS3_GAME/PARAM.SFO` is refused as incomplete. `E:\ROMS\PS3\Uncharted 1`
-  is such a half copy (17 of 21 GB); the library entry now points at the
-  complete one on the Drive (`roms\PS3\Uncharted - Drake's Fortune`).
+  `PS3_GAME/PARAM.SFO`, or whose EBOOT.BIN doesn't start like a real one
+  (all zeros), is refused as incomplete. `E:\ROMS\PS3\Uncharted 1` was such
+  a copy (451 files missing, and 67 more full-size but zero-filled, from an
+  interrupted copy in January); on 2026-10-19 it was repaired from the Drive
+  copy (`roms\PS3\Uncharted - Drake's Fortune`, `rclone copy --checksum`)
+  and now matches it file for file by MD5, and the library plays it from E:.
 - A game that stops responding (a core stuck inside a frame) is reported in
   the page after 20 s; Close then ends the engine within 8 s, and a game
   stuck for 5 minutes ends on its own.
