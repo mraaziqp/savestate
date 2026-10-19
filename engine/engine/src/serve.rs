@@ -24,10 +24,19 @@
 //!   'A' 0 0 0 | frames u32 | interleaved stereo i16 at 48 kHz
 //! and JSON text: ready, geometry, status, saved, loaded, error, exit.
 //! Page -> engine, JSON text: {"t":"in","p":port,"b":buttons,"a":[lx,ly,rx,ry],"g":[l2,r2]},
-//! pause, resume, reset, save {slot}, load {slot}, ff {on}, audio {fill, target},
-//! option {key, value}, quit.
+//! pause, resume, reset, save {slot}, load {slot}, slot {n}, slots, ff {on},
+//! ffspeed {x}, rewind {on} (held), rewinding {enabled}, runahead {frames},
+//! layout {labels}, audio {fill, target}, display {hz}, option {key, value}, quit.
+//!
+//! Phase 4: controllers the engine reads itself (input.rs) take the first
+//! ports, the page's own controllers the ports after; Guide hotkeys act
+//! here and tell the page. Rewind (rewind.rs) and run-ahead
+//! (Session::run_frame_ahead) switch on per core when its save states are
+//! small and quick enough.
 use crate::audio::{RateControl, Resampler, OUTPUT_RATE};
 use crate::host::{self, PortInput};
+use crate::input::{Hotkey, Layout, Native};
+use crate::rewind::Rewind;
 use crate::timing::Pacer;
 use crate::video::{write_png, PixelFormat};
 use crate::ws;
@@ -68,7 +77,16 @@ enum Command {
     Reset,
     Save(u32),
     Load(u32),
+    Slot(u32),
+    Slots,
     FastForward(bool),
+    FfSpeed(f64),
+    /// Held: play backwards.
+    Rewind(bool),
+    /// Keep the rewind history at all.
+    RewindEnabled(bool),
+    RunAhead(u32),
+    Layout(Layout),
     AudioFill(f64, Option<f64>),
     /// The page's display refresh rate: no point sending pictures faster.
     Display(f64),
@@ -283,6 +301,13 @@ fn parse_command(text: &str) -> Option<Command> {
         "save" => Command::Save(n("slot").unwrap_or(0.0) as u32),
         "load" => Command::Load(n("slot").unwrap_or(0.0) as u32),
         "ff" => Command::FastForward(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
+        "ffspeed" => Command::FfSpeed(n("x").unwrap_or(0.0)),
+        "rewind" => Command::Rewind(v.get("on").and_then(Value::as_bool).unwrap_or(false)),
+        "rewinding" => Command::RewindEnabled(v.get("enabled").and_then(Value::as_bool).unwrap_or(true)),
+        "runahead" => Command::RunAhead(n("frames").unwrap_or(0.0).clamp(0.0, 4.0) as u32),
+        "slot" => Command::Slot(n("n").unwrap_or(1.0).clamp(1.0, 9.0) as u32),
+        "slots" => Command::Slots,
+        "layout" => Command::Layout(if v.get("labels").and_then(Value::as_bool).unwrap_or(false) { Layout::Labels } else { Layout::Position }),
         "audio" => Command::AudioFill(n("fill")?, n("target")),
         "display" => Command::Display(n("hz")?),
         "option" => Command::SetOption(v.get("key")?.as_str()?.to_string(), v.get("value")?.as_str()?.to_string()),
@@ -396,6 +421,118 @@ fn aspect_of(av: &libretro_sys::retro_system_av_info) -> f64 {
     if a > 0.0 { a } else if av.geometry.base_height > 0 { av.geometry.base_width as f64 / av.geometry.base_height as f64 } else { 4.0 / 3.0 }
 }
 
+/// Save-state slots on disk: `<game>.state<n>` and a small picture beside it.
+fn slot_path(states_dir: &std::path::Path, game: &str, slot: u32) -> PathBuf {
+    states_dir.join(format!("{game}.state{slot}"))
+}
+
+fn save_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32) -> Value {
+    let path = slot_path(states_dir, game, slot);
+    let r = s.serialize().and_then(|state| {
+        std::fs::create_dir_all(states_dir).map_err(|e| e.to_string())?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &state).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+        let (w, h, rgba) = {
+            let hs = host::lock();
+            (hs.frame.width, hs.frame.height, hs.frame.to_rgba())
+        };
+        if w > 0 && h > 0 {
+            let (tw, th, small) = shrink(w, h, &rgba, 200);
+            let _ = write_png(&path.with_extension(format!("state{slot}.png")), tw, th, &small);
+        }
+        Ok(state.len())
+    });
+    match r {
+        Ok(bytes) => json!({ "type": "saved", "slot": slot, "bytes": bytes }),
+        Err(e) => json!({ "type": "error", "message": format!("Couldn't save: {e}") }),
+    }
+}
+
+fn load_slot(s: &Session, states_dir: &std::path::Path, game: &str, slot: u32) -> Value {
+    let r = std::fs::read(slot_path(states_dir, game, slot)).map_err(|_| "there's no save in that slot".to_string()).and_then(|b| s.unserialize(&b));
+    match r {
+        Ok(()) => json!({ "type": "loaded", "slot": slot }),
+        Err(e) => json!({ "type": "error", "message": format!("Couldn't load: {e}") }),
+    }
+}
+
+/// Slots 1-4: when each was saved and its picture (PNG, base64).
+fn list_slots(states_dir: &std::path::Path, game: &str) -> Value {
+    let slots: Vec<Value> = (1..=4u32)
+        .map(|slot| {
+            let path = slot_path(states_dir, game, slot);
+            let saved = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs());
+            let thumb = saved.and_then(|_| std::fs::read(path.with_extension(format!("state{slot}.png"))).ok()).map(|b| ws::base64(&b));
+            json!({ "slot": slot, "saved": saved, "thumb": thumb })
+        })
+        .collect();
+    json!({ "type": "slots", "slots": slots })
+}
+
+/// Nearest-neighbour shrink of an RGBA picture to at most `max_w` wide.
+fn shrink(w: u32, h: u32, rgba: &[u8], max_w: u32) -> (u32, u32, Vec<u8>) {
+    if w <= max_w {
+        return (w, h, rgba.to_vec());
+    }
+    let (tw, th) = (max_w, (h as u64 * max_w as u64 / w as u64).max(1) as u32);
+    let mut out = Vec::with_capacity((tw * th * 4) as usize);
+    for y in 0..th {
+        let sy = (y as u64 * h as u64 / th as u64) as usize;
+        for x in 0..tw {
+            let sx = (x as u64 * w as u64 / tw as u64) as usize;
+            let i = (sy * w as usize + sx) * 4;
+            out.extend_from_slice(&rgba[i..i + 4]);
+        }
+    }
+    (tw, th, out)
+}
+
+/// What one game session is doing, as the page and the controllers ask.
+struct Play {
+    connected: bool,
+    paused: bool,
+    ff: bool,
+    /// Fast-forward speed (x real time); 0 = as fast as it goes.
+    ff_speed: f64,
+    quit: bool,
+    rate: RateControl,
+    /// The page's controls per port (keyboard and its own controllers).
+    page: [PortInput; host::MAX_PORTS],
+    slot: u32,
+    rewind_enabled: bool,
+    rewinding: bool,
+    runahead: u32,
+    layout: Layout,
+}
+
+/// What the engine measured about this core's save states (after it has run a moment).
+#[derive(Clone, Copy)]
+struct StateCost {
+    bytes: usize,
+    ms: f64,
+}
+
+impl StateCost {
+    /// Rewind keeps every frame when states are small, every few frames when larger.
+    fn rewind_every(&self) -> Option<u32> {
+        match self.bytes {
+            0 => None,
+            b if b > 32 << 20 || self.ms > 4.0 => None,
+            b if b <= 1 << 20 => Some(1),
+            b if b <= 4 << 20 => Some(2),
+            _ => Some(4),
+        }
+    }
+    /// How many frames ahead fit in a frame's time (save + load + the extra frames).
+    fn runahead_max(&self, frame_ms: f64, period_ms: f64) -> u32 {
+        if self.bytes == 0 || self.bytes > 16 << 20 {
+            return 0;
+        }
+        (1..=2u32).rev().find(|k| frame_ms * (*k as f64 + 1.0) + self.ms * 2.0 < period_ms * 0.7).unwrap_or(0)
+    }
+}
+
 fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_exit: Duration, shared: Arc<Shared>, cmd_rx: Receiver<Command>, ready_tx: Sender<Result<Value, String>>) {
     let mut session = match Session::start(cfg) {
         Ok(s) => s,
@@ -406,7 +543,10 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         }
     };
     session.keep_core_loaded();
-    let info = ready_info(&session, &game_name);
+    let mut native = Native::open();
+    let mut info = ready_info(&session, &game_name);
+    info["nativeControllers"] = json!(native.available());
+    info["guide"] = json!(native.guide);
     shared.out().hello = Some(json!({ "type": "ready", "info": info }).to_string());
     let _ = ready_tx.send(Ok(info));
 
@@ -414,8 +554,10 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
     let mut av = session.av_info();
     let mut frame_period = period(av.timing.fps);
     let mut resampler = Resampler::new(av.timing.sample_rate);
-    let mut rate = RateControl::new(64.0);
-    let (mut connected, mut paused, mut ff, mut quit) = (false, false, false, false);
+    let mut play = Play {
+        connected: false, paused: false, ff: false, ff_speed: 4.0, quit: false, rate: RateControl::new(64.0),
+        page: [PortInput::default(); host::MAX_PORTS], slot: 1, rewind_enabled: true, rewinding: false, runahead: 0, layout: Layout::Position,
+    };
     let mut idle_since = Instant::now();
     let mut deadline = Instant::now();
     let mut last_serial = 0u64;
@@ -423,58 +565,75 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
     let mut last_video_push = Instant::now() - Duration::from_secs(1);
     // Per-second statistics.
     let (mut stat_at, mut stat_frames, mut stat_run, mut stat_late) = (Instant::now(), 0u32, Duration::ZERO, 0u32);
+    let mut frame_ms = 0.0f64;
     let mut sram_at = Instant::now();
     let mut sram_hash = session.memory(libretro_sys::RETRO_MEMORY_SAVE_RAM).map(fnv);
     // Asked only once the game has run: some cores (Dolphin) crash when asked
-    // for their save-state size before their first frame.
-    let mut can_save: Option<bool> = None;
+    // about save states before their first frame.
+    let mut cost: Option<StateCost> = None;
+    let mut rewind: Option<Rewind> = None;
+    let mut since_capture = 0u32;
+    let mut state_buf: Vec<u8> = Vec::new();
     // The frame rate the sound implies (core samples per frame vs its sample
-    // rate), measured over ~2 s windows: some cores declare a rate they don't
-    // run at (Dolphin reports 119.88 for 60 fps games).
+    // rate): some cores declare a rate they don't run at (Dolphin reports
+    // 119.88 for 60 fps games).
     let (mut win_runs, mut win_samples, mut win_at) = (0u64, 0u64, Instant::now());
     let (mut total_runs, mut last_sound_fps) = (0u64, None::<f64>);
+    let mut hotkeys: Vec<Hotkey> = Vec::new();
+    let mut last_rumble = [[0u16; 2]; host::MAX_PORTS];
+    let mut native_count = 0usize;
+    let mut was_rewinding = false;
+    let mut rewind_held = 0u32;
 
-    let handle = |c: Command, s: &mut Session, connected: &mut bool, paused: &mut bool, ff: &mut bool, quit: &mut bool, rate: &mut RateControl| match c {
-        Command::Input(port, input) => s.set_input(port, input),
-        Command::Pause(p) => *paused = p,
-        Command::Reset => s.reset(),
-        Command::Save(slot) => {
-            let path = states_dir.join(format!("{game_name}.state{slot}"));
-            let r = s.serialize().and_then(|state| {
-                std::fs::create_dir_all(&states_dir).map_err(|e| e.to_string())?;
-                let tmp = path.with_extension("tmp");
-                std::fs::write(&tmp, &state).map_err(|e| e.to_string())?;
-                std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-                let (w, h, rgba) = {
-                    let hs = host::lock();
-                    (hs.frame.width, hs.frame.height, hs.frame.to_rgba())
-                };
-                if w > 0 && h > 0 {
-                    let _ = write_png(&states_dir.join(format!("{game_name}.state{slot}.png")), w, h, &rgba);
-                }
-                Ok(state.len())
-            });
-            shared.text(match r {
-                Ok(bytes) => json!({ "type": "saved", "slot": slot, "bytes": bytes }),
-                Err(e) => json!({ "type": "error", "message": format!("Couldn't save: {e}") }),
-            });
+    let handle = |c: Command, s: &mut Session, play: &mut Play, rewind: &mut Option<Rewind>, native: &mut Native| match c {
+        Command::Input(port, input) => {
+            if port < host::MAX_PORTS {
+                play.page[port] = input;
+            }
         }
+        Command::Pause(p) => {
+            play.paused = p;
+            if p {
+                native.quiet();
+            }
+        }
+        Command::Reset => {
+            s.reset();
+            if let Some(r) = rewind.as_mut() {
+                r.clear();
+            }
+        }
+        Command::Save(slot) => shared.text(save_slot(s, &states_dir, &game_name, slot)),
         Command::Load(slot) => {
-            let path = states_dir.join(format!("{game_name}.state{slot}"));
-            let r = std::fs::read(&path).map_err(|_| "there's no save in that slot".to_string()).and_then(|b| s.unserialize(&b));
-            shared.text(match r {
-                Ok(()) => json!({ "type": "loaded", "slot": slot }),
-                Err(e) => json!({ "type": "error", "message": format!("Couldn't load: {e}") }),
-            });
+            shared.text(load_slot(s, &states_dir, &game_name, slot));
+            if let Some(r) = rewind.as_mut() {
+                r.clear();
+            }
         }
+        Command::Slot(n) => play.slot = n,
+        Command::Slots => shared.text(list_slots(&states_dir, &game_name)),
         Command::FastForward(on) => {
-            *ff = on;
+            play.ff = on;
             host::lock().fastforward = on;
         }
+        Command::FfSpeed(x) => play.ff_speed = if x >= 1.0 { x.min(16.0) } else { 0.0 },
+        Command::Rewind(on) => play.rewinding = on && play.rewind_enabled,
+        Command::RewindEnabled(on) => {
+            play.rewind_enabled = on;
+            if !on {
+                play.rewinding = false;
+                *rewind = None;
+            }
+        }
+        Command::RunAhead(k) => play.runahead = k,
+        Command::Layout(l) => {
+            play.layout = l;
+            native.layout = l;
+        }
         Command::AudioFill(fill, target) => {
-            rate.fill_ms = fill;
+            play.rate.fill_ms = fill;
             if let Some(t) = target.filter(|t| (10.0..=500.0).contains(t)) {
-                rate.target_ms = t;
+                play.rate.target_ms = t;
             }
         }
         Command::Display(hz) => {
@@ -485,31 +644,38 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         Command::SetOption(k, v) => {
             host::lock().options.set(&k, &v);
         }
-        Command::Connected => *connected = true,
+        Command::Connected => play.connected = true,
         Command::Disconnected(generation) => {
             if shared.out().generation == generation {
-                *connected = false;
+                play.connected = false;
+                native.quiet();
             }
         }
-        Command::Quit => *quit = true,
+        Command::Quit => play.quit = true,
     };
 
     loop {
         while let Ok(c) = cmd_rx.try_recv() {
-            handle(c, &mut session, &mut connected, &mut paused, &mut ff, &mut quit, &mut rate);
+            handle(c, &mut session, &mut play, &mut rewind, &mut native);
         }
-        if quit || session.shutdown_requested() {
+        if play.quit || session.shutdown_requested() {
             break;
         }
-        if !connected || paused {
-            if !connected && idle_since.elapsed() > idle_exit {
+        if !play.connected || play.paused {
+            if !play.connected && idle_since.elapsed() > idle_exit {
                 break;
             }
-            if connected {
+            if play.connected {
                 idle_since = Instant::now();
+                // The Guide button still opens and closes the menu while paused.
+                hotkeys.clear();
+                native.poll(&mut hotkeys);
+                if hotkeys.contains(&Hotkey::Menu) {
+                    shared.text(json!({ "type": "menu" }));
+                }
             }
-            match cmd_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(c) => handle(c, &mut session, &mut connected, &mut paused, &mut ff, &mut quit, &mut rate),
+            match cmd_rx.recv_timeout(Duration::from_millis(30)) {
+                Ok(c) => handle(c, &mut session, &mut play, &mut rewind, &mut native),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => break,
             }
@@ -518,10 +684,106 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         }
         idle_since = Instant::now();
 
+        // Controls: the engine's own controllers first, then the page's.
+        hotkeys.clear();
+        let pads = native.poll(&mut hotkeys);
+        if pads.len() != native_count {
+            native_count = pads.len();
+            shared.text(json!({ "type": "pads", "native": native_count }));
+        }
+        for h in hotkeys.drain(..) {
+            match h {
+                Hotkey::Save => shared.text(save_slot(&session, &states_dir, &game_name, play.slot)),
+                Hotkey::Load => {
+                    shared.text(load_slot(&session, &states_dir, &game_name, play.slot));
+                    if let Some(r) = rewind.as_mut() {
+                        r.clear();
+                    }
+                }
+                Hotkey::Menu => shared.text(json!({ "type": "menu" })),
+                Hotkey::FastForward(on) => {
+                    play.ff = on;
+                    host::lock().fastforward = on;
+                    shared.text(json!({ "type": "ff", "on": on }));
+                }
+                Hotkey::Rewind(on) => play.rewinding = on && play.rewind_enabled && rewind.is_some(),
+            }
+        }
+        let mut inputs = play.page;
+        for (port, pad) in pads.iter().enumerate().take(host::MAX_PORTS) {
+            if let Some(p) = pad {
+                let i = &mut inputs[port];
+                i.buttons |= p.buttons;
+                for s in 0..2 {
+                    for a in 0..2 {
+                        if p.sticks[s][a] != 0 {
+                            i.sticks[s][a] = p.sticks[s][a];
+                        }
+                    }
+                }
+                i.triggers = [i.triggers[0].max(p.triggers[0]), i.triggers[1].max(p.triggers[1])];
+            }
+        }
+        session.set_inputs(&inputs);
+
         let t0 = Instant::now();
-        session.run_frame(true);
-        stat_run += t0.elapsed();
+        let rewound = play.rewinding && rewind.as_ref().is_some_and(|r| !r.is_empty());
+        if rewound {
+            // Backwards: restore an earlier capture and show it (one frame,
+            // silent). Held longer, it goes faster: 1x for a second, then 2x,
+            // then 4x. The capture stays the current one until rewinding stops.
+            rewind_held += 1;
+            let steps = if rewind_held < 60 { 1 } else if rewind_held < 180 { 2 } else { 4 };
+            let mut target: Option<Vec<u8>> = None;
+            if let Some(r) = rewind.as_mut() {
+                for _ in 0..steps {
+                    match r.back() {
+                        Some(st) => target = Some(st.to_vec()),
+                        None => break,
+                    }
+                }
+            }
+            if let Some(st) = target {
+                let _ = session.unserialize(&st);
+            }
+            host::lock().av_enable = 1;
+            session.run_frame(false);
+            host::lock().av_enable = 3;
+            since_capture = 0;
+        } else if play.rewinding {
+            // At the oldest capture with rewind still held: stay on that picture.
+        } else {
+            if was_rewinding {
+                // Rewind released: carry on exactly from the capture shown last.
+                if let Some(cur) = rewind.as_ref().and_then(|r| r.current()).map(<[u8]>::to_vec) {
+                    let _ = session.unserialize(&cur);
+                }
+                since_capture = 0;
+            }
+            let ahead = if play.ff { 0 } else { play.runahead.min(cost.map(|c| c.runahead_max(frame_ms, frame_period.as_secs_f64() * 1000.0)).unwrap_or(0)) };
+            let captured = ahead > 0 && session.run_frame_ahead(ahead, true, &mut state_buf).is_ok();
+            if ahead == 0 {
+                session.run_frame(true);
+            }
+            if let Some(r) = rewind.as_mut() {
+                since_capture += 1;
+                if since_capture >= r.every {
+                    since_capture = 0;
+                    if captured || session.serialize_into(&mut state_buf).is_ok() {
+                        r.push(&state_buf);
+                    }
+                }
+            }
+        }
+        if !play.rewinding {
+            rewind_held = 0;
+        }
+        let holding = play.rewinding && !rewound;
+        was_rewinding = rewound || holding;
+        let ran = t0.elapsed();
+        stat_run += ran;
         stat_frames += 1;
+        frame_ms = frame_ms * 0.9 + ran.as_secs_f64() * 100.0;
 
         session.take_audio_into(&mut audio_in);
         win_runs += 1;
@@ -532,7 +794,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         // in a row agree within 3 %.
         if win_at.elapsed() >= Duration::from_secs(1) {
             let settled = total_runs as f64 > av.timing.fps.max(30.0) * 3.0;
-            if settled && win_samples > 0 && av.timing.sample_rate > 1000.0 {
+            if settled && !play.ff && !rewound && win_samples > 0 && av.timing.sample_rate > 1000.0 {
                 let sound_fps = av.timing.sample_rate * win_runs as f64 / win_samples as f64;
                 let agrees = last_sound_fps.is_some_and(|p: f64| (p - sound_fps).abs() / sound_fps < 0.03);
                 last_sound_fps = Some(sound_fps);
@@ -554,10 +816,10 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         // Far too much sound queued in the page (a core that booted on a wrong
         // rate): drop it rather than play it seconds late; rate control alone
         // would take half a minute to drain it.
-        let flood = rate.fill_ms > rate.target_ms * 3.0;
-        if !ff && !flood && !audio_in.is_empty() {
+        let flood = play.rate.fill_ms > play.rate.target_ms * 3.0;
+        if !play.ff && !was_rewinding && !flood && !audio_in.is_empty() {
             audio_out.clear();
-            resampler.process(&audio_in, rate.adjust(), &mut audio_out);
+            resampler.process(&audio_in, play.rate.adjust(), &mut audio_out);
             if !audio_out.is_empty() {
                 let mut o = shared.out();
                 // A page that stopped reading must not grow this forever (~1 s).
@@ -569,6 +831,17 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
                 shared.wake.notify_one();
             }
         }
+
+        // Rumble: the engine's controllers directly, the page's through the page.
+        let rumble = session.rumble();
+        for (port, r) in rumble.iter().enumerate().take(4) {
+            if port < native_count {
+                native.rumble(port, r[0], r[1]);
+            } else if *r != last_rumble[port] {
+                shared.text(json!({ "type": "rumble", "port": port, "strong": r[0], "weak": r[1] }));
+            }
+        }
+        last_rumble = rumble;
 
         let changed = {
             let mut h = host::lock();
@@ -584,20 +857,21 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
         }
 
         let now = Instant::now();
-        deadline += frame_period;
+        let step = if play.ff && play.ff_speed >= 1.0 { frame_period.div_f64(play.ff_speed) } else { frame_period };
+        deadline += step;
         if deadline + frame_period * 3 < now {
             // Far behind (a stall, a slow scene): start again from now instead of rushing.
             deadline = now;
             stat_late += 1;
         }
-        if ff {
+        if play.ff && play.ff_speed < 1.0 {
             deadline = now;
-        } else if rate.fill_ms > rate.target_ms * 1.5 {
+        } else if !play.ff && play.rate.fill_ms > play.rate.target_ms * 1.5 {
             // Audio sync: the page holds far more sound than it wants, so this
             // core makes sound faster than real time (or declared the wrong
             // rate). Wait longer, in proportion, up to one extra frame; the
             // emulation then follows the sound card's clock.
-            let surplus = Duration::from_secs_f64(((rate.fill_ms - rate.target_ms * 1.5) / 1000.0) * 0.25);
+            let surplus = Duration::from_secs_f64(((play.rate.fill_ms - play.rate.target_ms * 1.5) / 1000.0) * 0.25);
             deadline += surplus.min(frame_period);
         }
 
@@ -611,7 +885,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             }
         }
 
-        let video_due = !ff || last_video_push.elapsed() >= Duration::from_millis(15);
+        let video_due = !play.ff || last_video_push.elapsed() >= Duration::from_millis(15);
         if video_due {
             let h = host::lock();
             let f = &h.frame;
@@ -644,15 +918,55 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
 
         if stat_at.elapsed() >= Duration::from_secs(1) {
             let secs = stat_at.elapsed().as_secs_f64();
-            let can = *can_save.get_or_insert_with(|| session.serialize_size() > 0);
+            // Measure save states once the game has run a second.
+            if cost.is_none() {
+                let c = if session.serialize_size() == 0 {
+                    StateCost { bytes: 0, ms: 0.0 }
+                } else {
+                    // One save to learn the size; two more to time it only when the
+                    // state is small enough to rewind (a 92 MB Dolphin state would hitch).
+                    let t = Instant::now();
+                    let mut n = u32::from(session.serialize_into(&mut state_buf).is_ok());
+                    if state_buf.len() <= 32 << 20 {
+                        for _ in 0..2 {
+                            n += u32::from(session.serialize_into(&mut state_buf).is_ok());
+                        }
+                    }
+                    StateCost { bytes: state_buf.len(), ms: if n > 0 { t.elapsed().as_secs_f64() * 1000.0 / n as f64 } else { 0.0 } }
+                };
+                crate::info!("save states: {} bytes, {:.2} ms each", c.bytes, c.ms);
+                cost = Some(c);
+            }
+            let c = cost.unwrap_or(StateCost { bytes: 0, ms: 0.0 });
+            if rewind.is_none() && play.rewind_enabled {
+                if let Some(every) = c.rewind_every() {
+                    rewind = Some(Rewind::new(256 << 20, every));
+                    since_capture = 0;
+                }
+            }
+            let fps = rewind.as_ref().map(|r| av.timing.fps / r.every as f64).unwrap_or(av.timing.fps).max(1.0);
             shared.text(json!({
-                "canSave": can,
                 "type": "status",
+                "canSave": c.bytes > 0,
                 "fps": (stat_frames as f64 / secs * 10.0).round() / 10.0,
                 "frameMs": if stat_frames > 0 { (stat_run.as_secs_f64() * 1000.0 / stat_frames as f64 * 100.0).round() / 100.0 } else { 0.0 },
-                "audioFillMs": rate.fill_ms.round(),
+                "audioFillMs": play.rate.fill_ms.round(),
+                "audioTargetMs": play.rate.target_ms,
                 "dropped": shared.dropped.swap(0, Ordering::Relaxed),
                 "late": stat_late,
+                "pads": native_count,
+                "rewind": {
+                    "available": c.rewind_every().is_some(),
+                    "on": rewind.is_some(),
+                    "seconds": rewind.as_ref().map(|r| (r.len() as f64 / fps * 10.0).round() / 10.0).unwrap_or(0.0),
+                    "megabytes": rewind.as_ref().map(|r| r.bytes() >> 20).unwrap_or(0),
+                },
+                "runahead": {
+                    "max": c.runahead_max(frame_ms, frame_period.as_secs_f64() * 1000.0),
+                    "frames": play.runahead.min(c.runahead_max(frame_ms, frame_period.as_secs_f64() * 1000.0)),
+                },
+                "stateBytes": c.bytes,
+                "stateMs": (c.ms * 100.0).round() / 100.0,
             }));
             (stat_at, stat_frames, stat_run, stat_late) = (Instant::now(), 0, Duration::ZERO, 0);
         }
@@ -669,11 +983,12 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             }
         }
 
-        if !ff {
+        if !(play.ff && play.ff_speed < 1.0) {
             pacer.sleep_until(deadline);
         }
     }
 
+    native.quiet();
     crate::info!("closing the game");
     drop(session);
     crate::info!("game closed");

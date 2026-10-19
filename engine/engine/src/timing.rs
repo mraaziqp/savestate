@@ -93,13 +93,19 @@ mod tests {
 
     #[test]
     fn sleeps_close_to_the_deadline() {
+        // The pacer's precision, not the scheduler's worst moment: 9 in 10
+        // sleeps within 1 ms of the deadline (another busy thread can still
+        // delay the odd one, so only a gross outlier fails).
         let p = Pacer::new();
-        let mut worst = Duration::ZERO;
-        for _ in 0..20 {
-            let deadline = Instant::now() + Duration::from_micros(4_000);
-            p.sleep_until(deadline);
-            worst = worst.max(Instant::now() - deadline);
-        }
-        assert!(worst < Duration::from_millis(2), "overslept by {worst:?}");
+        let mut late: Vec<Duration> = (0..30)
+            .map(|_| {
+                let deadline = Instant::now() + Duration::from_micros(4_000);
+                p.sleep_until(deadline);
+                Instant::now() - deadline
+            })
+            .collect();
+        late.sort();
+        assert!(late[26] < Duration::from_millis(1), "90th percentile {:?}", late[26]);
+        assert!(late[29] < Duration::from_millis(20), "worst {:?}", late[29]);
     }
 }

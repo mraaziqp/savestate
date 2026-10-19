@@ -401,6 +401,68 @@ impl Session {
         self.frames += 1;
     }
 
+    /// Run-ahead: runs one real frame, then `ahead` more and takes the
+    /// picture from the last of those, then goes back to just after the real
+    /// frame. The game shows the result of the newest input `ahead` frames
+    /// sooner, which removes that many frames of the game's own input lag.
+    /// The real frame's sound is kept; the hidden frames' sound and pictures
+    /// are not (GET_AUDIO_VIDEO_ENABLE tells the core so it can skip work).
+    /// `state` receives the state after the real frame (rewind reuses it).
+    pub fn run_frame_ahead(&mut self, ahead: u32, real_time: bool, state: &mut Vec<u8>) -> Result<(), String> {
+        if ahead == 0 {
+            self.run_frame(real_time);
+            return Ok(());
+        }
+        // Bits: 1 picture, 2 sound, 4 fast save states (a run-ahead save), 8 sound hard off.
+        let set = |av: i32, ctx: i32| {
+            let mut h = host::lock();
+            h.av_enable = av;
+            h.savestate_context = ctx;
+        };
+        set(2 | 4, RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE);
+        self.run_frame(real_time);
+        let saved = self.serialize_into(state);
+        if saved.is_ok() {
+            for i in 0..ahead {
+                set(if i + 1 == ahead { 1 | 4 | 8 } else { 4 | 8 }, RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE);
+                self.run_frame(false);
+            }
+            // Bring the last hidden frame's picture over before the GPU state is replaced.
+            self.finish_frame(50_000);
+            set(4 | 8, RETRO_SAVESTATE_CONTEXT_RUNAHEAD_SAME_INSTANCE);
+        }
+        let restored = if saved.is_ok() { self.unserialize(state) } else { Ok(()) };
+        set(3, RETRO_SAVESTATE_CONTEXT_NORMAL);
+        saved.and(restored)
+    }
+
+    /// A save state into `buf` (reused: no allocation once it's big enough).
+    pub fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<(), String> {
+        let size = unsafe { (self.core.serialize_size)() };
+        if size == 0 {
+            return Err(format!("{} can't save states", self.info.library_name));
+        }
+        buf.resize(size, 0);
+        if unsafe { (self.core.serialize)(buf.as_mut_ptr() as *mut c_void, size) } {
+            Ok(())
+        } else {
+            Err("the core refused to save its state".into())
+        }
+    }
+
+    /// Sets every port's input at once (one lock).
+    pub fn set_inputs(&self, inputs: &[PortInput]) {
+        let mut h = host::lock();
+        for (port, input) in inputs.iter().enumerate().take(host::MAX_PORTS) {
+            h.input[port] = *input;
+        }
+    }
+
+    /// Each port's rumble motors (strong, weak), as the game last set them.
+    pub fn rumble(&self) -> [[u16; 2]; host::MAX_PORTS] {
+        host::lock().rumble
+    }
+
     /// For a GPU core, brings the frame just presented from the graphics card
     /// into `host::lock().frame`, waiting up to `wait_us`. True when the frame
     /// is in place (always true for software cores).

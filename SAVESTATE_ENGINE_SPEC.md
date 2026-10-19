@@ -90,7 +90,7 @@ page draws in its own player (the same full-screen player EmulatorJS uses):
 | **Raw frames** | every core on this PC, 2D and GPU | Software cores: the core's own format (RGB565 kept 16-bit, XRGB8888; 0RGB1555 repacked to RGB565). GPU cores: the framebuffer read back asynchronously (pixel-pack buffer + fence, collected while the engine waits for the next frame's time), RGBA8, flagged bottom-up for the page to flip. Sent as binary WebSocket messages; the page uploads them to a WebGL2 texture once per display refresh. Measured: GameCube at 640x528 RGBA, 60 pictures/s, about 80 MB/s on loopback, under a frame of delay. |
 | **Encoded video** | moved to Phase 6 (other devices) | On the same PC the raw path already holds 60 fps for GPU cores, so the hardware encoder (Media Foundation/NVENC + WebCodecs) is built with WebRTC in Phase 6, where it is needed: to send the picture to phones, the Vita browser and other PCs. |
 | **Audio** | everything | Resampled in the engine (windowed sinc) to 48 kHz stereo 16-bit, sent over the same socket into an `AudioWorklet` ring buffer that reports its fill for rate control. |
-| **Input** | everything | Phase 3: the page reads the keyboard and up to four controllers (Gamepad API, standard mapping) and sends them only when they change. Phase 4 adds native controller reading in the engine (XInput + SDL database through `gilrs`). |
+| **Input** | everything | Xbox-type controllers are read by the engine itself through XInput (loaded at run time; Guide through XInputGetStateEx), every frame on the emulation thread, with rumble back to the controller. Other controllers (DualSense, Switch Pro...) and the keyboard (remappable) come from the page (Gamepad API), on the ports after the engine's. `gilrs` was not used: its Windows backend pulls in crates this toolchain can't link (see 1). |
 
 The page applies the **shader presets** in WebGL (raw integer scale, CRT
 aperture grille, handheld LCD grid, smooth upscale), so they look the same
@@ -145,10 +145,15 @@ Efficiency (status after Phase 3):
    the sound card when the page's buffer runs far over target); pacing by
    the frame rate the core's sound implies when it disagrees with the
    declared one (Dolphin declares 119.88 fps and runs at 60).
-7. **Small, fast rewind** (Phase 4).
+7. **Small, fast rewind** (done in Phase 4): XOR against the next state +
+   LZ4 (pure Rust, `lz4_flex`; zstd needs a C compiler), 256 MB budget.
 
 Power:
-1. **Second-instance run-ahead** (Phase 4).
+1. **Run-ahead** (done in Phase 4, single instance, RetroArch's default):
+   the hidden frames run in the same core between a save and a restore. The
+   second-instance variant needs a second set of callbacks routed to a
+   second host state (libretro callbacks carry no user pointer); it is left
+   for when a core turns out to need it.
 2. **Disc streaming** (done in Phase 2): VFS v3 over range requests with a
    block cache on disk.
 3. **Per-game profiles on the host** (Phase 5); the page already remembers
@@ -184,10 +189,10 @@ engine/                         Rust workspace (GNU toolchain, see 1)
     src/ws.rs                   minimal WebSocket server (handshake, frames)
     src/serve.rs                `serve`: one game streamed to the page (threads, outbox, commands)
     src/main.rs                 `info`, `selftest`, `serve`
-  Phase 4+ adds:
-    src/input.rs                gilrs/XInput polling, per-console mapping, hotkey chords
-    src/state.rs                rewind ring, run-ahead
-    src/encode.rs               Media Foundation hardware encoder (Phase 6, with WebRTC)
+    src/input.rs                XInput controllers (run-time loaded), layouts, Guide/Back hotkeys, rumble
+    src/rewind.rs               rewind ring: XOR deltas + LZ4 within a budget
+  Phase 6 adds:
+    src/encode.rs               Media Foundation hardware encoder (with WebRTC)
 web-src/app/
   EnginePlayer.jsx              the in-SaveState player (WebGL2 with the four looks, AudioWorklet, keyboard/gamepads, menu)
   PlayOverlay.jsx               opens EnginePlayer when the launcher answers with an engine session
@@ -219,9 +224,18 @@ frameMs, audioFillMs, dropped, late, canSave} each second, `saved`/`loaded`
 {slot}, `error` {message}, `exit`.
 
 Page -> engine, JSON text: `{"t":"in","p":port,"b":buttons,"a":[lx,ly,rx,ry],"g":[l2,r2]}`
-(only on change), `pause`, `resume`, `reset`, `save`/`load` {slot}, `ff`
-{on}, `audio` {fill, target} (10 a second), `display` {hz}, `option` {key,
-value}, `quit`.
+(only on change), `pause`, `resume`, `reset`, `save`/`load` {slot}, `slot`
+{n} (the slot hotkeys use), `slots`, `ff` {on}, `ffspeed` {x; 0 = as fast as
+it goes}, `rewind` {on} (held), `rewinding` {enabled}, `runahead` {frames},
+`layout` {labels}, `audio` {fill, target} (10 a second), `display` {hz},
+`option` {key, value}, `quit`.
+
+Phase 4 engine -> page additions: `pads` {native} when the engine's own
+controllers change, `menu` (a controller hotkey asked for the menu), `ff`
+{on}, `rumble` {port, strong, weak} for the page's controllers, `slots`
+{slots: [{slot, saved, thumb (PNG, base64, 200 px wide)}]}; `status` adds
+pads, rewind {available, on, seconds, megabytes}, runahead {max, frames},
+audioTargetMs, stateBytes, stateMs.
 
 The game pauses while no page is connected; the engine exits (after saving
 the battery save) when the page quits or after 2 minutes without a page,
@@ -301,8 +315,8 @@ and writes the battery save every 30 s when it changed.
 - [x] Phase 1: reconnaissance, decisions, layout, protocol, plan
 - [x] Prerequisite: a working Rust toolchain (GNU toolchain instead of the Build Tools, see 1)
 - [x] Phase 2: core host and headless runner; results in 9 (approved 2026-10-19)
-- [x] Phase 3: games play inside the SaveState page; results in 10 (awaiting approval)
-- [ ] Phase 4
+- [x] Phase 3: games play inside the SaveState page; results in 10 (approved 2026-10-19)
+- [x] Phase 4: controllers, hotkeys, rewind, run-ahead; results in 11 (awaiting approval)
 - [ ] Phase 5
 - [ ] Phase 6
 
@@ -435,3 +449,79 @@ Ryujinx...) are unchanged until Phase 6's capture bridge.
 
 Publishing a new engine: `engine\build.cmd --release`, then
 `node scripts/publish-engine.mjs`; launchers pick it up within 10 minutes.
+
+## 11. Phase 3 refinements and Phase 4 results (2026-10-19)
+
+Phase 3 refinements:
+- Sound latency adapts: the page's target buffer starts at 64 ms, comes
+  down 8 ms after every 20 s without a gap (to 32 ms) and goes up 16 ms after
+  a gap (to 128 ms); the worklet's restart threshold follows it.
+- Save slots show a picture (200 px) and when they were saved.
+- Fast-forward has a speed: 2x, 4x (default) or as fast as it goes
+  (measured 238-240 fps at 4x for a 60 fps game).
+- "Controller connected/disconnected" notices; the stats overlay adds
+  run-ahead, the sound target and rewind seconds.
+- Measuring a core's save states no longer saves three 92 MB Dolphin states
+  in a row (a visible hitch): sizes over the rewind limit are measured once.
+
+Phase 4:
+- Controllers read by the engine (input.rs): XInput loaded at run time
+  (xinput1_4, 1_3, 9_1_0) with the Guide button through ordinal 100; polled
+  every frame on the emulation thread (empty slots once a second: asking an
+  empty slot is slow); radial dead zones, triggers as analog L2/R2, rumble to
+  the controller. They take the first ports; the page's controllers follow.
+  Tested with a virtual Xbox 360 controller (ViGEmBus): the engine saw it in
+  a frame, its d-pad moved the game with no page input at all.
+- Button layout per person: by position (RetroArch's default: the bottom
+  button is the console's bottom button) or by label, for the engine's and
+  the page's controllers.
+- Keyboard remapping in the player (Keyboard keys: pick a button, press a
+  key; stored in the browser), plus F2 save, F4 load, hold Tab fast-forward,
+  hold ` rewind, Esc menu.
+- Hotkeys: Guide or Back with RB save, LB load, Start menu, RT fast-forward
+  (held), LT rewind (held); Guide tapped alone opens the menu. Back alone
+  stays Select for the game; only a combination is kept from it. Back exists
+  because Windows often keeps Guide for Xbox Game Bar: with the virtual
+  controller, reads of Guide dropped out and one update after it never
+  arrived, so Guide releases are also debounced (3 reads). With Back the
+  virtual controller's save, menu and fast-forward each fired exactly once.
+- Rewind (rewind.rs): every frame for states up to 1 MB (every 2 frames to
+  4 MB, every 4 to 32 MB; bigger states, like Dolphin's 92 MB, have no
+  rewind), 256 MB budget, speeding up while held (1x, then 2x after a
+  second, then 4x). Measured with `selftest`, 300 steps back each checked
+  against the game's RAM at that moment:
+
+  | Core | 10 s of play | Fits in 256 MB | Steps back matching RAM | Capture cost |
+  |---|---|---|---|---|
+  | FCEUmm (NES) | 0.1 MB | hours | 300 / 300 | 0.01 ms |
+  | mGBA (Game Boy) | 0.7 MB | ~59 min | 300 / 300 | 0.26 ms |
+  | mGBA (GBA, Fire Red) | 2.4 MB | ~18 min | 300 / 300 | 0.69 ms |
+  | FinalBurn Neo (Metal Slug 2) | 2.1 MB | ~20 min | 300 / 300 | 0.17 ms |
+
+  In the browser, holding ` showed "Rewinding" and played earlier pictures
+  backwards; with the virtual controller, Back+LT replayed 68 earlier
+  pictures in reverse order.
+- Run-ahead (Session::run_frame_ahead): the real frame runs with sound and
+  no picture, the state is saved, the next frames run hidden (the last one
+  shows its picture), the state is restored; GET_AUDIO_VIDEO_ENABLE and the
+  savestate context tell the core. Offered when the core's frames plus a
+  save and a restore fit in 70 % of a frame. Measured with `selftest`
+  (frames from holding a button to the picture changing, from one moment,
+  once untouched and once with the button):
+
+  | Game | Without | Run-ahead 1 | Run-ahead 2 | Cost per frame (0 / 1 / 2) |
+  |---|---|---|---|---|
+  | NES 240p suite (Right, A) | 3 | 2 | 1 | 0.45 / 0.70 / 0.95 ms |
+  | Game Boy 144p suite (Right, A) | 2 | 1 | 1 | 0.15 / 0.54 / 0.65 ms |
+  | Fire Red (Start) | 2 | 1 | 1 | 0.71 / 2.13 / 2.82 ms |
+
+  Each frame ahead removes one frame of the game's own lag until the next
+  frame is reached. In the browser, choosing "1 frame ahead" in the menu set
+  it (status showed run-ahead 1).
+- Browser test (Chrome on the GPU, launcher v11, engine 0.4.0): the menu
+  showed the slot pictures, run-ahead switched on, rewind ran, Start was
+  remapped to P and stored, F2 saved to the chosen slot, Close ended the
+  engine; Crazy Taxi still plays at 59.7 pictures/s with 47.6 kHz sound.
+- Unit tests: 18 passed (adds controller mapping by position and label,
+  stick dead zones, Guide and Back hotkeys including a Guide dropout, rewind
+  exactness and budget, states that change size).

@@ -957,6 +957,13 @@ player's menu has "Open games in RetroArch instead".
   prints a JSON report (picture, save-state integrity, speed).
 - The engine uses RetroArch's cores, `system` folder (BIOS) and `saves` folder,
   so battery saves are shared with RetroArch.
+- Playing: Xbox-type controllers are read by the engine (rumble included);
+  others and the keyboard through the page. Guide or Back with RB save, LB
+  load, Start menu, RT fast-forward, LT rewind; keyboard Esc menu, F2/F4
+  save/load, Tab fast-forward, ` rewind. The menu has save slots with
+  pictures, rewind, run-ahead (when the PC can afford it), fast-forward speed,
+  button layout and keyboard keys. `selftest` also measures rewind and
+  run-ahead (`--button` picks the button it presses).
 
 ## Failover
 

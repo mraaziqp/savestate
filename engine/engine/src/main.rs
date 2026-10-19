@@ -12,6 +12,14 @@
 //! at frame N, runs 60 more frames and saves again, then twice restores the
 //! first state and replays the same 60 frames. The states saved after each
 //! replay must be byte-identical to the original's and every picture equal.
+//!
+//! Phase 4 adds two measurements (when the core can save states):
+//! - rewind: 10 s of play kept in the rewind ring, then 300 steps back, each
+//!   checked against the game's RAM at that moment; plus how much play fits
+//!   in the 256 MB budget;
+//! - run-ahead: from one moment, the game runs once untouched and once with a
+//!   button held (--button, default down), and the frames until the picture
+//!   differs are counted with run-ahead 0, 1 and 2.
 //! Prints one JSON line with the results; exit code 0 only if all passed.
 use savestate_engine::bios::Host;
 use savestate_engine::log::{self, Level};
@@ -24,7 +32,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  savestate-engine info --core <core.dll>\n  savestate-engine serve --core <core.dll> --game <file|url> --key <key> [--port 0] [--origin <page origin>]... [--data <dir>] [--system <dir>] [--saves <dir>] [--states <dir>] [--host <url>] [--token <jwt>] [--name <file name>] [--option key=value]... [--idle <seconds>]\n  savestate-engine selftest --core <core.dll> --game <file|url> [--frames 120] [--png out.png]\n      [--data <dir>] [--system <dir>] [--host <url>] [--token <jwt>] [--name <file name for a URL>] [--option key=value]... [--no-stream] [--verbose]"
+        "usage:\n  savestate-engine info --core <core.dll>\n  savestate-engine serve --core <core.dll> --game <file|url> --key <key> [--port 0] [--origin <page origin>]... [--data <dir>] [--system <dir>] [--saves <dir>] [--states <dir>] [--host <url>] [--token <jwt>] [--name <file name>] [--option key=value]... [--idle <seconds>]\n  savestate-engine selftest --core <core.dll> --game <file|url> [--frames 120] [--png out.png]\n      [--data <dir>] [--system <dir>] [--button down|up|left|right|a|b|start] [--host <url>] [--token <jwt>] [--name <file name for a URL>] [--option key=value]... [--no-stream] [--verbose]"
     );
     std::process::exit(2)
 }
@@ -318,6 +326,101 @@ fn selftest(args: &Args) -> i32 {
         }
         Err(e) => serialize["error"] = serde_json::Value::String(e),
     }
+    // 3. Rewind and run-ahead (Phase 4).
+    let mut rewind_report = serde_json::Value::Null;
+    let mut latency_report = serde_json::Value::Null;
+    let mut phase4_ok = true;
+    if serialize["supported"].as_bool().unwrap_or(false) {
+        let size = session.serialize_size();
+        let ram = |s: &Session| s.memory(libretro_sys::RETRO_MEMORY_SYSTEM_RAM).map(|m| m.iter().fold(0xcbf29ce484222325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x100000001b3)));
+        if size <= 32 << 20 {
+            let mut ring = savestate_engine::rewind::Rewind::new(256 << 20, 1);
+            let mut buf = Vec::new();
+            let mut marks = Vec::new();
+            let t = Instant::now();
+            let mut capture = std::time::Duration::ZERO;
+            for _ in 0..600 {
+                session.run_frame(false);
+                session.finish_frame(2_000_000);
+                let c0 = Instant::now();
+                if session.serialize_into(&mut buf).is_ok() {
+                    ring.push(&buf);
+                    marks.push(ram(&session));
+                }
+                capture += c0.elapsed();
+            }
+            let played = t.elapsed();
+            let bytes = ring.bytes();
+            let per_second = bytes as f64 / 10.0;
+            let mut matched = 0;
+            let steps = 300.min(ring.len());
+            for k in 1..=steps {
+                let Some(st) = ring.back().map(<[u8]>::to_vec) else { break };
+                if session.unserialize(&st).is_ok() && ram(&session) == marks[marks.len() - 1 - k] {
+                    matched += 1;
+                }
+            }
+            phase4_ok &= matched == steps && steps > 0;
+            rewind_report = serde_json::json!({
+                "captures": marks.len(),
+                "megabytesFor10s": (bytes as f64 / 1048576.0 * 10.0).round() / 10.0,
+                "secondsIn256MB": ((256.0 * 1048576.0) / per_second).round(),
+                "captureMs": ((capture.as_secs_f64() * 1000.0 / 600.0) * 1000.0).round() / 1000.0,
+                "stepsBack": steps,
+                "ramMatched": matched,
+                "playMs": played.as_millis(),
+            });
+        } else {
+            rewind_report = serde_json::json!({ "skipped": format!("save states of {} MB are too big to rewind", size >> 20) });
+        }
+
+        // Run-ahead: frames from pressing a button to the picture changing.
+        let button = match args.get("button").unwrap_or("down") {
+            "a" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_A,
+            "b" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_B,
+            "start" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_START,
+            "up" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_UP,
+            "right" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_RIGHT,
+            "left" => libretro_sys::RETRO_DEVICE_ID_JOYPAD_LEFT,
+            _ => libretro_sys::RETRO_DEVICE_ID_JOYPAD_DOWN,
+        };
+        if let Ok(start) = session.serialize() {
+            let mut buf = Vec::new();
+            let mut branch = |s: &mut Session, ahead: u32, press: bool| -> Vec<u64> {
+                let _ = s.unserialize(&start);
+                let input = savestate_engine::host::PortInput { buttons: if press { 1 << button } else { 0 }, ..Default::default() };
+                let mut hashes = Vec::new();
+                for _ in 0..30 {
+                    s.set_input(0, input);
+                    let _ = s.run_frame_ahead(ahead, false, &mut buf);
+                    s.finish_frame(2_000_000);
+                    hashes.push(host::lock().frame.hash());
+                }
+                s.set_input(0, Default::default());
+                hashes
+            };
+            let mut lag = Vec::new();
+            let mut cost = Vec::new();
+            for ahead in 0..=2u32 {
+                let t = Instant::now();
+                let base = branch(&mut session, ahead, false);
+                let pressed = branch(&mut session, ahead, true);
+                cost.push(((t.elapsed().as_secs_f64() * 1000.0 / 60.0) * 100.0).round() / 100.0);
+                // Frames the button was held before the picture differed (1 = the very next picture).
+                lag.push(base.iter().zip(&pressed).position(|(a, b)| a != b).map(|i| i as u32 + 1));
+            }
+            let _ = session.unserialize(&start);
+            // Each frame ahead should show the change one frame sooner.
+            if let (Some(Some(l0)), Some(Some(l1))) = (lag.first(), lag.get(1)) {
+                phase4_ok &= *l1 + 1 == *l0 || *l0 == 1;
+            }
+            latency_report = serde_json::json!({
+                "button": args.get("button").unwrap_or("down"),
+                "framesUntilPictureChanges": { "runahead0": lag[0], "runahead1": lag[1], "runahead2": lag[2] },
+                "msPerFrame": { "runahead0": cost[0], "runahead1": cost[1], "runahead2": cost[2] },
+            });
+        }
+    }
     let sram = session.memory(libretro_sys::RETRO_MEMORY_SAVE_RAM).map(|m| m.len()).unwrap_or(0);
     let (options_count, hw, vfs_version, messages) = {
         let hs = host::lock();
@@ -328,7 +431,7 @@ fn selftest(args: &Args) -> i32 {
     // error screen, so errors it logged fail the test, as does a core that
     // can't save states (the engine's save, rewind and run-ahead need them).
     let core_errors = log::take_core_errors();
-    let ok = png_ok && lit > 0 && state_ok && core_errors.is_empty();
+    let ok = png_ok && lit > 0 && state_ok && phase4_ok && core_errors.is_empty();
     let report = serde_json::json!({
         "ok": ok,
         "core": { "name": session.info.library_name, "version": session.info.library_version, "path": session.core_path().display().to_string() },
@@ -346,6 +449,8 @@ fn selftest(args: &Args) -> i32 {
         "soundHash": format!("{sound_hash:016x}"),
         "frame": { "width": w, "height": h, "format": format, "hash": format!("{frame_hash:016x}"), "litPixels": lit, "png": if png_ok { Some(png_path.display().to_string()) } else { None::<String> } },
         "serialize": serialize,
+        "rewind": rewind_report,
+        "runahead": latency_report,
         "sramBytes": sram,
         "options": options_count,
         "hwRequested": hw,
