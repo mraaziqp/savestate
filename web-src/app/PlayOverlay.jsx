@@ -1,17 +1,15 @@
-// What happens after Play, inside SaveState: the game's cover with each step
-// as it really happens (getting the game ready with its download progress,
-// starting the emulator, playing), then "closed" when the game ends, or what
-// went wrong with Try again. Driven by "nexus:play" events from the launch
-// code (build.mjs patches): { phase: "preparing" | "starting" | "started" |
-// "failed", game, result?, retry? }. The emulator's own window opens full
-// screen over SaveState and this stays behind it, following the game.
-//
-// When the launcher ran the game in SaveState Engine instead (result.engine:
-// { port, key, ready }), the game plays right here, in EnginePlayer.
-import React, { useState, useEffect, useRef, useCallback } from "react";
+// What happens after Play, inside SaveState:
+// 1. Dual-supported systems: offers choice between "Play in Browser" and "Play Native (Local PC)".
+// 2. Browser Play: renders EmulatorPlayer right inside the window with instant start and cloud saves.
+// 3. Local Native Play: follows the desktop emulator (PCSX2, RetroArch, etc.) with real download/launch
+//    progress, status tracking, and "closed" / "failed" error handling with Retry.
+import React, { useState, useEffect, useRef, useCallback, Suspense, lazy } from "react";
 import { useStyles, Icon, goTab } from "./lib.jsx";
 import { EnginePlayer } from "./EnginePlayer.jsx";
 import { RemotePlayer } from "./RemotePlayer.jsx";
+import { loadEmulatorPlayer } from "emulator-player";
+
+const BrowserPlayer = lazy(loadEmulatorPlayer);
 
 const LAUNCHER = "http://127.0.0.1:17373";
 const EMULATOR = {
@@ -22,8 +20,8 @@ const emulatorFor = (platform) => EMULATOR[String(platform ?? "").toLowerCase()]
 
 const CSS = `
 .nxplay{position:fixed;inset:0;z-index:5400;display:grid;place-items:center;padding:20px;background:radial-gradient(ellipse at center,rgba(20,24,48,.94),rgba(4,5,12,.97));animation:nxaRise .2s ease}
-.nxplay-box{width:100%;max-width:520px;display:grid;gap:18px;justify-items:center;text-align:center}
-.nxplay-cover{position:relative;width:min(220px,52vw);aspect-ratio:3/4;border-radius:18px;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.6);background:#11131f}
+.nxplay-box{width:100%;max-width:540px;display:grid;gap:18px;justify-items:center;text-align:center}
+.nxplay-cover{position:relative;width:min(200px,48vw);aspect-ratio:3/4;border-radius:18px;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.6);background:#11131f}
 .nxplay-cover img{width:100%;height:100%;object-fit:cover;display:block}
 .nxplay-cover.busy img{animation:nxplayBreathe 2.4s ease-in-out infinite}
 .nxplay-cover.busy::after{content:"";position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.18) 50%,transparent 70%);background-size:220% 100%;animation:nxplaySheen 1.8s linear infinite}
@@ -42,15 +40,34 @@ const CSS = `
 .nxplay p{margin:0;color:var(--dim);font-size:14px;line-height:1.5}
 .nxplay-err{color:#fecaca!important;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35);border-radius:12px;padding:10px 12px;overflow-wrap:anywhere}
 .nxplay-row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+
+.nxplay-mode-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;background:rgba(168,85,247,.18);color:#d8b4fe;border:1px solid rgba(168,85,247,.35);margin-bottom:4px}
+.nxplay-mode-badge.browser{background:rgba(34,211,238,.18);color:#a5f3fc;border-color:rgba(34,211,238,.35)}
+
+.nx-playmode-box{max-width:560px}
+.nx-playmode-header{display:grid;gap:4px;margin-top:-6px}
+.nx-playmode-sub{color:rgba(255,255,255,.6);font-size:13.5px;font-weight:600}
+.nx-playmode-grid{display:grid;gap:12px;width:100%;text-align:left}
+.nx-playmode-card{all:unset;display:flex;gap:16px;align-items:flex-start;padding:16px;border-radius:16px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);cursor:pointer;transition:all .18s ease;box-sizing:border-box}
+.nx-playmode-card:hover,.nx-playmode-card:focus-visible{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.6);box-shadow:0 0 20px rgba(34,211,238,.25);transform:translateY(-2px)}
+.nx-playmode-icon{font-size:26px;flex:none;line-height:1;margin-top:2px}
+.nx-playmode-info{display:grid;gap:4px;flex:1;min-width:0}
+.nx-playmode-title-row{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.nx-playmode-card-title{font-size:15px;font-weight:800;color:#fff}
+.nx-playmode-tag{font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;padding:2px 8px;border-radius:6px;background:rgba(34,211,238,.2);color:#67e8f9;border:1px solid rgba(34,211,238,.3)}
+.nx-playmode-tag.local{background:rgba(168,85,247,.2);color:#c084fc;border-color:rgba(168,85,247,.3)}
+.nx-playmode-card-desc{font-size:12.5px;color:rgba(255,255,255,.65);line-height:1.4;margin:0}
+.nx-playmode-remember{display:flex;align-items:center;gap:10px;font-size:12.5px;color:rgba(255,255,255,.75);cursor:pointer;user-select:none;margin:4px 0}
+.nx-playmode-remember input{cursor:pointer;accent-color:#22d3ee;width:16px;height:16px}
 `;
 
 const mb = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${Math.round(n / 1024 ** 2)} MB`);
 
 export function PlayOverlay() {
   useStyles();
-  // ?play=<code>: a game shared from another PC (RemotePlayer).
   const [remote, setRemote] = useState(() => { try { return new URLSearchParams(window.location.search).get("play"); } catch { return null; } });
-  const [s, setS] = useState(null); // { phase, game, error, pid, retry, progress, startedAt, closed }
+  const [s, setS] = useState(null); // { phase, game, error, pid, retry, progress, startedAt, closed, launchLocal, launchBrowser }
+  const [remember, setRemember] = useState(false);
   const timers = useRef([]);
   const clear = () => { timers.current.forEach(clearInterval); timers.current = []; };
 
@@ -61,13 +78,37 @@ export function PlayOverlay() {
       setS((old) => {
         const same = old && old.game?.id === d.game.id;
         const base = same ? old : { game: d.game, startedAt: Date.now() };
-        if (d.phase === "failed") return { ...base, phase: "failed", error: d.result?.error ?? d.error ?? "It didn't start.", retry: d.retry ?? base.retry };
-        if (d.phase === "started") return { ...base, phase: d.result?.engine ? "engine" : "started", engine: d.result?.engine ?? null, pid: d.result?.pid ?? null, emulator: d.result?.emulator ?? null, retry: d.retry ?? base.retry };
+        if (d.phase === "choose") {
+          return { ...base, phase: "choose", launchLocal: d.launchLocal, launchBrowser: d.launchBrowser };
+        }
+        if (d.phase === "browser") {
+          return { ...base, phase: "browser" };
+        }
+        if (d.phase === "failed") {
+          return { ...base, phase: "failed", error: d.result?.error ?? d.error ?? "It didn't start.", retry: d.retry ?? base.retry };
+        }
+        if (d.phase === "started") {
+          return {
+            ...base,
+            phase: d.result?.engine ? "engine" : "started",
+            engine: d.result?.engine ?? null,
+            pid: d.result?.pid ?? null,
+            emulator: d.result?.emulator ?? null,
+            retry: d.retry ?? base.retry,
+          };
+        }
         return { ...base, phase: d.phase, retry: d.retry ?? base.retry, error: null };
       });
     };
+
+    const onCloseEv = () => setS(null);
     window.addEventListener("nexus:play", on);
-    return () => { window.removeEventListener("nexus:play", on); clear(); };
+    window.addEventListener("nexus:play-close", onCloseEv);
+    return () => {
+      window.removeEventListener("nexus:play", on);
+      window.removeEventListener("nexus:play-close", onCloseEv);
+      clear();
+    };
   }, []);
 
   // While getting ready: the launcher's own download progress.
@@ -117,11 +158,105 @@ export function PlayOverlay() {
   }
   if (!s) return <style>{CSS}</style>;
   const { game, phase } = s;
+  const cover = game.coverUrl || game.boxArt || game.box_art || `/api/art/${encodeURIComponent(game.id)}`;
 
-  // Playing inside SaveState.
+  // 1. In-browser play view (EmulatorJS)
+  if (phase === "browser" && game) {
+    return (
+      <div className="fixed inset-0 z-[5500] bg-black">
+        <Suspense fallback={
+          <div className="nxplay">
+            <style>{CSS}</style>
+            <div className="nxplay-box">
+              <div className="nxplay-cover busy"><img src={cover} alt="" /></div>
+              <h2>Starting Browser Player…</h2>
+              <p>Loading {game.title} into in-browser emulator…</p>
+            </div>
+          </div>
+        }>
+          <BrowserPlayer game={game} forceBrowser={true} onClose={() => setS(null)} />
+        </Suspense>
+      </div>
+    );
+  }
+
+  // 2. Play mode choice modal (Browser vs Local PC)
+  if (phase === "choose" && game) {
+    return (
+      <div className="nxplay nxa nx-playmode-modal" role="dialog" aria-modal="true" aria-label={`Choose how to play ${game.title}`}>
+        <style>{CSS}</style>
+        <div className="nxplay-box nx-playmode-box">
+          <div className="nxplay-cover">
+            <img src={cover} alt="" onError={(e) => { e.currentTarget.src = `/api/art/${encodeURIComponent(game.id)}`; }} />
+          </div>
+          <div className="nx-playmode-header">
+            <h2>{game.title}</h2>
+            <p className="nx-playmode-sub">{String(game.platform || "").toUpperCase()} · Choose your play style</p>
+          </div>
+          <div className="nx-playmode-grid">
+            <button
+              type="button"
+              className="nx-playmode-card"
+              onClick={() => {
+                if (remember) {
+                  try { localStorage.setItem("nx_play_pref_" + String(game.platform).toLowerCase(), "browser"); } catch {}
+                }
+                s.launchBrowser?.();
+              }}
+            >
+              <div className="nx-playmode-icon">🌐</div>
+              <div className="nx-playmode-info">
+                <div className="nx-playmode-title-row">
+                  <span className="nx-playmode-card-title">Play in Browser</span>
+                  <span className="nx-playmode-tag">Instant · Zero Setup</span>
+                </div>
+                <p className="nx-playmode-card-desc">Runs directly inside this browser window via EmulatorJS. Cloud save sync included with zero installation.</p>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              className="nx-playmode-card"
+              onClick={() => {
+                if (remember) {
+                  try { localStorage.setItem("nx_play_pref_" + String(game.platform).toLowerCase(), "local"); } catch {}
+                }
+                s.launchLocal?.();
+              }}
+            >
+              <div className="nx-playmode-icon">⚡</div>
+              <div className="nx-playmode-info">
+                <div className="nx-playmode-title-row">
+                  <span className="nx-playmode-card-title">Play Native (Local PC)</span>
+                  <span className="nx-playmode-tag local">Full Speed · Offline</span>
+                </div>
+                <p className="nx-playmode-card-desc">Runs through SaveState for Windows / standalone emulator with dedicated GPU hardware acceleration and offline access.</p>
+              </div>
+            </button>
+          </div>
+
+          <label className="nx-playmode-remember">
+            <input
+              type="checkbox"
+              checked={remember}
+              onChange={(e) => setRemember(e.target.checked)}
+            />
+            <span>Remember my choice for {String(game.platform || "this console").toUpperCase()} games on this device</span>
+          </label>
+
+          <div className="nxplay-row">
+            <button type="button" className="nxa-btn" onClick={() => setS(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Playing inside SaveState Engine.
   if (phase === "engine" && s.engine) {
     const retroArch = () => {
-      // Just this game, this once: the launcher opens it the usual way.
       window.__nxEngineSkip = game.id;
       const r = s.retry;
       setS({ game, phase: "starting", startedAt: Date.now(), retry: r });
@@ -148,7 +283,8 @@ export function PlayOverlay() {
       />
     );
   }
-  // The launcher reports the program's path (E:\PCSX2\pcsx2-qt.exe).
+
+  // 4. Native Desktop Emulator (Local Play)
   const exe = String(s.emulator ?? "").split(/[\\/]/).pop().replace(/\.exe$/i, "").replace(/-qt$/i, "");
   const emu = !exe ? emulatorFor(game.platform) : /^pcsx2$/i.test(exe) ? "PCSX2" : /^rpcs3$/i.test(exe) ? "RPCS3" : /^retroarch$/i.test(exe) ? "RetroArch" : exe;
   const pct = s.progress?.total ? Math.min(100, (s.progress.received / s.progress.total) * 100) : null;
@@ -161,12 +297,14 @@ export function PlayOverlay() {
   const at = order.indexOf(phase);
   const busy = phase === "preparing" || phase === "starting";
   const needsApp = /SaveState for Windows|Set up games/i.test(s.error ?? "");
-  const cover = game.coverUrl || game.boxArt || game.box_art || `/api/art/${encodeURIComponent(game.id)}`;
 
   return (
     <div className="nxplay nxa" role="dialog" aria-modal="true" aria-live="polite" aria-label={`Playing ${game.title}`}>
       <style>{CSS}</style>
       <div className="nxplay-box">
+        <div className="nxplay-mode-badge local">
+          <Icon name="bolt" /> Native Desktop Emulator (Local PC Play)
+        </div>
         <div className={`nxplay-cover ${busy ? "busy" : ""}`}><img src={cover} alt="" onError={(e) => { e.currentTarget.src = `/api/art/${encodeURIComponent(game.id)}`; }} /></div>
         <h2>{phase === "failed" ? `${game.title} didn't start` : phase === "closed" ? `${game.title} closed` : phase === "started" ? `Playing ${game.title}` : game.title}</h2>
 
@@ -200,6 +338,29 @@ export function PlayOverlay() {
           {(phase === "failed" || phase === "started" || phase === "closed") && <button className="nxa-btn" onClick={() => setS(null)}>{phase === "started" ? "Hide" : "Close"}</button>}
           {busy && <button className="nxa-btn" onClick={() => setS(null)}>Hide</button>}
         </div>
+
+        {(() => {
+          try {
+            const p = localStorage.getItem("nx_play_pref_" + String(game.platform).toLowerCase());
+            if (p) {
+              return (
+                <button
+                  type="button"
+                  className="nxa-link"
+                  style={{ fontSize: "12px", opacity: 0.7, marginTop: "4px" }}
+                  onClick={() => {
+                    try { localStorage.removeItem("nx_play_pref_" + String(game.platform).toLowerCase()); } catch {}
+                    setS(null);
+                  }}
+                >
+                  Reset launch preference for {String(game.platform).toUpperCase()}
+                </button>
+              );
+            }
+          } catch {}
+          return null;
+        })()}
+
         {phase === "failed" && /system files|BIOS/i.test(s.error ?? "") && <button className="nxa-link" onClick={() => { setS(null); goTab("emulation"); }}>What this console needs</button>}
       </div>
     </div>

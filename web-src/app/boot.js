@@ -92,7 +92,9 @@ import "./savesync.js";
     // track is drawn as a centred 4px line inside it.
     + '.nx-music-bar input[type=range]{-webkit-appearance:none;appearance:none;background:linear-gradient(rgba(255,255,255,.16),rgba(255,255,255,.16)) center/100% 4px no-repeat!important;border-radius:0}'
     + '.nx-music-bar input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
-    + '.nx-music-bar input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}';
+    + '.nx-music-bar input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
+    + '.nx-controller-focus,button.nx-controller-focus,a.nx-controller-focus,[role="button"].nx-controller-focus,[data-gameid].nx-controller-focus{outline:3px solid #22d3ee!important;outline-offset:3px!important;box-shadow:0 0 24px rgba(34,211,238,.75),inset 0 0 10px rgba(34,211,238,.3)!important;transform:scale(1.03)!important;transition:outline .12s ease,box-shadow .12s ease,transform .15s ease!important;z-index:50!important;position:relative!important}'
+    + '.nx-controller-pressed{transform:scale(.97)!important;filter:brightness(1.25)!important}';
   document.head.appendChild(style);
   const showAdmin = (yes) => {
     if (yes) document.documentElement.dataset.nxAdmin = "1"; else delete document.documentElement.dataset.nxAdmin;
@@ -375,6 +377,225 @@ import "./savesync.js";
       for await (const _ of roms.keys()) { await navigator.storage.persist(); break; }
     } catch { /* no OPFS */ }
   }, 15_000);
+
+  // ── 2D Spatial Controller Navigation Engine ─────────────────────────────
+  const FOCUS_CLS = "nx-controller-focus";
+  const PRESS_CLS = "nx-controller-pressed";
+  let lastFocused = null;
+
+  function clearFocus() {
+    document.querySelectorAll("." + FOCUS_CLS).forEach((el) => el.classList.remove(FOCUS_CLS));
+  }
+
+  function applyFocus(el) {
+    if (!el) return;
+    clearFocus();
+    el.classList.add(FOCUS_CLS);
+    try { el.focus({ preventScroll: true }); } catch {}
+    try { el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" }); } catch {}
+    lastFocused = el;
+  }
+
+  window.addEventListener("pointerdown", () => clearFocus(), { passive: true });
+
+  function findNearest(curr, list, dir) {
+    const r1 = curr.getBoundingClientRect();
+    const c1 = { x: r1.left + r1.width / 2, y: r1.top + r1.height / 2 };
+    let best = null;
+    let minScore = Infinity;
+
+    for (const el of list) {
+      if (el === curr) continue;
+      const r2 = el.getBoundingClientRect();
+      const c2 = { x: r2.left + r2.width / 2, y: r2.top + r2.height / 2 };
+
+      let isCandidate = false;
+      let dp = 0;
+      let doff = 0;
+      let overlap = 0;
+
+      if (dir === "right") {
+        if (c2.x > c1.x + 4 && r2.left >= r1.left + 2) {
+          isCandidate = true;
+          dp = Math.abs(c2.x - c1.x);
+          doff = Math.abs(c2.y - c1.y);
+          overlap = Math.max(0, Math.min(r1.bottom, r2.bottom) - Math.max(r1.top, r2.top));
+        }
+      } else if (dir === "left") {
+        if (c2.x < c1.x - 4 && r2.right <= r1.right - 2) {
+          isCandidate = true;
+          dp = Math.abs(c2.x - c1.x);
+          doff = Math.abs(c2.y - c1.y);
+          overlap = Math.max(0, Math.min(r1.bottom, r2.bottom) - Math.max(r1.top, r2.top));
+        }
+      } else if (dir === "down") {
+        if (c2.y > c1.y + 4 && r2.top >= r1.top + 2) {
+          isCandidate = true;
+          dp = Math.abs(c2.y - c1.y);
+          doff = Math.abs(c2.x - c1.x);
+          overlap = Math.max(0, Math.min(r1.right, r2.right) - Math.max(r1.left, r2.left));
+        }
+      } else if (dir === "up") {
+        if (c2.y < c1.y - 4 && r2.bottom <= r1.bottom - 2) {
+          isCandidate = true;
+          dp = Math.abs(c2.y - c1.y);
+          doff = Math.abs(c2.x - c1.x);
+          overlap = Math.max(0, Math.min(r1.right, r2.right) - Math.max(r1.left, r2.left));
+        }
+      }
+
+      if (!isCandidate) continue;
+      const penalty = overlap > 0 ? 0.75 : 2.4;
+      const score = dp + doff * penalty;
+      if (score < minScore) {
+        minScore = score;
+        best = el;
+      }
+    }
+    return best;
+  }
+
+  window.__nxGamepadNav = function (action, ctx) {
+    if (document.getElementById("ejs-game-container") || window.__nxGameOpen) {
+      return true;
+    }
+
+    // Modal trap
+    const modal = document.querySelector(".nxplay, .nx-playmode-modal, .nx-detail, [role='dialog'], .nx-modal");
+    if (modal) {
+      const modalItems = Array.from(modal.querySelectorAll('button:not([disabled]), [role="button"]:not([aria-disabled="true"]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')).filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && window.getComputedStyle(el).display !== "none" && window.getComputedStyle(el).visibility !== "hidden";
+      });
+
+      if (action === "cancel") {
+        if (ctx?.te) { ctx.ce(null); return true; }
+        const cancelBtn = modal.querySelector('button[aria-label="Close"], button.nxa-btn:last-child, .nxplay-row button:last-child');
+        if (cancelBtn) { cancelBtn.click(); return true; }
+        window.dispatchEvent(new CustomEvent("nexus:play-close"));
+        return true;
+      }
+
+      if (action === "confirm") {
+        const active = document.activeElement;
+        if (active && modal.contains(active) && typeof active.click === "function") {
+          active.classList.add(PRESS_CLS);
+          setTimeout(() => active.classList.remove(PRESS_CLS), 150);
+          active.click();
+          return true;
+        }
+        if (modalItems.length > 0) {
+          applyFocus(modalItems[0]);
+          modalItems[0].click();
+          return true;
+        }
+        return true;
+      }
+
+      if (action === "up" || action === "down" || action === "left" || action === "right") {
+        let curr = document.activeElement;
+        if (!curr || !modal.contains(curr)) curr = modalItems[0];
+        if (!curr) return true;
+        const best = findNearest(curr, modalItems, action);
+        if (best) applyFocus(best);
+        return true;
+      }
+      return true;
+    }
+
+    // Shoulder buttons: Tab switching
+    const MAIN_TABS = ["media", "library", "consoles", "music", "codex", "party"];
+    if (action === "lb" && ctx?.S) {
+      const idx = MAIN_TABS.indexOf(ctx.x);
+      const prev = idx <= 0 ? MAIN_TABS[MAIN_TABS.length - 1] : MAIN_TABS[idx - 1];
+      ctx.S(prev);
+      return true;
+    }
+    if (action === "rb" && ctx?.S) {
+      const idx = MAIN_TABS.indexOf(ctx.x);
+      const next = idx < 0 || idx >= MAIN_TABS.length - 1 ? MAIN_TABS[0] : MAIN_TABS[idx + 1];
+      ctx.S(next);
+      return true;
+    }
+
+    // Menu button
+    if (action === "menu") {
+      if (ctx?.te) { ctx.ce(null); return true; }
+      if (typeof ctx?._t === "function") { ctx._t((v) => !v); return true; }
+    }
+
+    // Gather interactive elements
+    const candidates = Array.from(document.querySelectorAll(
+      'aside button:not([disabled]), aside a[href], nav button:not([disabled]), nav a[href], ' +
+      '.nxwhere button, [role="group"] button, ' +
+      '[data-gameid], .nx-game-card, [data-card], ' +
+      'main button:not([disabled]), main a[href], ' +
+      'header button:not([disabled]), header input:not([disabled])'
+    )).filter((el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && window.getComputedStyle(el).display !== "none" && window.getComputedStyle(el).visibility !== "hidden";
+    });
+
+    if (candidates.length === 0) return false;
+
+    let curr = document.activeElement;
+    if (!curr || curr === document.body || !document.body.contains(curr)) {
+      curr = lastFocused && document.body.contains(lastFocused)
+        ? lastFocused
+        : (document.querySelector('.nxwhere button[aria-pressed="true"]') || document.querySelector('[data-gameid]') || candidates[0]);
+      if (curr) { applyFocus(curr); return true; }
+    }
+
+    // Confirm (A)
+    if (action === "confirm") {
+      if (curr && typeof curr.click === "function") {
+        curr.classList.add(PRESS_CLS);
+        setTimeout(() => curr.classList.remove(PRESS_CLS), 150);
+        curr.click();
+        return true;
+      }
+      return false;
+    }
+
+    // Cancel (B)
+    if (action === "cancel") {
+      const sidebarActive = document.querySelector('aside [aria-current="page"], aside [data-active="true"], aside button');
+      if (sidebarActive && curr !== sidebarActive) {
+        applyFocus(sidebarActive);
+        return true;
+      }
+      return false;
+    }
+
+    // Directional (Up, Down, Left, Right)
+    if (action === "up" || action === "down" || action === "left" || action === "right") {
+      let best = findNearest(curr, candidates, action);
+
+      if (!best) {
+        const inSidebar = !!curr.closest("aside, nav");
+        if (action === "left" && !inSidebar) {
+          const sideItem = document.querySelector('aside [aria-current="page"], aside [data-active="true"], aside button, nav button');
+          if (sideItem) best = sideItem;
+        } else if (action === "right" && inSidebar) {
+          const contentItem = document.querySelector('.nxwhere button[aria-pressed="true"], .nxwhere button, [data-gameid], main button');
+          if (contentItem) best = contentItem;
+        } else if (action === "up" && curr.closest("main")) {
+          const whereItem = document.querySelector('.nxwhere button[aria-pressed="true"], .nxwhere button');
+          if (whereItem && whereItem !== curr) best = whereItem;
+        } else if (action === "down" && curr.closest(".nxwhere")) {
+          const firstCard = document.querySelector('[data-gameid], .nx-game-card, main [role="button"], main button');
+          if (firstCard && firstCard !== curr) best = firstCard;
+        }
+      }
+
+      if (best) {
+        applyFocus(best);
+        return true;
+      }
+    }
+
+    return false;
+  };
 
   mirror();
   refresh();

@@ -57,6 +57,8 @@ export const { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense
 `;
 const oldEmulation = `export const loadOldEmulationHub = () => import("./${emulationHub}").then((m) => ({ default: m.EmulationHub }));`;
 const oldCloud = `export const loadOldCloudHub = () => import("./${find("CloudHub-")}").then((m) => ({ default: m.CloudHub }));`;
+const emulatorPlayerFile = find("EmulatorPlayer-");
+const emulatorPlayerModule = `export const loadEmulatorPlayer = () => import("./${emulatorPlayerFile}").then((m) => ({ default: m.t }));`;
 
 const appOut = `NexusApp-${rev}.js`;
 const bootOut = `NexusBoot-${rev}.js`;
@@ -71,9 +73,14 @@ await esbuild.build({
       b.onResolve({ filter: /^react$/ }, () => ({ path: "react", namespace: "host" }));
       b.onResolve({ filter: /^old-emulation$/ }, () => ({ path: "old-emulation", namespace: "host" }));
       b.onResolve({ filter: /^old-cloud$/ }, () => ({ path: "old-cloud", namespace: "host" }));
+      b.onResolve({ filter: /^emulator-player$/ }, () => ({ path: "emulator-player", namespace: "host" }));
       b.onResolve({ filter: /^\.\/[\w-]+\.js$/, namespace: "host" }, (a) => ({ path: a.path, external: true }));
       b.onLoad({ filter: /.*/, namespace: "host" }, (a) => ({
-        contents: a.path === "react" ? reactModule : a.path === "old-cloud" ? oldCloud : oldEmulation, loader: "js", resolveDir: here,
+        contents: a.path === "react" ? reactModule
+          : a.path === "old-cloud" ? oldCloud
+          : a.path === "emulator-player" ? emulatorPlayerModule
+          : oldEmulation,
+        loader: "js", resolveDir: here,
       }));
     },
   }],
@@ -199,12 +206,13 @@ shell = patch(shell, "game cards small covers on phones", "(window.nxThumb||(u=>
 
 // 3n. Games lists show where each game plays (Where.jsx): on a phone they
 //     start on "This phone", so a PS2 game isn't offered where it can't run.
-shell = patch(shell, "games hub where it plays", "(0,e.jsx)(NxWhere,{games:at,",
-  '(0,e.jsx)(Wl,{games:at,loading:Pt,onPlatformSelect:u=>{qt("solo"),Wt(at.filter(M=>M.platform===u))},onSolo:()=>{qt("solo"),Wt(null)},onMultiplayer:()=>S("multiplayer"),onDiscover:()=>S("discover"),onScan:ca,isScanning:sa,onSelectGame:u=>ce(u),isRemoteClient:t})',
-  '(0,e.jsx)(s.Suspense,{fallback:(0,e.jsx)(Oa,{}),children:(0,e.jsx)(NxWhere,{games:at,render:nxG=>(0,e.jsx)(Wl,{games:nxG,loading:Pt,onPlatformSelect:u=>{qt("solo"),Wt(nxG.filter(M=>M.platform===u))},onSolo:()=>{qt("solo"),Wt(null)},onMultiplayer:()=>S("multiplayer"),onDiscover:()=>S("discover"),onScan:ca,isScanning:sa,onSelectGame:u=>ce(u),isRemoteClient:t})})})');
-shell = patch(shell, "games grid where it plays", "(0,e.jsx)(NxWhere,{games:Bn??at,",
-  '(0,e.jsx)(Nl,{games:Bn??at,loading:Pt,isScanning:sa,gpFocusIdx:ft,onSelect:u=>ce(u),onScan:ca})',
-  '(0,e.jsx)(NxWhere,{games:Bn??at,render:nxG=>(0,e.jsx)(Nl,{games:nxG,loading:Pt,isScanning:sa,gpFocusIdx:ft,onSelect:u=>ce(u),onScan:ca})})');
+//     In the Browser Play tab, clicking a game launches directly in browser.
+shell = patch(shell, "games hub where it plays", "onSelectGame:u=>(window.__nxForceBrowserPlay?",
+  /(?:\(0,e\.jsx\)\(Wl,\{games:at,loading:Pt,[\s\S]*?isRemoteClient:t\}\)|\(0,e\.jsx\)\(s\.Suspense,\{fallback:\(0,e\.jsx\)\(Oa,\{\}\),children:\(0,e\.jsx\)\(NxWhere,\{games:at,render:nxG=>\(0,e\.jsx\)\(Wl,\{games:nxG,loading:Pt,[\s\S]*?isRemoteClient:t\}\)\}\)\}\))/,
+  '(0,e.jsx)(s.Suspense,{fallback:(0,e.jsx)(Oa,{}),children:(0,e.jsx)(NxWhere,{games:at,render:nxG=>(0,e.jsx)(Wl,{games:nxG,loading:Pt,onPlatformSelect:u=>{qt("solo"),Wt(nxG.filter(M=>M.platform===u))},onSolo:()=>{qt("solo"),Wt(null)},onMultiplayer:()=>S("multiplayer"),onDiscover:()=>S("discover"),onScan:ca,isScanning:sa,onSelectGame:u=>(window.__nxForceBrowserPlay?window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:u}})):ce(u)),isRemoteClient:t})})})');
+shell = patch(shell, "games grid where it plays", "onSelect:u=>(window.__nxForceBrowserPlay?",
+  /(?:\(0,e\.jsx\)\(Nl,\{games:Bn\?\?at,loading:Pt,[\s\S]*?onScan:ca\}\)|\(0,e\.jsx\)\(NxWhere,\{games:Bn\?\?at,render:nxG=>\(0,e\.jsx\)\(Nl,\{games:nxG,loading:Pt,[\s\S]*?onScan:ca\}\)\}\))/,
+  '(0,e.jsx)(NxWhere,{games:Bn??at,render:nxG=>(0,e.jsx)(Nl,{games:nxG,loading:Pt,isScanning:sa,gpFocusIdx:ft,onSelect:u=>(window.__nxForceBrowserPlay?window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:u}})):ce(u)),onScan:ca})})');
 
 // A link to an admin page (?tab=cloud) sent admins to Movies & TV: the check
 // "not an admin, so leave admin pages" ran before the account had loaded in
@@ -214,12 +222,13 @@ shell = patch(shell, "admin pages wait for the account", "(0,s.useEffect)(()=>{!
 shell = patch(shell, "admin pages wait for the account (deps)", "},[x,Ue,kt,Ee,re.loading])",
   "},[x,Ue,kt,Ee])", "},[x,Ue,kt,Ee,re.loading])");
 
-// After Play, SaveState follows the game (PlayOverlay.jsx): the shared native
-// launch announces "starting", then "started" (with the emulator's pid, so the
-// panel knows when the game closes) or "failed" with the reason and a retry.
-shell = patch(shell, "native launch announces each step", "nxGcInner",
-  "async function gc(t){if(!1&&oo&&!Fe())",
-  'async function gc(t){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",game:t,retry:()=>gc(t)}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",game:t,result:nxR,retry:()=>gc(t)}}));return nxR}async function nxGcInner(t){if(!1&&oo&&!Fe())');
+// After Play, SaveState routes to browser or local play, announces each step,
+// and offers the play-mode picker for dual-supported systems.
+{
+  const from = /(?:async function gc\(t(?:,\w+)?\)\{[\s\S]*?return nxR\}|async function gc\(t\)\{if\(!1&&oo&&!Fe\(\)\})/;
+  const to = 'async function gc(t,nxOpt){if(nxOpt?.forceLocal){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",mode:"local",game:t,retry:()=>gc(t,nxOpt)}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",mode:"local",game:t,result:nxR,retry:()=>gc(t,nxOpt)}}));return nxR}if(nxOpt?.forceBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}const canBrowser=!!(window.nxRuns?.runsOn?window.nxRuns.runsOn(t.platform).browser:!1);if(window.__nxForceBrowserPlay&&canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}let pref=null;try{pref=localStorage.getItem("nx_play_pref_"+String(t.platform).toLowerCase())}catch{}if(pref==="browser"&&canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}if(pref==="local"||!canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",mode:"local",game:t,retry:()=>gc(t,{forceLocal:!0})}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",mode:"local",game:t,result:nxR,retry:()=>gc(t,{forceLocal:!0})}}));return nxR}window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"choose",game:t,launchLocal:()=>gc(t,{forceLocal:!0}),launchBrowser:()=>gc(t,{forceBrowser:!0})}}));return{ok:!0,choicePending:!0}}';
+  shell = patch(shell, "central launch router with browser and local choice", "nxOpt?.forceLocal", from, to);
+}
 shell = patch(shell, "native launch returns the game's pid", "pid:n.data?.pid,emulator:n.data?.emulator",
   'return{ok:!0}}catch{return{ok:!1,error:"Could not contact local launcher"}}}',
   'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}}catch{return{ok:!1,error:"SaveState for Windows didn\\u2019t answer. Try again, or open Games > Set up games."}}}');
@@ -239,6 +248,14 @@ shell = patch(shell, "controller navigation pauses during a game", "if(document.
 shell = patch(shell, "native launch returns the engine session", "emulator:n.data?.emulator,engine:n.data?.engine",
   'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}',
   'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator,engine:n.data?.engine}');
+
+// Controller repeat timing: 120ms initial / 65ms repeat caused runaway skipping (15/sec).
+// Damped to 360ms initial / 150ms repeat for smooth, console-grade navigation.
+shell = patch(shell, "controller repeat timing", "xi=360,hi=150,", "xi=120,hi=65,", "xi=360,hi=150,");
+// Controller navigation hook: delegate to custom 2D spatial navigation engine in boot.js
+shell = patch(shell, "controller navigation hook", "window.__nxGamepadNav(u,",
+  'gi((0,s.useCallback)(u=>{if(document.getElementById("ejs-game-container"))return;',
+  'gi((0,s.useCallback)(u=>{if(document.getElementById("ejs-game-container"))return;if(window.__nxGamepadNav&&window.__nxGamepadNav(u,{x,te,ys,ft,S,Et,ce,_t}))return;');
 
 // Play on a game card refused outright on https ("Open Nexus at
 // http://your-host:3000 ... HTTPS blocks local launcher connections"), from
