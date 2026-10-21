@@ -4302,6 +4302,11 @@ async function startServer() {
   // games again, 50 at a time (2026-10-18). Progress is published for the UI
   // (see /api/art/progress).
   (async () => {
+    // Not on a small NAS: 1,300 covers fetched and re-encoded (sharp) after a
+    // 1,500-game import used up its 480 MB and it dropped off the network
+    // (2026-10-21). The main host fills the same database; a cover that is
+    // still missing is fetched when someone opens it (/api/art/:id).
+    if (LOW_MEMORY) return;
     await new Promise(r => setTimeout(r, 20_000));
     const CONCURRENCY = 3;
     const batchSize = 50;
