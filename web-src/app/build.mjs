@@ -1103,6 +1103,10 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   dl = patch(dl, "download page: linux installer", 'note:"Installer script (.sh): run it with sh"',
     '{id:"linux",label:"Linux",note:"Use the web app (Install App)"}',
     '{id:"linux",label:"Linux",note:"Installer script (.sh): run it with sh"}');
+  // The PS Vita app (/api/downloads/vita) had no button here.
+  dl = patch(dl, "download page: PS Vita", "PS Vita (VPK)",
+    'children:"Not published yet"})})]})]})]})]})})})};export{S as AppDownloadPage};',
+    'children:"Not published yet"})})]}),(0,e.jsxs)("a",{href:"/api/downloads/vita",download:"SaveState.vpk",className:"flex items-center gap-3 rounded-2xl border p-4 transition-all border-white/10 bg-white/[0.03] hover:border-emerald-400/50 hover:bg-emerald-500/10 cursor-pointer",children:[(0,e.jsx)(o,{className:"w-5 h-5 text-nexus-accent flex-none"}),(0,e.jsxs)("div",{className:"flex-1 min-w-0",children:[(0,e.jsx)("p",{className:"text-sm font-black text-white",children:"PS Vita (VPK)"}),(0,e.jsx)("p",{className:"text-[10px] text-white/40",children:"For a Vita with HENkaku or Ensō: copy the VPK to the Vita and install it with VitaShell"})]}),(0,e.jsx)("p",{className:"text-[10px] font-bold flex-none text-emerald-400",children:"VPK"})]})]})]})]})})})};export{S as AppDownloadPage};');
   if (dl !== before) writeFileSync(file, dl);
 }
 
