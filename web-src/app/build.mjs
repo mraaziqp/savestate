@@ -199,6 +199,10 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
   ch = patch(ch, "vault download hands phone games to the emulator app", `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}`,
     "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){",
     `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}if(!nxCanBrowser(t.platform)&&!await _()){`);
+  // Big Picture's Play: "PSP can't run in a browser. On a PC, install..." on a phone.
+  ch = patch(ch, "big picture hands phone games to the emulator app", "const d=l.find(n=>n.id===t);if(d&&!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere",
+    "onLaunch:async t=>{const d=l.find(n=>n.id===t);",
+    "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere?.(d.platform)&&window.nxPhonePlay){j(!1);window.nxPhonePlay(d);return}");
   if (ch !== before) writeFileSync(file, ch);
 }
 {
@@ -773,6 +777,11 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   let gd = readFileSync(file, "utf8");
   const before = gd;
   const BROWSER_FIRST = "!f&&y&&ue&&be(t.platform)";
+  // The details' other Play path (from a card) said "can't run in a browser —
+  // launching on your host PC instead" for a PSP game on an Android phone.
+  gd = patch(gd, "game details play path hands phone games to the emulator app", "await Se();return}if(window.nxRuns?.phoneHere?.(t.platform)",
+    "if(y){if(p(!1),be(t.platform)){await Se();return}c({text:",
+    "if(y){if(p(!1),be(t.platform)){await Se();return}if(window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}c({text:");
   gd = patch(gd, "game details asks the launcher", "if(!1&&bs&&!Rt()",
     "if(bs&&!Rt()", "if(!1&&bs&&!Rt()");
   gd = patch(gd, "game details explains a missing launcher", "Ready to play in this browser.",
@@ -1050,6 +1059,11 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   const file = path.join(assets, find("EmulatorPlayer-"));
   let ep = readFileSync(file, "utf8");
   const before = ep;
+  // Whatever opened the browser player for a console it can't run: on an
+  // Android phone with an emulator app for it, that app gets the game.
+  ep = patch(ep, "browser player hands phone games to the emulator app", "if(!b&&window.nxRuns?.phoneHere?.(r.platform)",
+    "if(!b){J(!1),Q(!0),g(",
+    'if(!b&&window.nxRuns?.phoneHere?.(r.platform)&&window.nxPhonePlay){J(!1),Q(!0),g(`${(r.platform||"").toUpperCase()} plays in this phone\'s emulator app: opening it there.`),window.nxPhonePlay(r),D.current();return}if(!b){J(!1),Q(!0),g(');
   ep = patch(ep, "arcade romset name for copies kept on the phone", "const nxRomName=await(async()=>",
     "let s;if(O)s=O;",
     'const nxRomName=await(async()=>{const n=r.fileName||String(r.relative_path||r.relativePath||"").split(/[\\\\/]/).pop()||"";const m=/^([0-9a-f]{32})(\\.zip)?$/i.exec(n);if(!m)return null;try{const h=await fetch(`${a}/api/games/${m[1]}/download${t?`?token=${encodeURIComponent(t)}`:""}`,{method:"HEAD",signal:AbortSignal.timeout(8e3)});const x=h.headers.get("x-rom-name");return x?decodeURIComponent(x):null}catch{return null}})();let s;if(O)s=O;');

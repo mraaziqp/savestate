@@ -46,10 +46,32 @@ import java.io.OutputStream;
  */
 @CapacitorPlugin(name = "NxAndroid")
 public class NxAndroidPlugin extends Plugin {
-    static final int VERSION = 2;
+    static final int VERSION = 3;
 
     private DownloadManager dm() {
         return (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
+    }
+
+    /**
+     * The download id the page sent. Capacitor's getLong() returns its default
+     * for a number that fits an int (org.json makes those Integers), and
+     * download ids always do: every id arrived as -1, so a finished game never
+     * opened ("isn't on this phone any more") and progress said "gone"
+     * (2026-10-21).
+     */
+    private static long idOf(PluginCall call) {
+        Object v = call.getData().opt("id");
+        if (v instanceof Number) return ((Number) v).longValue();
+        if (v instanceof String) {
+            try { return Long.parseLong((String) v); } catch (NumberFormatException e) { /* below */ }
+        }
+        return -1;
+    }
+
+    /** Downloads/SaveState/<folder>/<fileName>, as download() names it. */
+    private static File targetOf(String folder, String fileName) {
+        String sub = "SaveState" + (folder.isEmpty() ? "" : "/" + folder);
+        return new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), sub + "/" + fileName);
     }
 
     private static String safe(String s, String fallback) {
@@ -116,7 +138,7 @@ public class NxAndroidPlugin extends Plugin {
         String folder = safe(call.getString("folder", ""), "");
         String fileName = safe(call.getString("fileName", URLUtil.guessFileName(url, null, null)), "download");
         String sub = "SaveState" + (folder.isEmpty() ? "" : "/" + folder);
-        File target = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), sub + "/" + fileName);
+        File target = targetOf(folder, fileName);
         // Already here from an earlier Play: use that copy.
         long done = findDone(target);
         if (done >= 0) {
@@ -133,6 +155,16 @@ public class NxAndroidPlugin extends Plugin {
         } catch (Exception e) {
             call.reject("Couldn't start the download: " + e.getMessage());
         }
+    }
+
+    /** Whether Downloads/SaveState/<folder>/<fileName> is already on the phone: { id, done }. */
+    @PluginMethod
+    public void find(PluginCall call) {
+        long id = findDone(targetOf(safe(call.getString("folder", ""), ""), safe(call.getString("fileName", ""), "download")));
+        JSObject r = new JSObject();
+        r.put("id", id);
+        r.put("done", id >= 0);
+        call.resolve(r);
     }
 
     /** A finished download of this exact file whose file is still there, or -1. */
@@ -156,7 +188,7 @@ public class NxAndroidPlugin extends Plugin {
 
     @PluginMethod
     public void progress(PluginCall call) {
-        long id = call.getLong("id", -1L);
+        long id = idOf(call);
         JSObject r = new JSObject();
         try (Cursor c = dm().query(new DownloadManager.Query().setFilterById(id))) {
             if (c == null || !c.moveToFirst()) { r.put("status", "gone"); call.resolve(r); return; }
@@ -201,7 +233,7 @@ public class NxAndroidPlugin extends Plugin {
 
     @PluginMethod
     public void cancel(PluginCall call) {
-        long id = call.getLong("id", -1L);
+        long id = idOf(call);
         if (id >= 0) dm().remove(id);
         call.resolve();
     }
@@ -216,13 +248,37 @@ public class NxAndroidPlugin extends Plugin {
      */
     @PluginMethod
     public void open(PluginCall call) {
-        long id = call.getLong("id", -1L);
+        long id = idOf(call);
         String pkg = call.getString("pkg", "");
         String mode = call.getString("mode", "view");
         Context ctx = getContext();
         Uri uri = null;
         try { uri = dm().getUriForDownloadedFile(id); } catch (Exception e) { /* below */ }
-        if (uri == null) { call.reject("The downloaded game isn't on this phone any more. Press Play again to download it."); return; }
+        // An id this phone no longer knows (a reinstall, a cleared download
+        // list): the same file in Downloads/SaveState still plays.
+        String folder = safe(call.getString("folder", ""), "");
+        String fileName = safe(call.getString("fileName", ""), "");
+        if (uri == null && !fileName.isEmpty()) {
+            long byFile = findDone(targetOf(folder, fileName));
+            if (byFile >= 0) {
+                id = byFile;
+                try { uri = dm().getUriForDownloadedFile(id); } catch (Exception e) { /* below */ }
+            }
+        }
+        if (uri == null) {
+            File target = fileName.isEmpty() ? null : targetOf(folder, fileName);
+            if (target != null && target.exists() && !pkg.isEmpty()) {
+                // There, but not from this app's downloads (copied in by hand):
+                // open the emulator so it can be chosen from that folder.
+                Intent plain = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
+                if (plain != null) {
+                    plain.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    try { ctx.startActivity(plain); JSObject r = new JSObject(); r.put("opened", "app"); call.resolve(r); return; } catch (Exception ignored) { /* below */ }
+                }
+            }
+            call.reject("The downloaded game isn't on this phone any more. Press Play again to download it.");
+            return;
+        }
         String mime = dm().getMimeTypeForDownloadedFile(id);
         if (mime == null || mime.isEmpty()) mime = "application/octet-stream";
         PackageManager pm = ctx.getPackageManager();

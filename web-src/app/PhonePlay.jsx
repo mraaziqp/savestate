@@ -13,7 +13,18 @@ import { useStyles, api, token, Icon, Note } from "./lib.jsx";
 import { PHONE_APPS, PHONE_FOLDER, norm, inAndroidApp } from "./devices.js";
 
 const native = (method, options = {}) => window.Capacitor.nativePromise("NxAndroid", method, options);
-const nativeReady = async () => { if (!inAndroidApp()) return false; try { await native("info"); return true; } catch { return false; } };
+// The app's NxAndroid version, or 0 outside it. Before 3 every download id
+// reached Android as -1, so no downloaded game could open.
+const nativeVersion = async () => { if (!inAndroidApp()) return 0; try { return Number((await native("info")).version) || 1; } catch { return 0; } };
+const FIXED_IN = 3;
+// Where each emulator adds a folder to its game list.
+const FOLDER_HELP = {
+  "PPSSPP": "Games › Browse… › Download › SaveState › PSP",
+  "PPSSPP Gold": "Games › Browse… › Download › SaveState › PSP",
+  "Dolphin": "the + button › Download › SaveState › GameCube or Wii",
+  "NetherSX2": "Settings › Game Directories › Add › Download › SaveState › PS2",
+  "Azahar": "the + button (Add games folder) › Download › SaveState › 3DS",
+};
 const mb = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${Math.max(1, Math.round(n / 1024 ** 2))} MB`);
 const fileOf = (g) => String(g.fileName || g.file_name || g.relative_path || g.relativePath || g.title || "game").split(/[\\/]/).pop();
 const saved = (k) => { try { return JSON.parse(localStorage.getItem("nx_phone_games") || "{}")[k]; } catch { return undefined; } };
@@ -56,6 +67,7 @@ function Sheet({ game, onClose }) {
   const folder = PHONE_FOLDER[sys] ?? "Games";
   const name = fileOf(game);
   const [inApp, setInApp] = useState(null); // null while checking
+  const [appVersion, setAppVersion] = useState(0);
   const [installed, setInstalled] = useState({});
   const [dl, setDl] = useState(null); // { id, status, bytes, total, error, path }
   const [msg, setMsg] = useState(null);
@@ -65,7 +77,9 @@ function Sheet({ game, onClose }) {
   useEffect(() => () => clearInterval(poll.current), []);
 
   const checkApps = useCallback(async () => {
-    if (!(await nativeReady())) { setInApp(false); return; }
+    const v = await nativeVersion();
+    if (!v) { setInApp(false); return; }
+    setAppVersion(v);
     setInApp(true);
     try { setInstalled(await native("apps", { packages: apps.map((a) => a.pkg) })); } catch { /* none known */ }
   }, [sys]);
@@ -104,9 +118,9 @@ function Sheet({ game, onClose }) {
     setMsg(null);
     const a = apps.find((x) => installed[x.pkg]);
     try {
-      const r = await native("open", { id, pkg: a?.pkg ?? "", mode: a?.mode ?? "view" });
+      const r = await native("open", { id, pkg: a?.pkg ?? "", mode: a?.mode ?? "view", folder, fileName: name });
       setMsg(r.opened === "app"
-        ? { kind: "info", text: `${a.name} opened. If the game didn't start by itself, choose it there: Downloads › SaveState › ${folder} › ${name}.` }
+        ? { kind: "info", text: `${a.name} opened. If the game didn't start by itself, choose it there: Download › SaveState › ${folder} › ${name}. To see every game you download, add that folder to ${a.name}'s game list once (${FOLDER_HELP[a.name] ?? "its Games screen › browse to it"}).` }
         : { kind: "ok", text: `${game.title} is opening in ${a?.name ?? "your emulator"}. Come back to SaveState any time.` });
     } catch (e) { setMsg({ kind: "bad", text: e.message || "It didn't open." }); }
   }, [installed, sys]);
@@ -134,16 +148,21 @@ function Sheet({ game, onClose }) {
     } catch (e) { setDl({ status: "failed", error: e.message }); }
   }
 
-  // Downloaded on an earlier visit: pick up where it is.
+  // Downloaded on an earlier visit: pick up where it is. A download this
+  // phone no longer lists (or one started from another page) is found by its
+  // file in Downloads/SaveState instead.
   useEffect(() => {
     if (!inApp) return;
+    const byFile = () => native("find", { folder, fileName: name }).then((f) => {
+      if (f.done) { remember(game.id, f.id); setDl({ id: f.id, status: "done", path: `Download › SaveState › ${folder}` }); }
+    }).catch(() => {});
     const id = saved(game.id);
-    if (id == null) return;
+    if (id == null) { byFile(); return; }
     native("progress", { id }).then((p) => {
-      if (p.status === "gone") return;
+      if (p.status === "gone") { byFile(); return; }
       setDl({ ...p, id });
       if (p.status !== "done" && p.status !== "failed") follow(id);
-    }).catch(() => {});
+    }).catch(byFile);
   }, [inApp]);
 
   async function copyBios() {
@@ -171,6 +190,12 @@ function Sheet({ game, onClose }) {
 
         {apps.length > 0 && inApp !== null && (
           <>
+            {inApp && appVersion < FIXED_IN && (
+              <div className="nxphone-col">
+                <p className="nxphone-err">This copy of the SaveState app can't hand downloaded games to an emulator (fixed in the new version). Install the update, then press Play again; games you already downloaded stay on the phone.</p>
+                <a className="nxa-btn primary" href={`${location.origin}/api/downloads/apk`}><Icon name="down" /> Update the SaveState app</a>
+              </div>
+            )}
             {inApp && !app && (
               <div className="nxphone-col">
                 <p>{String(game.platform).toUpperCase()} games play on this phone in {[...new Set(apps.map((a) => a.name))].join(" or ")}. Install it first; this page notices when you come back.</p>
