@@ -509,8 +509,8 @@ vault root and the extra scan paths) and the folder watcher. All three use
   Japanese release under its Japanese name counts as its own game.
 - A known name skips the Gemini naming call (a 2,000-file pack made 2,000).
 
-The E:\ROMS packs of 2026-10-21: 2,128 Game Boy files became ~1,530 games;
-268 Neo Geo zips are ~154 games (62 clones, 52 sets FBNeo doesn't know).
+The E:\ROMS packs of 2026-10-21: 2,128 Game Boy files became 1,517 games;
+268 Neo Geo zips are 154 games (62 clones, 52 sets FBNeo doesn't know).
 The pack's `<set>.png` flyers were used as covers.
 
 ## Browser uploads (Drive panes, Add games, uploader.js)
