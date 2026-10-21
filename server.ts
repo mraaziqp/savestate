@@ -19860,6 +19860,20 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     for (const candidate of candidates) {
       try {
         await fsAccess(candidate);
+        // ?wrap=1: the zip inside another zip. EmulatorJS unpacks a BIOS zip
+        // before the core sees it, and FinalBurn Neo only reads neogeo.zip as
+        // a zip ("sp-s3.sp1 ... is missing" with every file there). Unpacking
+        // the outer zip leaves neogeo.zip itself next to the game.
+        if (req.query.wrap === "1" && /\.zip$/i.test(filename)) {
+          const AdmZip = (await import("adm-zip")).default;
+          const outer = new AdmZip();
+          outer.addFile(filename, await readFile(candidate));
+          const entry = outer.getEntry(filename);
+          if (entry) entry.header.method = 0; // stored: it's compressed already
+          res.setHeader("Content-Type", "application/zip");
+          res.setHeader("Cache-Control", "private, max-age=86400");
+          return res.send(outer.toBuffer());
+        }
         return res.sendFile(candidate);
       } catch { /* try next */ }
     }
@@ -20543,6 +20557,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const resolvedRom = await resolveRomPath(config.root_path, game, getExtraRoots(config));
     if (!resolvedRom.absolutePath) return res.status(404).end();
     if (incompleteFiles.get(resolvedRom.absolutePath)) return res.status(409).end();
+    // The game's real file name: a copy kept on a phone is stored as <id>.zip,
+    // and arcade cores (FinalBurn Neo) know a game only by its romset name
+    // ("mslug2.zip"), so the browser player asks here before starting one.
+    const name = path.basename(resolvedRom.absolutePath);
+    res.setHeader("X-Rom-Name", encodeURIComponent(name));
+    res.setHeader("Access-Control-Expose-Headers", "X-Rom-Name");
     res.status(200).end();
   });
 

@@ -180,6 +180,53 @@ const before = shell;
   if (out !== text) writeFileSync(file, out);
 }
 
+// 3s. On a phone, Play never asks for the PC launcher (a phone has none):
+//     consoles the browser runs play in the browser, consoles with an
+//     Android emulator app go to that app (PhonePlay.jsx: download, then open
+//     it in PPSSPP, NetherSX2, Dolphin, Azahar...). Play on a PSP game in
+//     Games said "PSP games play through SaveState for Windows" on Android.
+shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if(canBrowser)",
+  "const canBrowser=!!(window.nxRuns?.runsOn?window.nxRuns.runsOn(t.platform).browser:!1);",
+  'const canBrowser=!!(window.nxRuns?.runsOn?window.nxRuns.runsOn(t.platform).browser:!1);if(window.nxRuns?.isPhone?.()){if(canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}if(window.nxRuns.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return{ok:!0}}}');
+{
+  const file = path.join(assets, find("ConsoleHub-"));
+  let ch = readFileSync(file, "utf8");
+  const before = ch;
+  const hand = "if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}";
+  ch = patch(ch, "vault play hands phone games to the emulator app", `const c=(0,s.useCallback)(async t=>{${hand}`,
+    "const c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){",
+    `const c=(0,s.useCallback)(async t=>{${hand}if(y.isSupported&&nxCanBrowser(t.platform)){`);
+  ch = patch(ch, "vault download hands phone games to the emulator app", `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}`,
+    "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){",
+    `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}if(!nxCanBrowser(t.platform)&&!await _()){`);
+  if (ch !== before) writeFileSync(file, ch);
+}
+{
+  const file = path.join(assets, find("LocalLibraryPanel-"));
+  const text = readFileSync(file, "utf8");
+  const out = patch(text, "games tab hands phone games to the emulator app", "if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=",
+    "const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=",
+    "const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=");
+  if (out !== text) writeFileSync(file, out);
+}
+
+// 3t. Games panel on a phone: the search box shared a row with the console
+//     chips and was squeezed to a sliver; on a narrow screen it gets its own
+//     full-width line.
+{
+  const file = path.join(assets, find("LocalLibraryPanel-"));
+  let lp = readFileSync(file, "utf8");
+  const before = lp;
+  const wide = 'style:typeof innerWidth<"u"&&innerWidth<640?{flexBasis:"100%",maxWidth:"none"}:void 0,';
+  lp = patch(lp, "games search full width on phones", `(0,e.jsxs)("div",{${wide}className:"relative flex-1 min-w-[160px] max-w-xs"`,
+    '(0,e.jsxs)("div",{className:"relative flex-1 min-w-[160px] max-w-xs"',
+    `(0,e.jsxs)("div",{${wide}className:"relative flex-1 min-w-[160px] max-w-xs"`);
+  lp = patch(lp, "local games search full width on phones", `(0,e.jsx)("input",{value:w,onChange:s=>R(s.target.value),${wide}`,
+    '(0,e.jsx)("input",{value:w,onChange:s=>R(s.target.value),',
+    `(0,e.jsx)("input",{value:w,onChange:s=>R(s.target.value),${wide}`);
+  if (lp !== before) writeFileSync(file, lp);
+}
+
 // 3o. Phone cards ask for small covers (window.nxThumb in boot.js).
 shell = patch(shell, "game cards small covers on phones", "(window.nxThumb||(u=>u))((t.boxArt",
   'p=(0,s.useMemo)(()=>o?null:(t.boxArt??"").trim()||`/api/art/${t.id}`,[t.boxArt,t.id,o])',
@@ -698,7 +745,7 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   ch = patch(ch, "play offline: a failed copy shows in the play panel", 'phase:"failed",game:ne(t),error:v.message',
     'catch(v){f(A=>new Map(A).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:v.message??"Download failed"}))}finally{clearInterval(S),X.current.delete(t.id)}',
     'catch(v){d&&window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"failed",game:ne(t),error:v.message??"The game couldn\\u2019t be copied to this PC.",retry:()=>b(t,d)}}));f(A=>new Map(A).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:v.message??"Download failed"}))}finally{clearInterval(S),X.current.delete(t.id)}');
-  ch = patch(ch, "play offline: play heavy games through the launcher", "c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){",
+  ch = patch(ch, "play offline: play heavy games through the launcher", "if(y.isSupported&&nxCanBrowser(t.platform)){",
     "c=(0,s.useCallback)(async t=>{if(y.isSupported){", "c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){");
   // A game card's error overlay: "Retry" wrapped to "Ret / ry" on a wide
   // screen, and "Manual Setup" opened the old folder form. It now opens Set
@@ -796,6 +843,9 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   gd = patch(gd, "phone note names the emulator app", "in an emulator app on this phone",
     '`${(t.platform??"This system").toUpperCase()} is too heavy for a phone: choose Stream from the host PC and play it in Moonlight.`',
     `${PH}?\`\${(t.platform??"This system").toUpperCase()} plays in an emulator app on this phone (\${${PH}.map(a=>a.name).join(" or ")}): press Play on this phone.\`:\`\${(t.platform??"This system").toUpperCase()} is too heavy for a phone: choose Stream from the host PC and play it in Moonlight.\``);
+  // One app can have several package names (Azahar's Play Store and GitHub
+  // builds): name it once.
+  gd = gd.split(`${PH}.map(a=>a.name).join(" or ")`).join(`[...new Set(${PH}.map(a=>a.name))].join(" or ")`);
   if (gd !== before) writeFileSync(file, gd);
 }
 
@@ -986,6 +1036,47 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
     "const want=innerWidth<900?720:Math.min(1080,Math.max(720,(window.screen?.height||1080)*(window.devicePixelRatio||1)));",
     "const nxNet=navigator.connection;const nxGood=!!nxNet&&!nxNet.saveData&&(nxNet.downlink||0)>=5;const want=innerWidth<900?(nxGood?1080:720):Math.min(1080,Math.max(720,(window.screen?.height||1080)*(window.devicePixelRatio||1)));");
   if (hub !== before) writeFileSync(file, hub);
+}
+
+// 3r. Browser player (EmulatorPlayer):
+//   - Arcade games kept on a phone are stored as <game id>.zip, and FinalBurn
+//     Neo knows a game only by its romset name ("mslug2.zip"): "Romset is
+//     unknown" for Metal Slug 2 and KOF '98 on a phone. When the name is just
+//     an id, the real one comes from the host (HEAD .../download, X-Rom-Name).
+//   - On a phone the game turns to landscape by itself (window.nxLandscape in
+//     boot.js): the Android app turns the screen even with auto-rotate off,
+//     a browser goes full screen first (orientation lock needs it).
+{
+  const file = path.join(assets, find("EmulatorPlayer-"));
+  let ep = readFileSync(file, "utf8");
+  const before = ep;
+  ep = patch(ep, "arcade romset name for copies kept on the phone", "const nxRomName=await(async()=>",
+    "let s;if(O)s=O;",
+    'const nxRomName=await(async()=>{const n=r.fileName||String(r.relative_path||r.relativePath||"").split(/[\\\\/]/).pop()||"";const m=/^([0-9a-f]{32})(\\.zip)?$/i.exec(n);if(!m)return null;try{const h=await fetch(`${a}/api/games/${m[1]}/download${t?`?token=${encodeURIComponent(t)}`:""}`,{method:"HEAD",signal:AbortSignal.timeout(8e3)});const x=h.headers.get("x-rom-name");return x?decodeURIComponent(x):null}catch{return null}})();let s;if(O)s=O;');
+  ep = patch(ep, "arcade romset name used", "window.EJS_gameName=nxRomName||",
+    '(window.EJS_gameName=r.fileName||String(r.relative_path||r.relativePath||"").split(String.fromCharCode(92)).join("/").split("/").pop()||void 0)',
+    '(window.EJS_gameName=nxRomName||r.fileName||String(r.relative_path||r.relativePath||"").split(String.fromCharCode(92)).join("/").split("/").pop()||void 0)');
+  ep = patch(ep, "browser games turn to landscape on phones", "window.nxLandscape?.(!0)",
+    'if(x){try{screen.orientation?.lock?.("landscape")}catch{}return()=>{try{screen.orientation?.unlock?.()}catch{}}}',
+    'if(x){try{window.nxLandscape?.(!0)}catch{}return()=>{try{window.nxLandscape?.(!1)}catch{}}}');
+  // Arcade cores get the BIOS zip wrapped in a zip (server ?wrap=1): EmulatorJS
+  // unpacks a BIOS before the core sees it, and FinalBurn Neo needs neogeo.zip
+  // whole ("sp-s3.sp1, sm1.sm1 ... is missing" with all of them there).
+  ep = patch(ep, "arcade BIOS kept as a zip", "wrap=1\");d&&!await nxOk(d)",
+    'd&&!await nxOk(d)&&(d="");',
+    'd&&/^(neogeo|mame|arcade|fbneo|fba)$/i.test(String(r.platform))&&(d+=(d.includes("?")?"&":"?")+"wrap=1");d&&!await nxOk(d)&&(d="");');
+  // The "Rotate your device" cover turns the game sideways when tapped (a
+  // browser only allows that from a tap; the Android app does it by itself).
+  ep = patch(ep, "rotate cover turns the screen when tapped", "Tap to turn it sideways",
+    'x&&Ke&&!C&&!m&&(0,e.jsx)("div",{className:"absolute inset-0 flex items-center justify-center bg-black/85 z-20",children:(0,e.jsxs)("div",{className:"text-center space-y-3 px-6",children:[(0,e.jsx)(tt,{className:"w-10 h-10 text-white/60 mx-auto animate-spin",style:{animationDuration:"3s"}}),(0,e.jsx)("p",{className:"text-white font-bold",children:"Rotate your device"}),(0,e.jsx)("p",{className:"text-sm text-white/50",children:"Landscape mode gives you the best experience"})]})})',
+    'x&&Ke&&!C&&!m&&(0,e.jsx)("div",{className:"absolute inset-0 flex items-center justify-center bg-black/85 z-20",role:"button",onClick:()=>{try{window.nxLandscape?.(!0)}catch{}},children:(0,e.jsxs)("div",{className:"text-center space-y-3 px-6",children:[(0,e.jsx)(tt,{className:"w-10 h-10 text-white/60 mx-auto animate-spin",style:{animationDuration:"3s"}}),(0,e.jsx)("p",{className:"text-white font-bold",children:"Rotate your device"}),(0,e.jsx)("p",{className:"text-sm text-white/50",children:"Tap to turn it sideways, or turn your phone"})]})})');
+  // The name lookup was cut off at 8 s while the game itself was downloading
+  // (net::ERR_ABORTED in a phone test): 15 s, then the game list, which has
+  // every game's path.
+  ep = patch(ep, "arcade romset name falls back to the game list", "nxRomList",
+    '{method:"HEAD",signal:AbortSignal.timeout(8e3)});const x=h.headers.get("x-rom-name");return x?decodeURIComponent(x):null}catch{return null}})();',
+    '{method:"HEAD",signal:AbortSignal.timeout(15e3)});const x=h.headers.get("x-rom-name");if(x)return decodeURIComponent(x)}catch{}try{const nxRomList=await fetch(`${a}/api/games`,{signal:AbortSignal.timeout(15e3)}).then(q=>q.json());const it=(Array.isArray(nxRomList)?nxRomList:nxRomList.games||[]).find(q=>String(q.id)===m[1]);return String(it?.relativePath||it?.relative_path||"").split(/[\\\\/]/).pop()||null}catch{return null}})();');
+  if (ep !== before) writeFileSync(file, ep);
 }
 
 // 4. index.html loads the boot script ahead of the app.

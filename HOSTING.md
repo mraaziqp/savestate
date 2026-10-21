@@ -709,6 +709,29 @@ isn't running"). Browser play now always names the game (`EJS_gameName`),
 so FinalBurn Neo recognises arcade sets fetched by URL ("Romset is unknown"
 for kof98 before).
 
+2026-10-21 (app 1.0.68, web r141):
+- **Every Play on a phone** (Games hub panel, Console Vault, the play router)
+  goes to the browser for browser consoles and to PhonePlay for consoles
+  with an Android app. Only game details did before: Play on a PSP game in
+  Games said "PSP games play through SaveState for Windows" on Android.
+- **Azahar** (3DS): its Play Store build is `io.github.lime3ds.android`;
+  only `org.azahar_emu.azahar` (GitHub) was known, so a Play Store Azahar
+  showed "not installed". Both, and their `.debug` builds, are in
+  `PHONE_APPS` and the manifest's `<queries>` (Android only lets the app see
+  packages listed there, so this needs the new APK).
+- **Arcade games on a phone**: a copy kept on the phone is stored as
+  `<game id>.zip`, and FinalBurn Neo knows a game only by its romset name.
+  The player asks the host for the real name (HEAD `.../download` answers
+  `X-Rom-Name`; the game list as fallback). EmulatorJS also unpacks a BIOS
+  zip before the core sees it, and FBNeo needs `neogeo.zip` whole, so arcade
+  games get it wrapped in a zip (`/api/emulator/bios/serve/neogeo.zip?wrap=1`):
+  unpacking leaves `neogeo.zip` next to the game. Metal Slug 2 and KOF '98
+  boot on a phone now.
+- **Landscape by itself**: `window.nxLandscape` (boot.js). The app turns the
+  screen with `NxAndroid.orientation` (plugin version 2, sensor landscape,
+  works with auto-rotate off); a browser goes full screen and locks the
+  orientation, and the "Rotate your device" cover does it when tapped.
+
 ## Where it plays (Where.jsx, devices.js)
 
 The Games hub and grid are wrapped in a filter (`NxWhere`, build.mjs 3n):
@@ -720,6 +743,15 @@ compiled code. Set up games marks each console "Any device", "PC" and
 with install links, and in the system files step shows the files the host
 already has; the owner's PCs get them copied from the host by themselves,
 and the owner can add files to the host from a phone ("Add to host").
+
+Play mode (2026-10-21, added with Gemini, reviewed): the filter reads All
+Games / Browser Play / Local or PC Play / On Phones (This phone on a
+phone). With Browser Play picked, a game opens in the browser player. The
+play router (build.mjs, `gc`) offers "Play in Browser" or "Play Native" for
+consoles that can do both, with "remember my choice" per console
+(`nx_play_pref_<platform>`); on a phone it never offers the PC. Controller
+navigation for the menus is in boot.js (`__nxGamepadNav`); it stands aside
+while a game is open (`__nxGameOpen`, `#ejs-game-container`).
 
 ## SaveState for Linux (scripts/client-install-linux.sh, launcher v10)
 

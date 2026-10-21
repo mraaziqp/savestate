@@ -57,6 +57,9 @@
         <package android:name="xyz.aethersx2.android" />
         <package android:name="org.dolphinemu.dolphinemu" />
         <package android:name="org.azahar_emu.azahar" />
+        <package android:name="org.azahar_emu.azahar.debug" />
+        <package android:name="io.github.lime3ds.android" />
+        <package android:name="io.github.lime3ds.android.debug" />
         <package android:name="com.flycast.emulator" />
         <package android:name="me.magnum.melonds" />
         <package android:name="com.dsemu.drastic" />

@@ -36,6 +36,9 @@ import java.io.OutputStream;
  *             (PPSSPP, NetherSX2, Dolphin...), or to whichever app opens it.
  *   apps      which of the given emulator apps are installed.
  *   saveData  saves a file the page made itself (a blob: download).
+ *   orientation  "landscape" turns the screen sideways for a game (by the
+ *             sensor, so either way up), even with auto-rotate off; "auto"
+ *             gives it back to the phone's own setting.
  *
  * Plain links the page downloads (Export, a ROM's Download button) went
  * nowhere before: a Capacitor WebView ignores downloads unless told what to
@@ -43,7 +46,7 @@ import java.io.OutputStream;
  */
 @CapacitorPlugin(name = "NxAndroid")
 public class NxAndroidPlugin extends Plugin {
-    static final int VERSION = 1;
+    static final int VERSION = 2;
 
     private DownloadManager dm() {
         return (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
@@ -76,6 +79,18 @@ public class NxAndroidPlugin extends Plugin {
         JSObject r = new JSObject();
         r.put("version", VERSION);
         call.resolve(r);
+    }
+
+    @PluginMethod
+    public void orientation(PluginCall call) {
+        String mode = call.getString("mode", "auto");
+        android.app.Activity a = getActivity();
+        if (a == null) { call.reject("No screen to turn."); return; }
+        final int want = "landscape".equals(mode)
+            ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        a.runOnUiThread(() -> a.setRequestedOrientation(want));
+        call.resolve();
     }
 
     @PluginMethod

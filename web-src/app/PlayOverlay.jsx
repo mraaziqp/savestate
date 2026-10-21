@@ -58,7 +58,7 @@ const CSS = `
 .nx-playmode-tag.local{background:rgba(168,85,247,.2);color:#c084fc;border-color:rgba(168,85,247,.3)}
 .nx-playmode-card-desc{font-size:12.5px;color:rgba(255,255,255,.65);line-height:1.4;margin:0}
 .nx-playmode-remember{display:flex;align-items:center;gap:10px;font-size:12.5px;color:rgba(255,255,255,.75);cursor:pointer;user-select:none;margin:4px 0}
-.nx-playmode-remember input{cursor:pointer;accent-color:#22d3ee;width:16px;height:16px}
+.nx-playmode-remember input{-webkit-appearance:checkbox;appearance:auto;display:inline-block;opacity:1;position:static;cursor:pointer;accent-color:#22d3ee;width:18px;height:18px;margin:0;flex:none}
 `;
 
 const mb = (n) => (n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(2)} GB` : `${Math.round(n / 1024 ** 2)} MB`);

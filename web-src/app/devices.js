@@ -38,7 +38,15 @@ export const PHONE_APPS = {
   ],
   gamecube: [DOLPHIN],
   wii: [DOLPHIN],
-  "3ds": [{ pkg: "org.azahar_emu.azahar", name: "Azahar", mode: "view", get: "https://azahar-emu.org/" }],
+  // Azahar's Play Store build keeps Lime3DS's package name; its GitHub build
+  // is org.azahar_emu.azahar (".debug" for test builds). Only the second was
+  // known, so a Play Store Azahar showed as "not installed" (2026-10-21).
+  "3ds": [
+    { pkg: "io.github.lime3ds.android", name: "Azahar", mode: "view", get: "https://play.google.com/store/apps/details?id=io.github.lime3ds.android" },
+    { pkg: "org.azahar_emu.azahar", name: "Azahar", mode: "view" },
+    { pkg: "org.azahar_emu.azahar.debug", name: "Azahar", mode: "view" },
+    { pkg: "io.github.lime3ds.android.debug", name: "Azahar", mode: "view" },
+  ],
   dreamcast: [{ pkg: "com.flycast.emulator", name: "Flycast", mode: "view", get: "https://play.google.com/store/apps/details?id=com.flycast.emulator" }],
   saturn: [
     { pkg: "org.devmiyax.yabasanshioro2.pro", name: "Yaba Sanshiro 2 Pro", mode: "view" },

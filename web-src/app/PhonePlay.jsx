@@ -173,7 +173,7 @@ function Sheet({ game, onClose }) {
           <>
             {inApp && !app && (
               <div className="nxphone-col">
-                <p>{String(game.platform).toUpperCase()} games play on this phone in {apps.map((a) => a.name).join(" or ")}. Install it first; this page notices when you come back.</p>
+                <p>{String(game.platform).toUpperCase()} games play on this phone in {[...new Set(apps.map((a) => a.name))].join(" or ")}. Install it first; this page notices when you come back.</p>
                 {apps.filter((a) => a.get).map((a) => (
                   <div key={a.pkg} className="nxphone-app">
                     <div><b>{a.name}</b>{a.note && <small>{a.note}</small>}</div>
@@ -183,7 +183,7 @@ function Sheet({ game, onClose }) {
               </div>
             )}
             {inApp && app && !dl && <p>Downloads {big ? `${mb(big)} ` : ""}to this phone once (Downloads › SaveState › {folder}), then opens in {app.name}. After that it plays offline.</p>}
-            {!inApp && !dl && <p>This downloads the game to this phone. Then open it in {apps.map((a) => a.name).join(" or ")} (from your Downloads folder). In the SaveState Android app it opens by itself.</p>}
+            {!inApp && !dl && <p>This downloads the game to this phone. Then open it in {[...new Set(apps.map((a) => a.name))].join(" or ")} (from your Downloads folder). In the SaveState Android app it opens by itself.</p>}
 
             {busy && (
               <div className="nxphone-col">

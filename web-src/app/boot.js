@@ -93,7 +93,7 @@ import "./savesync.js";
     + '.nx-music-bar input[type=range]{-webkit-appearance:none;appearance:none;background:linear-gradient(rgba(255,255,255,.16),rgba(255,255,255,.16)) center/100% 4px no-repeat!important;border-radius:0}'
     + '.nx-music-bar input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
     + '.nx-music-bar input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
-    + '.nx-controller-focus,button.nx-controller-focus,a.nx-controller-focus,[role="button"].nx-controller-focus,[data-gameid].nx-controller-focus{outline:3px solid #22d3ee!important;outline-offset:3px!important;box-shadow:0 0 24px rgba(34,211,238,.75),inset 0 0 10px rgba(34,211,238,.3)!important;transform:scale(1.03)!important;transition:outline .12s ease,box-shadow .12s ease,transform .15s ease!important;z-index:50!important;position:relative!important}'
+    + '.nx-controller-focus,button.nx-controller-focus,a.nx-controller-focus,[role="button"].nx-controller-focus,[data-gameid].nx-controller-focus{outline:3px solid #22d3ee!important;outline-offset:3px!important;box-shadow:0 0 24px rgba(34,211,238,.75),inset 0 0 10px rgba(34,211,238,.3)!important;transform:scale(1.03)!important;transition:outline .12s ease,box-shadow .12s ease,transform .15s ease!important}'
     + '.nx-controller-pressed{transform:scale(.97)!important;filter:brightness(1.25)!important}';
   document.head.appendChild(style);
   const showAdmin = (yes) => {
@@ -377,6 +377,34 @@ import "./savesync.js";
       for await (const _ of roms.keys()) { await navigator.storage.persist(); break; }
     } catch { /* no OPFS */ }
   }, 15_000);
+
+  // ── Games turn the phone sideways ───────────────────────────────────────
+  // window.nxLandscape(true) when a game starts on a phone, (false) when it
+  // ends. The Android app (NxAndroid 2+) turns the screen itself, even with
+  // auto-rotate off. A browser can only lock the orientation in full screen,
+  // so it goes full screen first (and leaves it again only if it went in).
+  let nxLandscapeFs = false;
+  window.nxLandscape = async (on) => {
+    try {
+      if (window.Capacitor?.isNativePlatform?.()) {
+        await window.Capacitor.nativePromise("NxAndroid", "orientation", { mode: on ? "landscape" : "auto" });
+        return;
+      }
+    } catch { /* an older app: do it the browser's way */ }
+    try {
+      if (on) {
+        if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+          await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+          nxLandscapeFs = true;
+        }
+        await screen.orientation?.lock?.("landscape");
+      } else {
+        screen.orientation?.unlock?.();
+        if (nxLandscapeFs && document.fullscreenElement) await document.exitFullscreen();
+        nxLandscapeFs = false;
+      }
+    } catch { /* not allowed here (no gesture, a desktop browser): leave it */ }
+  };
 
   // ── 2D Spatial Controller Navigation Engine ─────────────────────────────
   const FOCUS_CLS = "nx-controller-focus";
