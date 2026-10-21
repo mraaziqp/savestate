@@ -491,6 +491,28 @@ the Drive folder), then `addRomToLibrary` adds the row, puts the file in the
 name index (playable at once) and fetches art. The folder watcher may add
 the same file first, with an AI-cleaned title; both use the same id.
 
+### Romsets and No-Intro packs (scanSkips, scannedRomName)
+
+Three things add ROM files found on disk: the scan button (`POST
+/api/vault/scan`), the startup auto-scan (12 s after every restart, over the
+vault root and the extra scan paths) and the folder watcher. All three use
+`scanSkips` and `scannedRomName` in server.ts:
+- **Neo Geo sets** are named from `server/neogeo-sets.json` (made from
+  FinalBurn Neo's "Neogeo only" DAT, libretro/FBNeo `dats/`): `2020bb` is
+  "2020 Super Baseball", platform neogeo, with its year. A clone whose parent
+  zip is in the same folder, a BIOS set, and (in a folder named Neo Geo) a set
+  FBNeo doesn't know are not added; `dedupeGamesForClient` also hides a clone
+  whose parent is listed. To refresh the JSON, regenerate it from the DAT.
+- **No-Intro dumps** ("Tetris (World) (Rev 1).gb"): one per game per folder,
+  USA > World > Europe > Japan, highest revision; prototypes, betas, demos,
+  pirate carts and bad dumps are left out. The title loses its tags. A
+  Japanese release under its Japanese name counts as its own game.
+- A known name skips the Gemini naming call (a 2,000-file pack made 2,000).
+
+The E:\ROMS packs of 2026-10-21: 2,128 Game Boy files became ~1,530 games;
+268 Neo Geo zips are ~154 games (62 clones, 52 sets FBNeo doesn't know).
+The pack's `<set>.png` flyers were used as covers.
+
 ## Browser uploads (Drive panes, Add games, uploader.js)
 
 One engine (`web-src/app/uploader.js`): 8 MB parts, six in flight, three

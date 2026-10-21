@@ -22,6 +22,7 @@ import jwt from "jsonwebtoken";
 import QRCode from "qrcode";
 import { registerFilesLibrary, mediaRootsFor } from "./server/files-library.ts";
 import { registerWatch } from "./server/watch.ts";
+import { neoGeoSet, zipStem } from "./server/neogeo-sets.ts";
 import { createAccess } from "./server/access.ts";
 import { createTiers } from "./server/tiers.ts";
 import { createPlanLimits } from "./server/planlimits.ts";
@@ -1841,6 +1842,73 @@ async function findLocalGameArt(romPath: string, gameId: string): Promise<string
   return null;
 }
 
+// No-Intro names carry the region and status: "Tetris (World) (Rev 1).gb".
+const NO_INTRO_REGION = /\(([^)]*\b(?:USA|World|Europe|Japan|Asia|Korea|Brazil|Australia|Germany|France|Spain|Italy|Netherlands|Sweden|China|Taiwan|Hong Kong|Canada|Unknown)\b[^)]*)\)/i;
+const NO_INTRO_UNFINISHED = /\((?:[^)]*\b(?:Proto|Beta|Sample|Demo|Debug|Kiosk|Pirate)\b[^)]*)\)|\[b\d*\]/i;
+
+function noIntroRank(name: string): number {
+  const region = NO_INTRO_REGION.exec(name)?.[1] ?? "";
+  const rank = /USA/.test(region) ? 400 : /World/.test(region) ? 300 : /Europe/.test(region) ? 200 : /Japan/.test(region) ? 100 : 0;
+  return rank + Number(/\(Rev (\d+)\)/i.exec(name)?.[1] ?? 0);
+}
+
+/**
+ * Files a scan leaves out because they aren't a game of their own:
+ *  - a Neo Geo clone set whose parent is in the same folder, a BIOS set, and,
+ *    in a Neo Geo folder, a set FinalBurn Neo doesn't know (it can't run it);
+ *  - every No-Intro copy of a game but the best one in its folder: USA, then
+ *    World, Europe, Japan - and no prototypes, betas, demos, pirate carts
+ *    or bad dumps. A 2,128-file Game Boy set listed each game up to 6 times.
+ */
+function scanSkips(roms: { filename: string; fullPath: string }[]): Set<string> {
+  const skip = new Set<string>();
+  const byDir = new Map<string, { filename: string; fullPath: string }[]>();
+  for (const rom of roms) {
+    const dir = path.dirname(rom.fullPath).toLowerCase();
+    (byDir.get(dir) ?? byDir.set(dir, []).get(dir)!).push(rom);
+  }
+  for (const [dir, files] of byDir) {
+    const stems = new Set(files.map((f) => zipStem(f.filename)).filter(Boolean));
+    const neoGeoDir = /neo[\s_-]?geo/i.test(path.basename(dir));
+    const best = new Map<string, { fullPath: string; rank: number }>();
+    for (const f of files) {
+      const stem = zipStem(f.filename);
+      if (stem) {
+        const set = neoGeoSet(stem);
+        if (set?.bios || (set?.parent && stems.has(set.parent)) || (!set && neoGeoDir)) { skip.add(f.fullPath); continue; }
+        if (set) continue;
+      }
+      if (!NO_INTRO_REGION.test(f.filename)) continue;
+      if (NO_INTRO_UNFINISHED.test(f.filename)) { skip.add(f.fullPath); continue; }
+      // Discs and sides of one game are all kept: "(Disc 2)" is part of the key.
+      const part = /\((?:Disc|Side|Track) [^)]*\)/i.exec(f.filename)?.[0] ?? "";
+      const key = (bareRomTitle(path.basename(f.filename, path.extname(f.filename))) + part).toLowerCase();
+      const rank = noIntroRank(f.filename);
+      const current = best.get(key);
+      if (!current) { best.set(key, { fullPath: f.fullPath, rank }); continue; }
+      if (rank > current.rank) { skip.add(current.fullPath); best.set(key, { fullPath: f.fullPath, rank }); }
+      else skip.add(f.fullPath);
+    }
+  }
+  return skip;
+}
+
+/**
+ * What a scan calls a ROM file it adds: FinalBurn Neo's name for a Neo Geo set
+ * ("2020bb" is "2020 Super Baseball"), a No-Intro dump's name without its tags,
+ * otherwise the file name. `named` says the name needs no guessing.
+ */
+function scannedRomName(filename: string, detected: string): { title: string; platform: string; year: string; named: boolean } {
+  const stem = path.basename(filename, path.extname(filename));
+  const neoGeo = neoGeoSet(zipStem(filename));
+  if (neoGeo && ARCADE_PLATFORM_KEYS.has(canonicalPlatformKey(detected))) {
+    return { title: neoGeo.title, platform: "neogeo", year: neoGeo.year, named: true };
+  }
+  if (NO_INTRO_REGION.test(filename)) return { title: bareRomTitle(stem), platform: detected, year: "", named: true };
+  const title = stem.replace(/[_()\[\]]/g, " ").replace(/[_\-\.]+/g, " ").trim().replace(/\s+/g, " ");
+  return { title, platform: detected, year: "", named: false };
+}
+
 async function scanVaultDir(root: string) {
   const results: { filename: string; fullPath: string; relativePath: string; size: number }[] = [];
 
@@ -3024,7 +3092,17 @@ function dedupeGamesForClient(games: ReturnType<typeof rowToGame>[]): ReturnType
       byKey.set(key, game);
     }
   }
-  return Array.from(byKey.values());
+  // A Neo Geo clone (2020bba, a second version of 2020bb) is listed only when
+  // its parent set isn't: the pack has 62 of them beside their parents.
+  const arcadeStems = new Set<string>();
+  for (const game of byKey.values()) {
+    if (ARCADE_PLATFORM_KEYS.has(canonicalPlatformKey(game.platform))) arcadeStems.add(zipStem(game.relativePath ?? ""));
+  }
+  return Array.from(byKey.values()).filter((game) => {
+    if (!ARCADE_PLATFORM_KEYS.has(canonicalPlatformKey(game.platform))) return true;
+    const parent = neoGeoSet(zipStem(game.relativePath ?? ""))?.parent;
+    return !parent || !arcadeStems.has(parent);
+  });
 }
 
 // ─── DB Schema ───────────────────────────────────────────────────────────────
@@ -6463,24 +6541,26 @@ async function startServer() {
       return;
     }
     if ((await knownGameFiles()).has(romBasename(relativePath))) return; // the same game in another folder
+    // A clone set or another region's copy of a game in the same folder (scanSkips).
+    const dir = path.dirname(finalPath);
+    const siblings = await readdir(dir).catch(() => [] as string[]);
+    if (scanSkips(siblings.map((n) => ({ filename: n, fullPath: path.join(dir, n) }))).has(finalPath)) return;
     rememberGameFile(relativePath);
 
-    const platform = await detectPlatformWithHeader(filename, relativePath, finalPath);
+    const named = scannedRomName(filename, await detectPlatformWithHeader(filename, relativePath, finalPath));
+    const { platform, title: cleanTitle } = named;
     const core = PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown;
-    const cleanTitle = path.basename(filename, ext)
-      .replace(/[_()\[\]]/g, " ").replace(/[_\-\.]+/g, " ").trim()
-      .replace(/\s+/g, " ");
 
     const game: Record<string, any> = {
       id: gameId, title: cleanTitle, platform, core_id: core.coreId,
       relative_path: relativePath, box_art: "", hero_image: "",
       playtime: 0, sync_status: "pending", dominant_color: "#1a1a2e",
-      description: "", developer: "", publisher: "", release_date: "",
+      description: "", developer: "", publisher: "", release_date: named.year,
       genre: [], players: "1", rating: 0, file_hash: "",
     };
 
     // Gemini AI metadata enrichment
-    if (ai) {
+    if (ai && !named.named) {
       try {
         const aiResult = await ai.models.generateContent({
           model: "gemini-2.5-flash",
@@ -7483,6 +7563,7 @@ async function startServer() {
 
       const added: ReturnType<typeof rowToGame>[] = [];
       let reclassified = 0;
+      const skips = scanSkips(roms);
 
       // ── Batch existence check: one query instead of N individual SELECTs ────
       const allGameIds = roms.map((r) => crypto.createHash("md5").update(r.relativePath).digest("hex"));
@@ -7499,10 +7580,8 @@ async function startServer() {
 
       for (const rom of roms) {
         const gameId = crypto.createHash("md5").update(rom.relativePath).digest("hex");
-        const platform = await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath);
-        const cleanTitle = path.basename(rom.filename, path.extname(rom.filename))
-          .replace(/[_()\[\]]/g, " ").replace(/[_\-\.]+/g, " ").trim()
-          .replace(/\s+/g, " ");
+        const named = scannedRomName(rom.filename, await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath));
+        const { platform, title: cleanTitle } = named;
 
         // Existing entries are reclassified on scan (platform repair), not blindly skipped.
         if (dbConnected && pool) {
@@ -7551,6 +7630,7 @@ async function startServer() {
         }
 
         if ((await knownGameFiles()).has(romBasename(rom.relativePath))) continue; // the same game in another folder
+        if (skips.has(rom.fullPath)) continue; // a clone, BIOS or other-region copy (scanSkips)
         rememberGameFile(rom.relativePath);
         const game: Record<string, any> = {
           id: gameId,
@@ -7566,7 +7646,7 @@ async function startServer() {
           description: "",
           developer: "",
           publisher: "",
-          release_date: "",
+          release_date: named.year,
           genre: [],
           players: "1",
           rating: 0,
@@ -7574,7 +7654,7 @@ async function startServer() {
         };
 
         // AI metadata scrape
-        if (ai) {
+        if (ai && !named.named) { // a known name needs no guessing (and a 2,000-file set made 2,000 calls)
           try {
             log("INFO", `[AI] Scraping: ${rom.filename}`, "scanner");
             const result = await ai.models.generateContent({
@@ -30846,22 +30926,22 @@ Format as JSON:
 
         let added = 0;
         const known = await knownGameFiles();
+        const skips = scanSkips(roms); // the same rules as the scan button
         for (const rom of roms) {
           const gameId = crypto.createHash("md5").update(rom.relativePath).digest("hex");
           if (existingIds.has(gameId)) continue;
           if (known.has(romBasename(rom.relativePath))) continue; // the same game in another folder
+          if (skips.has(rom.fullPath)) continue;
           rememberGameFile(rom.relativePath);
-          const platform = await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath);
-          const cleanTitle = path.basename(rom.filename, path.extname(rom.filename))
-            .replace(/[_()\[\]]/g, " ").replace(/[_\-\.]+/g, " ").trim().replace(/\s+/g, " ");
+          const { title: cleanTitle, platform, year } = scannedRomName(rom.filename, await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath));
           if (dbConnected && pool) {
             await pool.query(
               `INSERT INTO games (id,title,platform,core_id,relative_path,box_art,hero_image,playtime,sync_status,dominant_color,description,developer,publisher,release_date,genre,players,rating,file_hash)
-               VALUES ($1,$2,$3,$4,$5,'','',0,'synced','#1a1a2e','','','','','{}','1',0,'') ON CONFLICT DO NOTHING`,
-              [gameId, cleanTitle, platform, (PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown).coreId, rom.relativePath]
+               VALUES ($1,$2,$3,$4,$5,'','',0,'synced','#1a1a2e','','','',$6,'{}','1',0,'') ON CONFLICT DO NOTHING`,
+              [gameId, cleanTitle, platform, (PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown).coreId, rom.relativePath, year]
             ).catch(() => {});
           } else {
-            mem.games.push({ id: gameId, title: cleanTitle, platform, coreId: (PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown).coreId, relativePath: rom.relativePath, boxArt: "", heroImage: "", playtime: 0, syncStatus: "synced", dominantColor: "#1a1a2e", description: "", developer: "", publisher: "", releaseDate: "", genre: [], players: "1", rating: 0, lastPlayed: null } as any);
+            mem.games.push({ id: gameId, title: cleanTitle, platform, coreId: (PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown).coreId, relativePath: rom.relativePath, boxArt: "", heroImage: "", playtime: 0, syncStatus: "synced", dominantColor: "#1a1a2e", description: "", developer: "", publisher: "", releaseDate: year, genre: [], players: "1", rating: 0, lastPlayed: null } as any);
           }
           added++;
         }
