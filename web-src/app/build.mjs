@@ -199,6 +199,9 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
   ch = patch(ch, "vault download hands phone games to the emulator app", `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}`,
     "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){",
     `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}if(!nxCanBrowser(t.platform)&&!await _()){`);
+  // The launch screen said "Running emulator on local machine…" on a phone too.
+  ch = patch(ch, "launch screen wording", "Getting the game ready…",
+    'children:"Running emulator on local machine…"', 'children:"Getting the game ready…"');
   // Big Picture's Play: "PSP can't run in a browser. On a PC, install..." on a phone.
   ch = patch(ch, "big picture hands phone games to the emulator app", "const d=l.find(n=>n.id===t);if(d&&!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);",
@@ -1064,6 +1067,14 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   ep = patch(ep, "browser player hands phone games to the emulator app", "if(!b&&window.nxRuns?.phoneHere?.(r.platform)",
     "if(!b){J(!1),Q(!0),g(",
     'if(!b&&window.nxRuns?.phoneHere?.(r.platform)&&window.nxPhonePlay){J(!1),Q(!0),g(`${(r.platform||"").toUpperCase()} plays in this phone\'s emulator app: opening it there.`),window.nxPhonePlay(r),D.current();return}if(!b){J(!1),Q(!0),g(');
+  // A copy kept on the phone by the Android app is an address the app serves
+  // itself (_capacitor_file_); when the player couldn't read it, RetroArch
+  // started with no game and showed its own "Load Content" menu (2026-10-21).
+  // The copy is read here first; if that fails the game streams from the host
+  // (the player shows its download progress) instead of starting empty.
+  ep = patch(ep, "copies kept on the phone are read before the player starts", "const nxB=await fetch(O)",
+    "let s;if(O)s=O;else if(k){",
+    "let s;if(O){const nxB=await fetch(O).then(q=>q.ok?q.blob():null).catch(()=>null);if(nxB&&nxB.size>0){const o=URL.createObjectURL(nxB);B.current=o,s=o}}if(s);else if(k){");
   ep = patch(ep, "arcade romset name for copies kept on the phone", "const nxRomName=await(async()=>",
     "let s;if(O)s=O;",
     'const nxRomName=await(async()=>{const n=r.fileName||String(r.relative_path||r.relativePath||"").split(/[\\\\/]/).pop()||"";const m=/^([0-9a-f]{32})(\\.zip)?$/i.exec(n);if(!m)return null;try{const h=await fetch(`${a}/api/games/${m[1]}/download${t?`?token=${encodeURIComponent(t)}`:""}`,{method:"HEAD",signal:AbortSignal.timeout(8e3)});const x=h.headers.get("x-rom-name");return x?decodeURIComponent(x):null}catch{return null}})();let s;if(O)s=O;');
@@ -1113,14 +1124,11 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   dl = patch(dl, "download page: mac and linux use the web app", 'note:"Use the web app (Install App)"',
     '{id:"mac",label:"macOS",note:".dmg installer"},{id:"linux",label:"Linux",note:".AppImage"}',
     '{id:"mac",label:"macOS",note:"Use the web app (Install App)"},{id:"linux",label:"Linux",note:"Use the web app (Install App)"}');
-  // Linux has SaveState for Linux now (scripts/client-install-linux.sh).
-  dl = patch(dl, "download page: linux installer", 'note:"Installer script (.sh): run it with sh"',
-    '{id:"linux",label:"Linux",note:"Use the web app (Install App)"}',
-    '{id:"linux",label:"Linux",note:"Installer script (.sh): run it with sh"}');
-  // The .sh opened as a text file on a laptop: Linux gets a .deb package
-  // (scripts/linux/build-deb.sh), served by /api/updates/check like the rest.
+  // Linux has SaveState for Linux now. The .sh installer opened as a text file
+  // on a laptop, so it's a .deb package (scripts/linux/build-deb.sh), served by
+  // /api/updates/check like the rest.
   dl = patch(dl, "download page: linux .deb", 'note:".deb package: open it to install (Ubuntu, Debian, Mint)"',
-    '{id:"linux",label:"Linux",note:"Installer script (.sh): run it with sh"}',
+    '{id:"linux",label:"Linux",note:"Use the web app (Install App)"}',
     '{id:"linux",label:"Linux",note:".deb package: open it to install (Ubuntu, Debian, Mint)"}');
   // The PS Vita app (/api/downloads/vita) had no button here.
   dl = patch(dl, "download page: PS Vita", "PS Vita (VPK)",

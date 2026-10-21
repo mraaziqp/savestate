@@ -14,9 +14,10 @@ import { PHONE_APPS, PHONE_FOLDER, norm, inAndroidApp } from "./devices.js";
 
 const native = (method, options = {}) => window.Capacitor.nativePromise("NxAndroid", method, options);
 // The app's NxAndroid version, or 0 outside it. Before 3 every download id
-// reached Android as -1, so no downloaded game could open.
+// reached Android as -1, so no downloaded game could open; before 4 emulators
+// got the download manager's address, which Dolphin couldn't read.
 const nativeVersion = async () => { if (!inAndroidApp()) return 0; try { return Number((await native("info")).version) || 1; } catch { return 0; } };
-const FIXED_IN = 3;
+const FIXED_IN = 4;
 // Where each emulator adds a folder to its game list.
 const FOLDER_HELP = {
   "PPSSPP": "Games › Browse… › Download › SaveState › PSP",

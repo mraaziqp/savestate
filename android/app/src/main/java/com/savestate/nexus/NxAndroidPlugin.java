@@ -3,15 +3,21 @@ package com.savestate.nexus;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
+import android.provider.MediaStore;
 import android.util.Base64;
 import android.webkit.CookieManager;
+import android.webkit.MimeTypeMap;
 import android.webkit.URLUtil;
+
+import androidx.core.content.FileProvider;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -46,7 +52,7 @@ import java.io.OutputStream;
  */
 @CapacitorPlugin(name = "NxAndroid")
 public class NxAndroidPlugin extends Plugin {
-    static final int VERSION = 3;
+    static final int VERSION = 4;
 
     private DownloadManager dm() {
         return (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
@@ -157,6 +163,45 @@ public class NxAndroidPlugin extends Plugin {
         }
     }
 
+    /** Where the download manager saved download `id`, or null. */
+    private File fileOfDownload(long id) {
+        if (id < 0) return null;
+        try (Cursor c = dm().query(new DownloadManager.Query().setFilterById(id))) {
+            if (c == null || !c.moveToFirst()) return null;
+            String local = c.getString(c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI));
+            String p = local == null ? null : Uri.parse(local).getPath();
+            return p == null ? null : new File(p);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * An address for a file that another app can look up and open once it's
+     * granted read access: this app's FileProvider when the app can read the
+     * file (it downloaded it), else the file's MediaStore entry in Downloads.
+     */
+    private static Uri shareable(Context ctx, File f) {
+        if (f.canRead()) {
+            try { return FileProvider.getUriForFile(ctx, ctx.getPackageName() + ".fileprovider", f); } catch (Exception e) { /* below */ }
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            String root = Environment.getExternalStorageDirectory().getAbsolutePath() + "/";
+            File dir = f.getParentFile();
+            String parent = dir == null ? "" : dir.getAbsolutePath();
+            if (parent.startsWith(root)) {
+                String rel = parent.substring(root.length()) + "/";
+                String[] cols = { MediaStore.MediaColumns._ID };
+                try (Cursor c = ctx.getContentResolver().query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cols,
+                        MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.RELATIVE_PATH + "=?",
+                        new String[] { f.getName(), rel }, null)) {
+                    if (c != null && c.moveToFirst()) return ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0));
+                } catch (Exception e) { /* none */ }
+            }
+        }
+        return null;
+    }
+
     /** Whether Downloads/SaveState/<folder>/<fileName> is already on the phone: { id, done }. */
     @PluginMethod
     public void find(PluginCall call) {
@@ -252,12 +297,21 @@ public class NxAndroidPlugin extends Plugin {
         String pkg = call.getString("pkg", "");
         String mode = call.getString("mode", "view");
         Context ctx = getContext();
-        Uri uri = null;
-        try { uri = dm().getUriForDownloadedFile(id); } catch (Exception e) { /* below */ }
-        // An id this phone no longer knows (a reinstall, a cleared download
-        // list): the same file in Downloads/SaveState still plays.
         String folder = safe(call.getString("folder", ""), "");
         String fileName = safe(call.getString("fileName", ""), "");
+        // The game's file: Downloads/SaveState/<folder>/<name>, else wherever
+        // the download manager put download `id`.
+        File target = fileName.isEmpty() ? null : targetOf(folder, fileName);
+        if (target == null || !target.exists()) target = fileOfDownload(id);
+        // Emulators get an address they can read: the download manager's own
+        // (content://downloads/all_downloads/N) can't be looked up by other
+        // apps, so Dolphin said the file "does not exist" (2026-10-21).
+        Uri uri = target != null && target.exists() ? shareable(ctx, target) : null;
+        if (uri == null) {
+            try { uri = dm().getUriForDownloadedFile(id); } catch (Exception e) { /* below */ }
+        }
+        // An id this phone no longer knows (a reinstall, a cleared download
+        // list): the same file in Downloads/SaveState still plays.
         if (uri == null && !fileName.isEmpty()) {
             long byFile = findDone(targetOf(folder, fileName));
             if (byFile >= 0) {
@@ -266,7 +320,6 @@ public class NxAndroidPlugin extends Plugin {
             }
         }
         if (uri == null) {
-            File target = fileName.isEmpty() ? null : targetOf(folder, fileName);
             if (target != null && target.exists() && !pkg.isEmpty()) {
                 // There, but not from this app's downloads (copied in by hand):
                 // open the emulator so it can be chosen from that folder.
@@ -279,7 +332,14 @@ public class NxAndroidPlugin extends Plugin {
             call.reject("The downloaded game isn't on this phone any more. Press Play again to download it.");
             return;
         }
-        String mime = dm().getMimeTypeForDownloadedFile(id);
+        String mime = null;
+        if (target != null) {
+            String ext = MimeTypeMap.getFileExtensionFromUrl(Uri.fromFile(target).toString());
+            if (ext != null && !ext.isEmpty()) mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.toLowerCase());
+        }
+        if (mime == null || mime.isEmpty()) {
+            try { mime = dm().getMimeTypeForDownloadedFile(id); } catch (Exception e) { /* below */ }
+        }
         if (mime == null || mime.isEmpty()) mime = "application/octet-stream";
         PackageManager pm = ctx.getPackageManager();
         JSObject r = new JSObject();
