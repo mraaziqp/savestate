@@ -226,19 +226,19 @@ function InstallStep({ dev, chosen, needsApp, onBack, onNext }) {
             <div className="nxgset-row">
               <div><b>1. Install {appName(dev)} (once)</b>
                 {dev === "linux"
-                  ? <small>Open a terminal and paste this (no sudo needed; it installs into your home folder): <span className="nxa-code" style={{ userSelect: "all", display: "block", marginTop: 6, overflowWrap: "anywhere" }}>{LINUX_CMD()}</span>It adds SaveState to your applications menu and keeps a small game launcher running. This page carries on by itself as soon as it's installed.</small>
+                  ? <small>Download the .deb and open it (Ubuntu, Debian, Mint, Pop!_OS…): it installs like any other app, adds SaveState to your applications menu and starts a small game launcher. This page carries on by itself as soon as it's installed. Another Linux? Paste this in a terminal instead (no sudo): <span className="nxa-code" style={{ userSelect: "all", display: "block", marginTop: 6, overflowWrap: "anywhere" }}>{LINUX_CMD()}</span></small>
                   : <small>Download it, open the file and let it finish (about a minute). It adds SaveState to the Start menu and keeps a small game launcher running so Play works offline. This page carries on by itself as soon as it's installed.</small>}</div>
               {dev === "linux"
-                ? <button className="nxa-btn primary" onClick={() => navigator.clipboard?.writeText(LINUX_CMD()).catch(() => {})}><Icon name="copy" /> Copy</button>
+                ? <div style={{ display: "grid", gap: 6 }}><a className="nxa-btn primary" href="/api/downloads/desktop?platform=linux" download><Icon name="down" /> Download .deb</a><button className="nxa-btn sm" onClick={() => navigator.clipboard?.writeText(LINUX_CMD()).catch(() => {})}><Icon name="copy" /> Copy command</button></div>
                 : <a className="nxa-btn primary" href="/api/downloads/desktop?platform=windows" download><Icon name="down" /> Download</a>}
             </div>
           )}
           {app.status === "old" && (
             <div className="nxgset-row">
               <div><b>Update {appName(dev)}</b>
-                <small>{dev === "linux" ? <>This computer has an older version. Run the install command again (it replaces the old one): <span className="nxa-code" style={{ userSelect: "all", display: "block", marginTop: 6, overflowWrap: "anywhere" }}>{LINUX_CMD()}</span></> : "This PC has an older version. Download and run the installer again (it replaces the old one in place); this page carries on by itself."}</small></div>
+                <small>{dev === "linux" ? <>This computer has an older version. Download the new .deb and open it (it replaces the old one), or run the install command again: <span className="nxa-code" style={{ userSelect: "all", display: "block", marginTop: 6, overflowWrap: "anywhere" }}>{LINUX_CMD()}</span></> : "This PC has an older version. Download and run the installer again (it replaces the old one in place); this page carries on by itself."}</small></div>
               {dev === "linux"
-                ? <button className="nxa-btn primary" onClick={() => navigator.clipboard?.writeText(LINUX_CMD()).catch(() => {})}><Icon name="copy" /> Copy</button>
+                ? <div style={{ display: "grid", gap: 6 }}><a className="nxa-btn primary" href="/api/downloads/desktop?platform=linux" download><Icon name="down" /> Download update</a><button className="nxa-btn sm" onClick={() => navigator.clipboard?.writeText(LINUX_CMD()).catch(() => {})}><Icon name="copy" /> Copy command</button></div>
                 : <a className="nxa-btn primary" href="/api/downloads/desktop?platform=windows" download><Icon name="down" /> Download update</a>}
             </div>
           )}

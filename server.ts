@@ -29079,7 +29079,12 @@ Format as JSON:
   // ── Updates delivery ────────────────────────────────────────────
   // Serves latest.yml + installer artifacts for electron-updater and APK downloads.
   const updatesDir = resolvePortableDir("releases", "updates");
-  app.use('/updates', express.static(updatesDir, { maxAge: 0 }));
+  app.use('/updates', express.static(updatesDir, {
+    maxAge: 0,
+    // A .deb went out as application/octet-stream; with its own type a Linux
+    // desktop offers to install it.
+    setHeaders: (res, file) => { if (/\.deb$/i.test(file)) res.setHeader('Content-Type', 'application/vnd.debian.binary-package'); },
+  }));
 
   // Installer downloads are served from OUTSIDE the web bundle.
   //

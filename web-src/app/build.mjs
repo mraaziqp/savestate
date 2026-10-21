@@ -1117,6 +1117,11 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   dl = patch(dl, "download page: linux installer", 'note:"Installer script (.sh): run it with sh"',
     '{id:"linux",label:"Linux",note:"Use the web app (Install App)"}',
     '{id:"linux",label:"Linux",note:"Installer script (.sh): run it with sh"}');
+  // The .sh opened as a text file on a laptop: Linux gets a .deb package
+  // (scripts/linux/build-deb.sh), served by /api/updates/check like the rest.
+  dl = patch(dl, "download page: linux .deb", 'note:".deb package: open it to install (Ubuntu, Debian, Mint)"',
+    '{id:"linux",label:"Linux",note:"Installer script (.sh): run it with sh"}',
+    '{id:"linux",label:"Linux",note:".deb package: open it to install (Ubuntu, Debian, Mint)"}');
   // The PS Vita app (/api/downloads/vita) had no button here.
   dl = patch(dl, "download page: PS Vita", "PS Vita (VPK)",
     'children:"Not published yet"})})]})]})]})]})})})};export{S as AppDownloadPage};',

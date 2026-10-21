@@ -789,6 +789,21 @@ before, picks folders with zenity or kdialog, never copies the host's
 Windows emulators, and reports `platform` in /health. Tested in WSL Ubuntu
 22.04 (install, run, health, uninstall, the Node download).
 
+**The .deb (scripts/linux/build-deb.sh).** Clicking the .sh on a laptop
+opened it as text, so the download page and Set up games offer
+`savestate_<version>_amd64.deb` (in releases/updates; /api/updates/check
+and /api/downloads/desktop?platform=linux pick the newest). Build it in WSL:
+`wsl -e sh -c "cd /mnt/g/Projects/savestate && sh scripts/linux/build-deb.sh"`
+(about 29 MB: it carries Node.js 22 from nodejs.org, SHA-256 checked). It
+installs to /opt/savestate with `/usr/bin/savestate` (opens the app window,
+starts the launcher), `/usr/bin/savestate-launcher` (one copy per person,
+restarted if it stops, steps aside when an older .sh copy already answers on
+17373), a menu entry and an /etc/xdg/autostart entry. postinst starts the
+launcher inside the installing person's desktop session; prerm stops it.
+The launcher's files stay in `~/.local/share/NexusEmuClient`. The .sh stays
+for other distros. Copying files to the NAS from Git Bash needs
+`MSYS_NO_PATHCONV=1`, or /share/... paths arrive as C:/Program Files/Git/...
+
 ## QNAP NAS host (deploy/qnap)
 
 The TS-431 (192.168.31.201, ARMv7, 480 MB RAM) runs the app natively, not
