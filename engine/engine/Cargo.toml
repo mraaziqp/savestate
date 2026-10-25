@@ -18,13 +18,17 @@ path = "src/main.rs"
 libretro-sys = { path = "../libretro-sys" }
 libloading = "0.8"
 png = "0.17"
-ureq = { version = "2", default-features = false, features = ["native-tls"] }
-native-tls = "0.2"
+ureq = { version = "2", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 md-5 = "0.10"
 lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
 # Windows APIs for the capture bridge (Phase 6). 0.58 links through prebuilt
 # import libraries (windows-targets 0.52), which the GNU toolchain can use;
 # later versions need raw-dylib (see SAVESTATE_ENGINE_SPEC.md 1).
@@ -36,4 +40,7 @@ windows = { version = "=0.58.0", features = [
   "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_Input_KeyboardAndMouse",
   "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "implement",
 ] }
-serde_json = "1"
+
+[target.'cfg(not(windows))'.dependencies]
+# Android and Linux: ureq's own TLS (rustls).
+ureq = { version = "2", default-features = false, features = ["tls"] }

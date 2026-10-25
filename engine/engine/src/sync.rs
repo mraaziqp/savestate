@@ -89,7 +89,10 @@ impl Sync {
         if base.is_empty() || token.is_empty() || game.is_empty() {
             return None;
         }
+        #[cfg_attr(not(windows), allow(unused_mut))] // changed only by Windows code
         let mut b = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(5)).timeout(Duration::from_secs(60));
+        // Windows: the system's TLS (schannel). Elsewhere (Android) ureq's rustls.
+        #[cfg(windows)]
         if let Ok(tls) = native_tls::TlsConnector::new() {
             b = b.tls_connector(Arc::new(tls));
         }

@@ -752,3 +752,86 @@ Phase 6, crash isolation:
 Tests: unit tests 20 passed (adds the ViGEm report mapping). Selftest
 regression: all pass (NES, Game Boy, GBA, Neo Geo local and streamed,
 GameCube; the Neo Geo game without its BIOS refused with the reason).
+
+## 14. Phase 7 plan: every console inside SaveState, no other emulator apps (2026-10-25)
+
+The owner asked (2026-10-25) to build all emulators into the app so that no
+other emulator is needed. Where things stand:
+
+| Device | Today | Gap |
+|---|---|---|
+| Windows PC | The engine runs libretro cores inside the page; PS2 and PSP also go through it (with the standalone emulator as fallback); PS3, Switch, Wii U and Xbox run in their standalone emulators, installed by the launcher and captured into the page (Phase 6) | Those four have no libretro core, so their emulators stay separate programs, installed and driven by SaveState |
+| Linux PC | No engine (Windows only); standalone emulators from Flathub or official AppImages | The engine, built for Linux |
+| Android phone or tablet | Retro consoles in the browser player; PSP, PS2, GameCube, Wii, 3DS, Dreamcast and Saturn need separate apps (PPSSPP, NetherSX2, Dolphin, Azahar, Flycast...) | The engine inside the Android app, with cores for every console |
+| Browser anywhere | EmulatorJS for the retro consoles | (stays as is) |
+
+The Android gap is the one the owner hits. The libretro buildbot publishes
+arm64 Android builds of the cores needed (checked 2026-10-25): ppsspp,
+dolphin, armsx2 (PS2), citra (3DS), cemu (Wii U), flycast, yabasanshiro,
+swanstation, pcsx_rearmed, parallel_n64, melonds/melondsds, mgba, gambatte,
+snes9x, bsnes, mesen, nestopia, genesis_plus_gx, picodrive, fbneo,
+mame2003_plus, opera, stella, handy.
+
+### 14.1 Design (Android)
+
+The engine already splits into portable parts (loader, core callbacks,
+options, VFS streaming, BIOS lookup, sessions, saves, rewind, timing:
+about 6,000 lines with no Windows code) and Windows parts (hw.rs's WGL
+context, the capture bridge, ViGEm, XInput). For Android:
+
+- **Library:** the engine crate also builds as a `cdylib` for
+  `aarch64-linux-android` (Android NDK, Rust target), with the Windows
+  modules behind `cfg(windows)`. The APK carries it as `libsavestate_engine.so`.
+- **Picture:** a full-screen `GameActivity` with a `SurfaceView`; the engine
+  makes an EGL/GLES 3 context on it (hardware cores like Dolphin, PPSSPP,
+  ARMSX2 and Citra draw straight to it) and presents software frames as a
+  texture. No WebSocket frames on the phone: the picture never leaves the GPU.
+- **Sound:** AAudio (Android 8.1+), fed by the engine's rate-control buffer.
+- **Controls:** the touch overlay drawn natively over the picture (layouts
+  per console, like the browser player's); Bluetooth and USB controllers
+  through Android's InputDevice, mapped like the engine's native pads.
+- **Cores:** downloaded on first use from the buildbot (official), kept in
+  the app's own storage, loaded with dlopen (allowed for an app's private
+  files). BIOS from the person's own BIOS folder, as on the PC.
+- **Games:** the file already downloaded to Downloads/SaveState (PhonePlay's
+  download), so Play becomes: download once, then the game opens inside
+  SaveState. The external apps stay as a choice, no longer a requirement.
+- **Saves:** the same save endpoints as the PC engine (Phase 5), so a game
+  started on the PC carries on on the phone.
+
+### 14.2 Steps
+
+| Step | Delivers | Proven by |
+|---|---|---|
+| 7.1 | The engine's portable core builds for Android (NDK, target, `cfg(windows)` gates) and still builds and passes its tests on Windows | `cargo build --target aarch64-linux-android` succeeds; Windows unit tests and selftest regression pass |
+| 7.2 | Android host: EGL/GLES on a SurfaceView, AAudio, JNI entry, `GameActivity`, core download | A Game Boy game and a PSP game play inside the SaveState app on a phone |
+| 7.3 | Touch overlay per console, controllers, pause menu, save states, saves to the host | Play, save, close, reopen on the PC and carry on |
+| 7.4 | Heavy cores: dolphin, armsx2, citra, cemu (performance settings per device) | GameCube and PS2 play on a mid-range phone |
+| 7.5 | PhonePlay switches to "Play here" by default; the external apps become an option | The phone screenshots' flows (download, then play) work with no other app installed |
+| 7.6 | The engine for Linux (x86_64): GLX/EGL context, ALSA/Pulse sound | A Linux laptop plays a GameCube game inside SaveState |
+
+Each step stops for the owner's approval, as before. Honest limits: PS3,
+Switch and Xbox have no Android cores; Wii U (cemu) and PS2 (armsx2) on
+Android are new cores and heavy, so they may run slowly on some phones;
+streaming from the PC (Phase 6, `?play=CODE`) covers what a phone can't run.
+
+### 14.3 Step 7.1 results (2026-10-25)
+
+- `engine\build-android.cmd` builds `libsavestate_engine.so` (ELF 64-bit,
+  ARM64, shared library; 27 MB debug) with NDK 27.3.13750724 and Rust's
+  `aarch64-linux-android` target on the GNU toolchain, as a cdylib, with no
+  warnings. Android API 26 (AAudio's minimum).
+- Windows-only modules (capture, hw, serve, vigem, ws) are behind
+  `cfg(windows)`; `hw_none.rs` stands in for the GPU context until step 7.2
+  (software cores run; a core asking for OpenGL is told it isn't available
+  yet). XInput loading is Windows-only. Frame pacing on Linux/Android is a
+  plain sleep plus the same 400 us spin. TLS: Windows keeps the system's
+  (schannel); elsewhere ureq's rustls. On arm64 the engine reports NEON and
+  ASIMD to cores (RETRO_SIMD_NEON, RETRO_SIMD_ASIMD added to libretro-sys).
+- Windows is unchanged: unit tests 20 passed; selftest regression all pass
+  (NES, Game Boy, GBA, GBA from the host, Neo Geo local and streamed twice,
+  GameCube; the Neo Geo game without its BIOS refused with the reason).
+  In the first regression run Dolphin hung in its own save-state code (the
+  known spin, see 13); it passed the next five runs.
+- Next: step 7.2 (EGL/GLES on a SurfaceView, AAudio, JNI, GameActivity,
+  core download) after the owner's approval.

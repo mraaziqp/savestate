@@ -82,7 +82,10 @@ pub fn core_path(url: &str) -> String {
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
+        #[cfg_attr(not(windows), allow(unused_mut))] // changed only by Windows code
         let mut b = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).timeout_read(Duration::from_secs(60));
+        // Windows: the system's TLS (schannel). Elsewhere (Android) ureq's rustls.
+        #[cfg(windows)]
         if let Ok(tls) = native_tls::TlsConnector::new() {
             b = b.tls_connector(Arc::new(tls));
         }

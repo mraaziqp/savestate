@@ -278,7 +278,9 @@ pub struct Native {
 
 impl Native {
     pub fn open() -> Self {
+        #[cfg_attr(not(windows), allow(unused_mut))] // changed only by Windows code
         let mut n = Native { _lib: None, get: None, set: None, guide: false, slots: std::array::from_fn(|_| Slot { connected: false, checked: None, pad: XInputGamepad::default(), chords: Chords::default(), rumble: (0, 0) }), layout: Layout::Position, nav: 0 };
+        #[cfg(windows)]
         for name in ["xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"] {
             let Ok(lib) = (unsafe { libloading::Library::new(name) }) else { continue };
             unsafe {
