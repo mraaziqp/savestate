@@ -116,10 +116,15 @@ get "$BASE_URL/pwa-512x512.png" "$DIR/savestate.png" 2>/dev/null || true
 cat > "$DIR/open.sh" <<EOF
 #!/bin/sh
 # Opens SaveState in its own window when a Chromium browser is installed.
+URL="$BASE_URL"
+[ -s "$DIR/preferred-host-url.txt" ] && URL=\$(cat "$DIR/preferred-host-url.txt")
+PROFILE="$DIR/app-profile"
+mkdir -p "\$PROFILE"
+FLAGS="--app=\$URL --user-data-dir=\$PROFILE --class=SaveState --name=SaveState --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:17373,http://127.0.0.1:17374 --enable-features=InsecurePrivateNetworkRequestsAllowed"
 for b in google-chrome google-chrome-stable chromium chromium-browser microsoft-edge brave-browser; do
-  if command -v "\$b" >/dev/null 2>&1; then exec "\$b" --app="$BASE_URL"; fi
+  if command -v "\$b" >/dev/null 2>&1; then exec "\$b" \$FLAGS; fi
 done
-exec xdg-open "$BASE_URL"
+exec xdg-open "\$URL"
 EOF
 chmod +x "$DIR/open.sh"
 cat > "$APPS/savestate.desktop" <<EOF

@@ -240,7 +240,19 @@ function FreeSpace({ local, jobs, suggestions, remote, onAction, startOffload })
           ))}
         </div>
       </>}
-      {roms.length > 0 && <p className="nxa-faint" style={{ fontSize: 12, marginTop: 10 }}>{roms.length} ROM folder(s) aren't backed up yet; see "Keep a copy of everything on Drive" below.</p>}
+      {roms.length > 0 && <>
+        <p className="nxa-label" style={{ marginTop: 14 }}>ROM & GAME FOLDERS TO BACK UP & FREE ON THIS PC</p>
+        <div style={{ display: "grid", gap: 6 }}>
+          {roms.map((x) => (
+            <div key={x.source} className="nxa-file" style={{ alignItems: "center" }}>
+              <Icon name="chip" />
+              <div className="nxa-grow"><b>{x.label}</b><small>Uploads to {x.dest} on Drive, verifies checksums, and safely frees space on this PC</small></div>
+              <button className="nxa-btn sm primary" onClick={() => upload(x, true)}>Upload & free</button>
+              <button className="nxa-btn sm" onClick={() => upload(x, false)}>Upload only</button>
+            </div>
+          ))}
+        </div>
+      </>}
     </div>
   );
 }

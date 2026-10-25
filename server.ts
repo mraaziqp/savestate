@@ -44,6 +44,20 @@ import { createUploadBatches } from "./server/upload-batches.ts";
 import { initReceipts, receipt, addLiveSource } from "./server/receipts.ts";
 import { createIncompleteFiles } from "./server/incomplete.ts";
 
+// A public /vita page (2026-10-22/23) signed a 30-day host-admin token,
+// userId "vita-device", for every visitor and put it in the page. Those tokens
+// are refused everywhere: every check in the server goes through jwt.verify.
+{
+  const verify = jwt.verify.bind(jwt) as (...a: any[]) => any;
+  (jwt as any).verify = (...args: any[]) => {
+    const payload = verify(...args);
+    if (payload && typeof payload === "object" && (payload as any).userId === "vita-device") {
+      throw new jwt.JsonWebTokenError("token revoked");
+    }
+    return payload;
+  };
+}
+
 // ── Secret encryption at rest (AES-256-GCM) ─────────────────────────────────
 // Third-party credentials — Sonarr/Radarr keys, Steam Web API keys, ecosystem
 // tokens — were stored as plaintext in .nexus-data/*.json and in Neon. Anyone
@@ -6253,7 +6267,7 @@ async function startServer() {
     streamingNow: () => openStreams > 0,
     isIncomplete: (p: string) => incompleteFiles.get(p) != null,
     suggestions: async () => {
-      const out: Array<{ label: string; source: string; kind: "roms" | "music" | "movies" | "files"; dest: string }> = [];
+      const out: Array<{ label: string; source: string; kind: "roms" | "music" | "movies" | "files"; dest: string; bytes?: number }> = [];
       const vc = await getVaultConfig().catch(() => null);
       const romDest = (p: string) => {
         const n = p.toLowerCase();
@@ -6264,13 +6278,29 @@ async function startServer() {
       };
       const vaultRoot = vc?.root_path ? path.resolve(vc.root_path).toLowerCase() : "";
       // NEXUS_LOCAL_ROM_DIRS: ROM folders on this PC that the library does not scan itself.
-      const romRoots = [...(vc ? getExtraRoots(vc) : []), ...(process.env.NEXUS_LOCAL_ROM_DIRS ?? "E:\\ROMS").split(/[;,]/).map((p) => p.trim()).filter(Boolean)];
-      for (const r of [...new Set(romRoots.map((p) => path.resolve(p)))]) {
+      const candidateRoots = [
+        ...(vc ? getExtraRoots(vc) : []),
+        ...(process.env.NEXUS_LOCAL_ROM_DIRS ?? "E:\\ROMS;K:\\retroarch\\ROMS").split(/[;,]/).map((p) => p.trim()).filter(Boolean),
+        "K:\\retroarch\\ROMS", "K:\\Emulation", "E:\\ROMS", "C:\\RetroArch", "D:\\ROMS", "G:\\Roms", "J:\\retroarch\\ROMS"
+      ];
+      for (const r of [...new Set(candidateRoots.map((p) => path.resolve(p)))]) {
+        if (!(await fsAccess(r).then(() => true, () => false))) continue; // async: a missing drive letter must not stall the server
         // ROM folders already inside the Drive library need no upload.
         if (vaultRoot && r.toLowerCase().startsWith(vaultRoot)) continue;
-        out.push({ label: `ROMs: ${r}`, source: r, kind: "roms", dest: `NexusArchive/roms/${romDest(r)}` });
+        let bytes = 0;
+        try {
+          const files = await readdir(r, { withFileTypes: true, recursive: true }).catch(() => []);
+          for (const f of files.slice(0, 5000)) {
+            if (f.isFile()) {
+              const st = await stat(path.join((f as any).parentPath || r, f.name)).catch(() => null);
+              if (st) bytes += st.size;
+            }
+          }
+        } catch {}
+        const gb = bytes > 0 ? ` (${(bytes / 1024 ** 3).toFixed(1)} GB)` : "";
+        out.push({ label: `ROMs: ${r}${gb}`, source: r, kind: "roms", dest: `NexusArchive/roms/${romDest(r)}`, bytes });
       }
-      for (const m of mediaFolders) out.push({ label: m.label, source: m.source, kind: m.kind, dest: m.dest });
+      for (const m of mediaFolders) out.push({ label: m.label, source: m.source, kind: m.kind, dest: m.dest, bytes: m.bytes });
       for (const r of musicRoots()) {
         if (/^[A-Za-z]:\\Music$/i.test(r)) out.push({ label: `Music: ${r}`, source: r, kind: "music", dest: `NexusArchive/music/${r.slice(0, 1).toUpperCase()}` });
       }
@@ -9944,12 +9974,14 @@ async function startServer() {
     const roots: string[] = [];
     const home = process.env.HOME ?? `/home/${process.env.USER ?? 'user'}`;
 
+    const winDrives = ['C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
     const candidates = process.platform === 'win32'
       ? [
           'C:\\Program Files (x86)\\Steam',
           'C:\\Program Files\\Steam',
           path.join(process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)', 'Steam'),
           path.join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Steam'),
+          ...winDrives.flatMap(d => [`${d}:\\SteamLibrary`, `${d}:\\Steam`]),
         ]
       : [
           // Native Linux Steam
@@ -9964,7 +9996,11 @@ async function startServer() {
         ];
 
     for (const c of candidates) {
-      try { await fsAccess(c); if (!roots.includes(c)) roots.push(c); } catch {}
+      // Async with a time limit: existsSync over every drive letter (I: is
+      // Google Drive for Desktop) froze the whole server for 10-22 s at start.
+      if (roots.includes(c)) continue;
+      const there = await Promise.race([fsAccess(c).then(() => true, () => false), new Promise<boolean>((r) => setTimeout(() => r(false), 2000))]);
+      if (there) roots.push(c);
     }
 
     // Parse libraryfolders.vdf from each root for additional library drives
@@ -10213,10 +10249,57 @@ async function startServer() {
     return games;
   }
 
+  async function scanStandalonePcGames(): Promise<PCGame[]> {
+    const games: PCGame[] = [];
+    const candidates = [
+      {
+        id: 'pc:cod-waw-t4',
+        title: 'Call of Duty: World at War (Plutonium T4)',
+        dir: 'K:\\Game\\pluto_t4_full_game',
+        exe: 'K:\\Game\\pluto_t4_full_game\\plutonium.exe',
+        appId: '10090',
+        steamAppId: 10090,
+      },
+      {
+        id: 'pc:cod-bo2-t6',
+        title: 'Call of Duty: Black Ops II (Plutonium T6)',
+        dir: 'K:\\New folder\\pluto_t6_full_game',
+        exe: 'K:\\Game\\pluto_t4_full_game\\plutonium.exe',
+        appId: '202970',
+        steamAppId: 202970,
+      }
+    ];
+
+    for (const c of candidates) {
+      try {
+        if (existsSync(c.dir)) {
+          const st = existsSync(c.exe) ? statSync(c.exe) : null;
+          games.push({
+            id: c.id,
+            title: c.title,
+            source: 'folder',
+            appId: c.appId,
+            steamAppId: c.steamAppId,
+            installDir: c.dir,
+            executablePath: existsSync(c.exe) ? c.exe : undefined,
+            iconUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${c.appId}/header.jpg`,
+            artUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${c.appId}/library_600x900.jpg`,
+            heroUrl: `https://cdn.cloudflare.steamstatic.com/steam/apps/${c.appId}/library_hero.jpg`,
+            installed: true,
+            sizeOnDisk: st?.size ?? 1024 * 1024 * 1024,
+            driveLabel: 'K:',
+            installDrive: 'K:\\',
+          });
+        }
+      } catch {}
+    }
+    return games;
+  }
+
   async function getPcGamesLibrary(force = false): Promise<PCGame[]> {
     if (!force && pcGamesCache.length > 0 && Date.now() - pcGamesCacheTime < PC_CACHE_TTL) return pcGamesCache;
-    const [r0, r1, r2, r3, r4, r5] = await Promise.allSettled([
-      scanSteamGames(), scanEpicGames(), scanGogGames(), scanXboxGames(), scanLutrisGames(), scanHeroicGames(),
+    const [r0, r1, r2, r3, r4, r5, r6] = await Promise.allSettled([
+      scanSteamGames(), scanEpicGames(), scanGogGames(), scanXboxGames(), scanLutrisGames(), scanHeroicGames(), scanStandalonePcGames(),
     ]);
     const all: PCGame[] = [
       ...(r0.status === 'fulfilled' ? r0.value : []),
@@ -10225,6 +10308,7 @@ async function startServer() {
       ...(r3.status === 'fulfilled' ? r3.value : []),
       ...(r4.status === 'fulfilled' ? r4.value : []),
       ...(r5.status === 'fulfilled' ? r5.value : []),
+      ...(r6.status === 'fulfilled' ? r6.value : []),
     ];
     const order: Record<string, number> = { steam: 0, epic: 1, gog: 2, heroic: 3, lutris: 4, xbox: 5, folder: 6 };
     all.sort((a, b) => ((order[a.source] ?? 7) - (order[b.source] ?? 7)) || a.title.localeCompare(b.title));
@@ -18230,17 +18314,50 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.post("/api/hosts/invites", express.json(), async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
-    const { tier = 'free', label = '', max_uses, expires_hours } = req.body as { tier?: string; label?: string; max_uses?: number; expires_hours?: number };
+    // An invite grants a plan to whoever redeems it: only the host's admins
+    // make them. Any signed-in member could create one for any plan.
+    const inviter = await access.callerOf(req);
+    if (!inviter.admin) return res.status(403).json({ error: "Only the host's admins can create invite links." });
+    const { tier = 'free', label = '', max_uses, expires_hours, expires_in_hours, custom_code, wording } = req.body as {
+      tier?: string; label?: string; max_uses?: number; expires_hours?: number; expires_in_hours?: number;
+      custom_code?: string; wording?: string;
+    };
     const validTiers = tiers.tierIds();
     if (!validTiers.includes(tier)) return res.status(400).json({ error: "Invalid tier" });
-    const expiresAt = expires_hours && expires_hours > 0
-      ? new Date(Date.now() + expires_hours * 3600 * 1000).toISOString()
+    const hours = Number(expires_in_hours || expires_hours || 0);
+    const expiresAt = hours > 0
+      ? new Date(Date.now() + hours * 3600 * 1000).toISOString()
       : null;
-    const row = await pool.query(
-      "INSERT INTO host_invite_links (owner_id, tier, label, max_uses, expires_at) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-      [auth.userId, tier, label.slice(0,100), max_uses ? Math.max(1, Number(max_uses)) : null, expiresAt]
-    ).then(r => r.rows[0]).catch((e: Error) => { throw e; });
-    res.json(row);
+
+    let chosenCode: string | null = null;
+    const rawWording = String(wording || custom_code || '').trim().toLowerCase();
+    if (rawWording) {
+      let slug = rawWording.replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      if (slug.length > 60) slug = slug.slice(0, 60).replace(/-$/, '');
+      if (slug) {
+        if (!slug.includes('savestate')) {
+          slug = `savestate-${slug}`;
+        }
+        const existing = await pool.query("SELECT id FROM host_invite_links WHERE LOWER(code)=LOWER($1) LIMIT 1", [slug]).then(r => r.rows[0]).catch(() => null);
+        if (existing) {
+          return res.status(409).json({ error: `Invite link 'savestate' name '${slug}' is already in use. Please pick another name or wording.` });
+        }
+        chosenCode = slug;
+      }
+    }
+
+    const sql = chosenCode
+      ? "INSERT INTO host_invite_links (owner_id, code, tier, label, max_uses, expires_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *"
+      : "INSERT INTO host_invite_links (owner_id, tier, label, max_uses, expires_at) VALUES ($1,$2,$3,$4,$5) RETURNING *";
+    const params = chosenCode
+      ? [auth.userId, chosenCode, tier, label.slice(0, 100), max_uses ? Math.max(1, Number(max_uses)) : null, expiresAt]
+      : [auth.userId, tier, label.slice(0, 100), max_uses ? Math.max(1, Number(max_uses)) : null, expiresAt];
+
+    const row = await pool.query(sql, params).then(r => r.rows[0]).catch((e: Error) => { throw e; });
+    const hostHeader = req.get("host") || "localhost:3000";
+    const proto = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() || req.protocol || "http";
+    const inviteUrl = `${proto}://${hostHeader}/invite/${row.code}`;
+    res.json({ ...row, invite_url: inviteUrl });
   });
 
   app.delete("/api/hosts/invites/:id", async (req, res) => {
@@ -18255,10 +18372,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const row = await pool.query(
       `SELECT hil.id, hil.code, hil.tier, hil.label, hil.use_count, hil.max_uses, hil.expires_at,
-              u.username as host_username, u.display_name as host_display_name
+              u.username as host_username, u.display_name as host_display_name,
+              hp.name as host_profile_name, hp.description as host_description, hp.icon as host_icon
        FROM host_invite_links hil
        JOIN users u ON u.id = hil.owner_id
-       WHERE hil.code=$1`,
+       LEFT JOIN host_profiles hp ON hp.owner_id = hil.owner_id
+       WHERE LOWER(hil.code)=LOWER($1)`,
       [req.params.code]
     ).then(r => r.rows[0]).catch(() => null);
     if (!row) return res.status(404).json({ error: "Invite not found or expired" });
@@ -18272,7 +18391,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
     const row = await pool.query(
-      "SELECT * FROM host_invite_links WHERE code=$1",
+      "SELECT * FROM host_invite_links WHERE LOWER(code)=LOWER($1)",
       [req.params.code]
     ).then(r => r.rows[0]).catch(() => null);
     if (!row) return res.status(404).json({ error: "Invite not found" });
@@ -19299,9 +19418,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         }
         const tooBig = bytes > STANDALONE_EMULATOR_MAX_BYTES;
         if (!tooBig) {
+          const tHashStart = Date.now();
           for (const rel of sized) {
-            const h = await sha256File(path.join(dir, ...rel.split('/')));
-            if (h) hashes[rel] = h;
+            const filePath = path.join(dir, ...rel.split('/'));
+            if (Date.now() - tHashStart > 3000) {
+              const st = await stat(filePath).catch(() => null);
+              hashes[rel] = st ? `fast-${st.size}-${Math.round(st.mtimeMs)}` : 'present';
+            } else {
+              const h = await sha256File(filePath);
+              if (h) hashes[rel] = h;
+            }
           }
         }
         if (tooBig) {
@@ -29420,6 +29546,7 @@ Format as JSON:
     app.get(/^(?!\/api\/).*/, (req, res) => {
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, noimageindex');
+
       // A request for a build artefact that no longer exists must 404, not fall
       // through to index.html. A client pinned to an old service worker asks for
       // e.g. /assets/MultiplayerHub-BzdOaHJW.js; answering "200 text/html" made

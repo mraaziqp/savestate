@@ -4,7 +4,8 @@
 # The .sh installer (/api/client-launcher/linux-installer) opened as a text
 # file when clicked on a laptop; a package installs like any other app.
 #
-#   sh scripts/linux/build-deb.sh [host-url]     (in WSL or on Linux; needs dpkg-deb, curl, xz)
+#   sh scripts/linux/build-deb.sh [host-url]     (Linux/WSL with dpkg-deb, or Git Bash on
+#                                                 Windows: then scripts/linux/pack-deb.mjs packs it)
 #
 # It holds the game launcher (client-launcher.cjs) and Node.js 22 from
 # nodejs.org (checked against its published SHA-256), so nothing else has to
@@ -45,7 +46,8 @@ cp "$ROOT/client-launcher.cjs" "$PKG/opt/savestate/client-launcher.cjs"
 printf '%s\n' "$HOST_URL" > "$PKG/opt/savestate/host-url"
 printf '%s\n' "$VERSION" > "$PKG/opt/savestate/version"
 cp "$ROOT/dist/pwa-512x512.png" "$PKG/usr/share/icons/hicolor/512x512/apps/savestate.png"
-"$WORK/node/bin/node" -e "new (require('vm').Script)(require('fs').readFileSync(process.argv[1],'utf8'))" "$PKG/opt/savestate/client-launcher.cjs"
+CHECK_NODE="$WORK/node/bin/node"; [ "$(uname -s)" = Linux ] || CHECK_NODE=node   # the Linux build can't run on Windows
+"$CHECK_NODE" -e "new (require('vm').Script)(require('fs').readFileSync(process.argv[1],'utf8'))" "$PKG/opt/savestate/client-launcher.cjs"
 
 cat > "$PKG/usr/bin/savestate-launcher" <<'EOF'
 #!/bin/sh
@@ -70,10 +72,15 @@ cat > "$PKG/usr/bin/savestate" <<'EOF'
 #!/bin/sh
 # Opens SaveState in its own window (a Chromium browser) or the default
 # browser, and makes sure the game launcher is running.
-URL=$(cat /opt/savestate/host-url)
+URL=$(cat /opt/savestate/host-url 2>/dev/null || echo "https://savestate.co.za")
+DIR="${XDG_DATA_HOME:-$HOME/.local/share}/NexusEmuClient"
+[ -s "$DIR/preferred-host-url.txt" ] && URL=$(cat "$DIR/preferred-host-url.txt")
 nohup /usr/bin/savestate-launcher >/dev/null 2>&1 &
+PROFILE="$DIR/app-profile"
+mkdir -p "$PROFILE"
+FLAGS="--app=$URL --user-data-dir=$PROFILE --class=SaveState --name=SaveState --unsafely-treat-insecure-origin-as-secure=http://127.0.0.1:17373,http://127.0.0.1:17374 --enable-features=InsecurePrivateNetworkRequestsAllowed"
 for b in google-chrome google-chrome-stable chromium chromium-browser microsoft-edge brave-browser; do
-  if command -v "$b" >/dev/null 2>&1; then exec "$b" --app="$URL"; fi
+  if command -v "$b" >/dev/null 2>&1; then exec "$b" $FLAGS; fi
 done
 exec xdg-open "$URL"
 EOF
@@ -163,5 +170,10 @@ EOF
 chmod 755 "$PKG/DEBIAN/prerm" "$PKG/DEBIAN/postinst"
 
 mkdir -p "$(dirname "$OUT")"
-dpkg-deb --root-owner-group -Zxz --build "$PKG" "$OUT" >/dev/null
+if command -v dpkg-deb >/dev/null 2>&1; then
+  dpkg-deb --root-owner-group -Zxz --build "$PKG" "$OUT" >/dev/null
+else
+  # Windows (Git Bash) without WSL: pack it in Node, permissions set there.
+  node "$ROOT/scripts/linux/pack-deb.mjs" "$PKG" "$OUT" >/dev/null
+fi
 echo "Built $OUT ($(du -h "$OUT" | awk '{print $1}')), $(basename "$NODE_FILE" .tar.xz)"

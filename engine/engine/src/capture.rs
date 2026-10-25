@@ -399,6 +399,9 @@ fn capture(cfg: CaptureConfig, shared: Arc<Shared>, cmd_rx: Receiver<Command>, r
     }
     refocus(browser);
     let mut bus = Bus::open();
+    let mut native = crate::input::Native::open();
+    let mut hotkeys = Vec::new();
+    let mut native_count = 0usize;
     let mut crop = client_crop(window).unwrap_or((0, 0, 0, 0));
     let info = json!({
         "capture": true,
@@ -410,7 +413,7 @@ fn capture(cfg: CaptureConfig, shared: Arc<Shared>, cmd_rx: Receiver<Command>, r
         "height": crop.3,
         "aspect": if crop.3 > 0 { crop.2 as f64 / crop.3 as f64 } else { 16.0 / 9.0 },
         "rotation": 0,
-        "nativeControllers": true,
+        "nativeControllers": native.available(),
         "virtualControllers": bus.is_some(),
     });
     shared.set_hello(&info);
@@ -455,6 +458,17 @@ fn capture(cfg: CaptureConfig, shared: Arc<Shared>, cmd_rx: Receiver<Command>, r
             break;
         }
         if let Some(b) = bus.as_mut() {
+            hotkeys.clear();
+            let pads = native.poll(&mut hotkeys);
+            if pads.len() != native_count {
+                native_count = pads.len();
+                shared.text(json!({ "type": "pads", "native": native_count }));
+            }
+            for (port, pad) in pads.iter().enumerate() {
+                if let Some(p) = pad {
+                    b.send(port, p);
+                }
+            }
             b.tick();
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -527,6 +541,7 @@ fn capture(cfg: CaptureConfig, shared: Arc<Shared>, cmd_rx: Receiver<Command>, r
     }
 
     crate::info!("capture: closing {}", cfg.emulator);
+    native.quiet();
     drop(cap);
     drop(bus.take());
     close_emulator(&mut child, Some(window));

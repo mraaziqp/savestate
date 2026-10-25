@@ -127,6 +127,7 @@ function Sheet({ game, onClose }) {
   }, [installed, sys]);
 
   async function start() {
+    window.__nxRequestStoragePersistence?.();
     setMsg(null);
     // Ask the host first, so a refusal reads as a sentence, not "failed".
     try {
@@ -142,6 +143,7 @@ function Sheet({ game, onClose }) {
       return;
     }
     try {
+      native("pruneDownloads").catch(() => {});
       const r = await native("download", { url, token: token(), folder, fileName: name, title: game.title });
       remember(game.id, r.id);
       setDl({ id: r.id, status: r.done ? "done" : "waiting", path: r.path });
@@ -251,7 +253,7 @@ if (typeof window !== "undefined" && !window.nxSaveBlob) {
   window.nxSaveBlob = async (href, fileName) => {
     try {
       const blob = await fetch(href).then((r) => r.blob());
-      if (blob.size > 200 * 1024 * 1024) throw new Error("too big to save from here");
+      if (blob.size > 200 * 1024 * 1024) throw new Error("too big to save from here"); // read whole into memory as base64: more than this crashed the app
       const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(",")[1] ?? ""); fr.onerror = rej; fr.readAsDataURL(blob); });
       const r = await native("saveData", { fileName, data, first: true });
       toast(`Saved ${fileName} to ${r.path}`);

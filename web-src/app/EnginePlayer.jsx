@@ -465,7 +465,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
     const sent = [];
     const pollPads = (now) => {
       const all = navigator.getGamepads ? [...navigator.getGamepads()] : [];
-      const engineReads = !!S.info?.nativeControllers;
+      const engineReads = !!S.info?.nativeControllers && S.nativeCount > 0;
       const mine = all.filter((g) => g && g.connected && !(engineReads && ENGINE_PAD.test(g.id)));
       const map = S.labels ? PAD_LABELS : PAD_POSITION;
       const ports = new Map();
@@ -541,7 +541,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         if (sent[port] !== key) { sent[port] = key; send({ t: "in", p: port, b, a: p.a, g: p.tr }); }
       }
     };
-    const onConnect = (e) => { if (!(S.info?.nativeControllers && ENGINE_PAD.test(e.gamepad.id))) flash(`Controller connected: ${e.gamepad.id.split("(")[0].trim().slice(0, 40)}`); };
+    const onConnect = (e) => { if (!(S.info?.nativeControllers && S.nativeCount > 0 && ENGINE_PAD.test(e.gamepad.id))) flash(`Controller connected: ${e.gamepad.id.split("(")[0].trim().slice(0, 40)}`); };
     window.addEventListener("gamepadconnected", onConnect);
 
     // Keys belong to the game while it's open: caught first (capture) and kept

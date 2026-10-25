@@ -556,11 +556,19 @@ function getEmulatorPath(platform) {
     path.join(home, 'Applications', 'RetroArch.app', 'Contents', 'MacOS', 'RetroArch'),
   ] : [
     cfg.emulators?.retroarch,
+    ...inEmuDirs('RetroArch', 'squashfs-root', 'usr', 'bin', 'retroarch'),
+    ...inEmuDirs('RetroArch', 'retroarch'),
+    ...inEmuDirs('RetroArch', 'RetroArch-Linux-x86_64.AppImage'),
+    ...inEmuDirs('RetroArch', 'RetroArch.AppImage'),
+    path.join(emuRoot, 'RetroArch', 'squashfs-root', 'usr', 'bin', 'retroarch'),
+    path.join(emuRoot, 'RetroArch', 'retroarch'),
+    path.join(emuRoot, 'RetroArch', 'RetroArch-Linux-x86_64.AppImage'),
+    path.join(emuRoot, 'RetroArch', 'RetroArch.AppImage'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.libretro.RetroArch'),
     '/usr/bin/retroarch',
     '/usr/local/bin/retroarch',
     '/snap/bin/retroarch',
     '/var/lib/flatpak/exports/bin/org.libretro.RetroArch',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.libretro.RetroArch'),
   ]);
 
   const dolphin = firstExisting(IS_WIN ? [
@@ -576,10 +584,16 @@ function getEmulatorPath(platform) {
     '/Applications/Dolphin.app/Contents/MacOS/Dolphin',
   ] : [
     cfg.emulators?.dolphin,
+    ...inEmuDirs('Dolphin', 'dolphin-emu'),
+    ...inEmuDirs('Dolphin', 'Dolphin.AppImage'),
+    ...inEmuDirs('Dolphin', 'dolphin.AppImage'),
+    path.join(emuRoot, 'Dolphin', 'dolphin-emu'),
+    path.join(emuRoot, 'Dolphin', 'Dolphin.AppImage'),
+    path.join(emuRoot, 'Dolphin', 'dolphin.AppImage'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.DolphinEmu.dolphin-emu'),
     '/usr/bin/dolphin-emu',
     '/snap/bin/dolphin-emulator',
     '/var/lib/flatpak/exports/bin/org.DolphinEmu.dolphin-emu',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.DolphinEmu.dolphin-emu'),
   ]);
 
   const pcsx2 = (IS_WIN ? bestPcsx2 : firstExisting)(IS_WIN ? [
@@ -595,10 +609,19 @@ function getEmulatorPath(platform) {
     '/Applications/PCSX2.app/Contents/MacOS/PCSX2',
   ] : [
     cfg.emulators?.pcsx2,
+    ...inEmuDirs('PCSX2', 'pcsx2-qt'),
+    ...inEmuDirs('PCSX2', 'pcsx2'),
+    ...inEmuDirs('PCSX2', 'PCSX2.AppImage'),
+    ...inEmuDirs('PCSX2', 'pcsx2.AppImage'),
+    path.join(emuRoot, 'PCSX2', 'pcsx2-qt'),
+    path.join(emuRoot, 'PCSX2', 'pcsx2'),
+    path.join(emuRoot, 'PCSX2', 'PCSX2.AppImage'),
+    path.join(emuRoot, 'PCSX2', 'pcsx2.AppImage'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'net.pcsx2.PCSX2'),
     '/usr/bin/pcsx2',
+    '/usr/bin/pcsx2-qt',
     '/snap/bin/pcsx2',
     '/var/lib/flatpak/exports/bin/net.pcsx2.PCSX2',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'net.pcsx2.PCSX2'),
   ]);
 
   const ppsspp = firstExisting(IS_WIN ? [
@@ -608,10 +631,16 @@ function getEmulatorPath(platform) {
     'C:\\Program Files\\PPSSPP\\PPSSPPWindows64.exe',
   ] : [
     cfg.emulators?.ppsspp,
+    ...inEmuDirs('PPSSPP', 'PPSSPPSDL'),
+    ...inEmuDirs('PPSSPP', 'PPSSPP.AppImage'),
+    ...inEmuDirs('PPSSPP', 'ppsspp'),
+    path.join(emuRoot, 'PPSSPP', 'PPSSPPSDL'),
+    path.join(emuRoot, 'PPSSPP', 'PPSSPP.AppImage'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.ppsspp.PPSSPP'),
     '/usr/bin/ppsspp',
+    '/usr/bin/PPSSPPSDL',
     '/snap/bin/ppsspp-emu.ppsspp-sdl',
     '/var/lib/flatpak/exports/bin/org.ppsspp.PPSSPP',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'org.ppsspp.PPSSPP'),
   ]);
 
   const rpcs3 = firstExisting(IS_WIN ? [
@@ -625,10 +654,15 @@ function getEmulatorPath(platform) {
     path.join(process.env.LOCALAPPDATA || '', 'rpcs3', 'rpcs3.exe'),
   ] : [
     cfg.emulators?.rpcs3,
+    ...inEmuDirs('RPCS3', 'rpcs3'),
+    ...inEmuDirs('RPCS3', 'RPCS3.AppImage'),
+    ...inEmuDirs('RPCS3', 'rpcs3.AppImage'),
+    path.join(emuRoot, 'RPCS3', 'rpcs3'),
+    path.join(emuRoot, 'RPCS3', 'RPCS3.AppImage'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'net.rpcs3.RPCS3'),
     '/usr/bin/rpcs3',
     '/snap/bin/rpcs3',
     '/var/lib/flatpak/exports/bin/net.rpcs3.RPCS3',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'net.rpcs3.RPCS3'),
   ]);
 
   const switchEmu = firstExisting(IS_WIN ? [
@@ -648,11 +682,17 @@ function getEmulatorPath(platform) {
     ...onDrives('Ryujinx', 'Ryujinx.exe'), ...onDrives('Eden', 'eden.exe'),
   ] : [
     cfg.emulators?.eden, cfg.emulators?.ryujinx,
+    ...inEmuDirs('Eden', 'eden'),
+    ...inEmuDirs('Eden', 'Eden.AppImage'),
+    ...inEmuDirs('Ryujinx', 'Ryujinx'),
+    ...inEmuDirs('Ryujinx', 'Ryujinx.AppImage'),
+    path.join(emuRoot, 'Eden', 'eden'),
+    path.join(emuRoot, 'Ryujinx', 'Ryujinx'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'dev.eden_emu.eden'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'io.github.ryubing.Ryujinx'),
     '/usr/bin/eden', '/usr/bin/ryujinx',
     '/var/lib/flatpak/exports/bin/dev.eden_emu.eden',
     '/var/lib/flatpak/exports/bin/io.github.ryubing.Ryujinx',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'dev.eden_emu.eden'),
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'io.github.ryubing.Ryujinx'),
   ]);
 
   const cemu = firstExisting(IS_WIN ? [
@@ -663,9 +703,12 @@ function getEmulatorPath(platform) {
     'C:\\Program Files\\Cemu\\Cemu.exe',
   ] : [
     cfg.emulators?.cemu,
+    ...inEmuDirs('Cemu', 'cemu'),
+    ...inEmuDirs('Cemu', 'Cemu.AppImage'),
+    path.join(emuRoot, 'Cemu', 'cemu'),
+    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'info.cemu.Cemu'),
     '/usr/bin/cemu',
     '/var/lib/flatpak/exports/bin/info.cemu.Cemu',
-    path.join(home, '.local', 'share', 'flatpak', 'exports', 'bin', 'info.cemu.Cemu'),
   ]);
 
   // Xbox / Xbox 360. Both are already declared in the server's platform
@@ -1125,7 +1168,13 @@ async function installFlatpak(appId) {
   if (has.code !== 0) return { ok: false, detail: 'Flatpak is not installed (see flatpak.org/setup), or install the emulator with your package manager' };
   await runProcess('flatpak', ['remote-add', '--user', '--if-not-exists', 'flathub', 'https://dl.flathub.org/repo/flathub.flatpakrepo'], 60_000).catch(() => null);
   const r = await runProcess('flatpak', ['install', '--user', '-y', '--noninteractive', 'flathub', appId], 30 * 60_000).catch((e) => ({ code: -1, stderr: String(e && e.message ? e.message : e) }));
-  return r.code === 0 ? { ok: true } : { ok: false, detail: String(r.stderr || '').trim().split(/\r?\n/).pop() || `flatpak exit ${r.code}` };
+  if (r.code === 0) {
+    // Flatpak emulators read games and BIOS from the home folder and external
+    // drives (/media, /run/media, /mnt), not the whole computer.
+    await runProcess('flatpak', ['override', '--user', '--filesystem=home', '--filesystem=/media', '--filesystem=/run/media', '--filesystem=/mnt', appId], 10_000).catch(() => null);
+    return { ok: true };
+  }
+  return { ok: false, detail: String(r.stderr || '').trim().split(/\r?\n/).pop() || `flatpak exit ${r.code}` };
 }
 
 // Consoles the web app's setup wizard can ask for, and how each is set up.
@@ -1300,6 +1349,46 @@ function pickFolderNative(title) {
       '$f.ShowNewFolderButton = $true',
       '$w = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; WindowState = "Minimized" }',
       'if ($f.ShowDialog($w) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($f.SelectedPath) }',
+    ].join('; ');
+    execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: false, timeout: 10 * 60_000 }, (err, stdout) => {
+      const picked = String(stdout || '').trim();
+      if (picked) resolve({ ok: true, path: picked });
+      else resolve({ ok: false, canceled: true });
+    });
+  });
+}
+
+function pickFileNative(title) {
+  return new Promise((resolve) => {
+    if (!IS_WIN) {
+      const label = String(title || 'Choose a file');
+      const tryOne = (cmd, args) => new Promise((done) => {
+        let out = '';
+        let child;
+        try { child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'ignore'] }); } catch { done(null); return; }
+        child.stdout.on('data', (d) => { out += d; });
+        child.on('error', () => done(null));
+        child.on('exit', (code) => done({ code, path: out.trim() }));
+      });
+      (async () => {
+        for (const [cmd, args] of IS_MAC ? [] : [['zenity', ['--file-selection', `--title=${label}`]], ['kdialog', ['--getopenfilename', os.homedir(), label]]]) {
+          const r = await tryOne(cmd, args);
+          if (!r) continue;
+          resolve(r.code === 0 && r.path ? { ok: true, path: r.path } : { ok: false, canceled: true });
+          return;
+        }
+        resolve({ ok: false, unsupported: true, error: 'Type the file path instead (no file picker found on this computer).' });
+      })();
+      return;
+    }
+    const t = String(title || 'Choose a file').replace(/'/g, "''");
+    const ps = [
+      'Add-Type -AssemblyName System.Windows.Forms',
+      '$f = New-Object System.Windows.Forms.OpenFileDialog',
+      `$f.Title = '${t}'`,
+      '$f.Filter = "All files (*.*)|*.*"',
+      '$w = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; WindowState = "Minimized" }',
+      'if ($f.ShowDialog($w) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($f.FileName) }',
     ].join('; ');
     execFile('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: false, timeout: 10 * 60_000 }, (err, stdout) => {
       const picked = String(stdout || '').trim();
@@ -1502,11 +1591,47 @@ async function performCloneHostSetup(hostUrl, token, opts = {}) {
   return { ok: steps.every((s) => s.ok), steps };
 }
 
+async function installLinuxAppImage({ name, folderName, githubRepo, assetPattern, configKey }) {
+  const cfg = loadConfig();
+  const installRoot = path.join(cfg.emulationRoot ? path.join(cfg.emulationRoot, 'emulators') : emuRoot, folderName);
+  ensureDirSync(installRoot);
+
+  const releaseRes = await fetch(`https://api.github.com/repos/${githubRepo}/releases/latest`, {
+    headers: { 'User-Agent': 'SaveStateLauncher' },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!releaseRes.ok) throw new Error(`GitHub API returned HTTP ${releaseRes.status}`);
+  const release = await releaseRes.json();
+  const asset = (release.assets || []).find((a) => assetPattern.test(a.name || ''));
+  if (!asset) throw new Error(`Could not find a matching Linux AppImage in the latest ${name} release`);
+
+  const appImagePath = path.join(installRoot, `${folderName}.AppImage`);
+  const dlRes = await fetch(asset.browser_download_url, { signal: AbortSignal.timeout(300_000) });
+  if (!dlRes.ok) throw new Error(`${name} download failed (HTTP ${dlRes.status})`);
+  await fsp.writeFile(appImagePath, Buffer.from(await dlRes.arrayBuffer()));
+  fs.chmodSync(appImagePath, 0o755);
+
+  return persistEmulatorPath(configKey, appImagePath, cfg);
+}
+
 async function ensurePCSX2Installed() {
   const existing = getEmulatorPath('ps2');
   if (existing) return { ok: true, installed: false, path: existing, detail: 'PCSX2 already present' };
   if (!IS_WIN) {
-    return { ok: false, detail: 'Automatic PCSX2 install is currently Windows-only — install it via your package manager, then set its path in Client Setup.' };
+    if (FLATPAK_IDS.pcsx2) {
+      const fp = await installFlatpak(FLATPAK_IDS.pcsx2);
+      const fpFound = getEmulatorPath('ps2');
+      if (fpFound) return { ok: true, installed: true, path: fpFound, detail: 'PCSX2 installed via Flatpak' };
+    }
+    try {
+      const installed = await installLinuxAppImage({
+        name: 'PCSX2', folderName: 'PCSX2', githubRepo: 'PCSX2/pcsx2',
+        assetPattern: /AppImage$/i, configKey: 'pcsx2',
+      });
+      return { ok: true, installed: true, path: installed, detail: 'PCSX2 installed (AppImage)' };
+    } catch (e) {
+      return { ok: false, detail: `PCSX2 install failed (${e && e.message ? e.message : e}). Install via Flatpak ("flatpak install flathub net.pcsx2.PCSX2") or your package manager.` };
+    }
   }
   try {
     const installed = await installPCSX2WindowsPortable();
@@ -1514,6 +1639,26 @@ async function ensurePCSX2Installed() {
   } catch (e) {
     return { ok: false, detail: `PCSX2 install failed: ${e && e.message ? e.message : e}. Install manually from pcsx2.net, then retry.` };
   }
+}
+
+async function ensureDolphinInstalled() {
+  const existing = getEmulatorPath('gamecube');
+  if (existing) {
+    ensureStandaloneDolphinControllerConfig(existing);
+    return { ok: true, installed: false, path: existing, detail: 'Dolphin already present' };
+  }
+  if (!IS_WIN) {
+    if (FLATPAK_IDS.dolphin) {
+      const fp = await installFlatpak(FLATPAK_IDS.dolphin);
+      const fpFound = getEmulatorPath('gamecube');
+      if (fpFound) {
+        ensureStandaloneDolphinControllerConfig(fpFound);
+        return { ok: true, installed: true, path: fpFound, detail: 'Dolphin installed via Flatpak' };
+      }
+    }
+    return { ok: false, detail: 'Install Dolphin via Flatpak ("flatpak install flathub org.DolphinEmu.dolphin-emu") or your package manager.' };
+  }
+  return { ok: false, detail: 'Dolphin is not installed. Download from dolphin-emu.org or install via winget.' };
 }
 
 // Shared shape for the other standalone-emulator auto-installs (RPCS3,
@@ -1581,7 +1726,22 @@ async function installStandaloneEmulatorPortable({ name, folderName, githubRepo,
 async function ensureRPCS3Installed() {
   const existing = getEmulatorPath('ps3');
   if (existing) return { ok: true, installed: false, path: existing, detail: 'RPCS3 already present' };
-  if (!IS_WIN) return { ok: false, detail: 'Automatic RPCS3 install is currently Windows-only — install it manually, then set its path in Client Setup.' };
+  if (!IS_WIN) {
+    if (FLATPAK_IDS.rpcs3) {
+      const fp = await installFlatpak(FLATPAK_IDS.rpcs3);
+      const fpFound = getEmulatorPath('ps3');
+      if (fpFound) return { ok: true, installed: true, path: fpFound, detail: 'RPCS3 installed via Flatpak' };
+    }
+    try {
+      const installed = await installLinuxAppImage({
+        name: 'RPCS3', folderName: 'RPCS3', githubRepo: 'RPCS3/rpcs3-binaries-linux',
+        assetPattern: /\.AppImage$/i, configKey: 'rpcs3',
+      });
+      return { ok: true, installed: true, path: installed, detail: 'RPCS3 installed (AppImage)' };
+    } catch (e) {
+      return { ok: false, detail: 'Install RPCS3 via Flatpak ("flatpak install flathub net.rpcs3.RPCS3") or your package manager.' };
+    }
+  }
   try {
     const installed = await installStandaloneEmulatorPortable({
       name: 'RPCS3', folderName: 'RPCS3', githubRepo: 'RPCS3/rpcs3-binaries-win',
@@ -1596,7 +1756,14 @@ async function ensureRPCS3Installed() {
 async function ensurePPSSPPInstalled() {
   const existing = getEmulatorPath('psp');
   if (existing) return { ok: true, installed: false, path: existing, detail: 'PPSSPP already present' };
-  if (!IS_WIN) return { ok: false, detail: 'Automatic PPSSPP install is currently Windows-only — install it manually, then set its path in Client Setup.' };
+  if (!IS_WIN) {
+    if (FLATPAK_IDS.ppsspp) {
+      const fp = await installFlatpak(FLATPAK_IDS.ppsspp);
+      const fpFound = getEmulatorPath('psp');
+      if (fpFound) return { ok: true, installed: true, path: fpFound, detail: 'PPSSPP installed via Flatpak' };
+    }
+    return { ok: false, detail: 'Install PPSSPP via Flatpak ("flatpak install flathub org.ppsspp.PPSSPP") or your package manager (e.g. "sudo apt install ppsspp").' };
+  }
   try {
     const installed = await installStandaloneEmulatorPortable({
       name: 'PPSSPP', folderName: 'PPSSPP', githubRepo: 'hrydgard/ppsspp',
@@ -1611,7 +1778,22 @@ async function ensurePPSSPPInstalled() {
 async function ensureCemuInstalled() {
   const existing = getEmulatorPath('wiiu');
   if (existing) return { ok: true, installed: false, path: existing, detail: 'Cemu already present' };
-  if (!IS_WIN) return { ok: false, detail: 'Automatic Cemu install is currently Windows-only — install it manually, then set its path in Client Setup.' };
+  if (!IS_WIN) {
+    if (FLATPAK_IDS.cemu) {
+      const fp = await installFlatpak(FLATPAK_IDS.cemu);
+      const fpFound = getEmulatorPath('wiiu');
+      if (fpFound) return { ok: true, installed: true, path: fpFound, detail: 'Cemu installed via Flatpak' };
+    }
+    try {
+      const installed = await installLinuxAppImage({
+        name: 'Cemu', folderName: 'Cemu', githubRepo: 'cemu-project/Cemu',
+        assetPattern: /-linux-x64\.AppImage$/i, configKey: 'cemu',
+      });
+      return { ok: true, installed: true, path: installed, detail: 'Cemu installed (AppImage)' };
+    } catch (e) {
+      return { ok: false, detail: 'Install Cemu via Flatpak ("flatpak install flathub info.cemu.Cemu") or your package manager.' };
+    }
+  }
   try {
     const installed = await installStandaloneEmulatorPortable({
       name: 'Cemu', folderName: 'Cemu', githubRepo: 'cemu-project/Cemu',
@@ -1653,9 +1835,12 @@ async function ensureRetroArchInstalled() {
       const installed = await installRetroArchLinuxPortable();
       return { ok: true, installed: true, path: installed, detail: 'RetroArch installed (portable)' };
     } catch (e) {
+      const fp = await installFlatpak('org.libretro.RetroArch');
+      const found = getEmulatorPath('nes');
+      if (found) return { ok: true, installed: true, path: found, detail: 'RetroArch installed via Flatpak' };
       return {
         ok: false,
-        detail: `Portable install failed (${e && e.message ? e.message : e}) — install RetroArch via your package manager (e.g. "sudo snap install retroarch"), then retry.`,
+        detail: `RetroArch install failed (${e && e.message ? e.message : e}) — install via Flatpak ("flatpak install flathub org.libretro.RetroArch") or your package manager (e.g. "sudo apt install retroarch"), then retry.`,
       };
     }
   }
@@ -1766,7 +1951,339 @@ function pickWritableCoreDir(retroarchPath) {
 // already laid out as dolphin-emu/Sys/... so it extracts straight in.
 const CORE_SYSTEM_FILES = {
   dolphin: { url: 'https://buildbot.libretro.com/assets/system/Dolphin.zip', marker: path.join('dolphin-emu', 'Sys', 'codehandler.bin') },
+  ppsspp: { url: 'https://buildbot.libretro.com/assets/system/PPSSPP.zip', marker: path.join('PPSSPP', 'installed') },
 };
+
+const DOLPHIN_GCPAD_INI = `[GCPad1]
+Device = Libretro/0/Joypad
+Buttons/A = A
+Buttons/B = B
+Buttons/X = X
+Buttons/Y = Y
+Buttons/Z = R
+Buttons/Start = Start
+Main Stick/Up = \`Libretro/0/Analog:Y0-\`
+Main Stick/Down = \`Libretro/0/Analog:Y0+\`
+Main Stick/Left = \`Libretro/0/Analog:X0-\`
+Main Stick/Right = \`Libretro/0/Analog:X0+\`
+C-Stick/Up = \`Libretro/0/Analog:Y1-\`
+C-Stick/Down = \`Libretro/0/Analog:Y1+\`
+C-Stick/Left = \`Libretro/0/Analog:X1-\`
+C-Stick/Right = \`Libretro/0/Analog:X1+\`
+Triggers/L = \`Libretro/0/Analog:Trigger0+\`|(L2&!\`Libretro/0/Analog:Trigger0+\`)
+Triggers/R = \`Libretro/0/Analog:Trigger1+\`|(R2&!\`Libretro/0/Analog:Trigger1+\`)
+Triggers/L-Analog = \`Libretro/0/Analog:Trigger0+\`|L3
+Triggers/R-Analog = \`Libretro/0/Analog:Trigger1+\`|R3
+D-Pad/Up = Up
+D-Pad/Down = Down
+D-Pad/Left = Left
+D-Pad/Right = Right
+Triforce/Test = L
+Triforce/Service = L3&R3
+Triforce/Coin = Select
+Rumble/Motor = Rumble
+Options/Always Connected = True
+[GCPad2]
+Device = Libretro/1/Joypad
+Buttons/A = A
+Buttons/B = B
+Buttons/X = X
+Buttons/Y = Y
+Buttons/Z = R
+Buttons/Start = Start
+Main Stick/Up = \`Libretro/1/Analog:Y0-\`
+Main Stick/Down = \`Libretro/1/Analog:Y0+\`
+Main Stick/Left = \`Libretro/1/Analog:X0-\`
+Main Stick/Right = \`Libretro/1/Analog:X0+\`
+C-Stick/Up = \`Libretro/1/Analog:Y1-\`
+C-Stick/Down = \`Libretro/1/Analog:Y1+\`
+C-Stick/Left = \`Libretro/1/Analog:X1-\`
+C-Stick/Right = \`Libretro/1/Analog:X1+\`
+Triggers/L = \`Libretro/1/Analog:Trigger0+\`|(L2&!\`Libretro/1/Analog:Trigger0+\`)
+Triggers/R = \`Libretro/1/Analog:Trigger1+\`|(R2&!\`Libretro/1/Analog:Trigger1+\`)
+Triggers/L-Analog = \`Libretro/1/Analog:Trigger0+\`|L3
+Triggers/R-Analog = \`Libretro/1/Analog:Trigger1+\`|R3
+D-Pad/Up = Up
+D-Pad/Down = Down
+D-Pad/Left = Left
+D-Pad/Right = Right
+Triforce/Test = L
+Triforce/Service = L3&R3
+Triforce/Coin = Select
+Rumble/Motor = Rumble
+Options/Always Connected = True
+`;
+
+const DOLPHIN_WIIMOTE_INI = `[Wiimote1]
+Device = Libretro/0/Joypad
+Buttons/A = \`Button 0\` | A
+Buttons/B = \`Button 1\` | B
+Buttons/1 = \`Button 2\` | X
+Buttons/2 = \`Button 3\` | Y
+Buttons/- = Select
+Buttons/+ = Start
+Buttons/Home = Home
+D-Pad/Up = Up
+D-Pad/Down = Down
+D-Pad/Left = Left
+D-Pad/Right = Right
+IR/Up = \`Libretro/0/Analog:Y1-\`
+IR/Down = \`Libretro/0/Analog:Y1+\`
+IR/Left = \`Libretro/0/Analog:X1-\`
+IR/Right = \`Libretro/0/Analog:X1+\`
+Shake/X = L3
+Shake/Y = L3
+Shake/Z = R3
+Extension = Classic
+Classic/Buttons/A = A
+Classic/Buttons/B = B
+Classic/Buttons/X = X
+Classic/Buttons/Y = Y
+Classic/Buttons/ZL = L2
+Classic/Buttons/ZR = R2
+Classic/Buttons/- = Select
+Classic/Buttons/+ = Start
+Classic/Buttons/Home = Home
+Classic/Left Stick/Up = \`Libretro/0/Analog:Y0-\`
+Classic/Left Stick/Down = \`Libretro/0/Analog:Y0+\`
+Classic/Left Stick/Left = \`Libretro/0/Analog:X0-\`
+Classic/Left Stick/Right = \`Libretro/0/Analog:X0+\`
+Classic/Right Stick/Up = \`Libretro/0/Analog:Y1-\`
+Classic/Right Stick/Down = \`Libretro/0/Analog:Y1+\`
+Classic/Right Stick/Left = \`Libretro/0/Analog:X1-\`
+Classic/Right Stick/Right = \`Libretro/0/Analog:X1+\`
+Classic/Triggers/L = \`Libretro/0/Analog:Trigger0+\`|(L2&!\`Libretro/0/Analog:Trigger0+\`)
+Classic/Triggers/R = \`Libretro/0/Analog:Trigger1+\`|(R2&!\`Libretro/0/Analog:Trigger1+\`)
+Classic/D-Pad/Up = Up
+Classic/D-Pad/Down = Down
+Classic/D-Pad/Left = Left
+Classic/D-Pad/Right = Right
+Nunchuk/Buttons/C = L
+Nunchuk/Buttons/Z = \`Libretro/0/Analog:Trigger0+\`|L2
+Nunchuk/Stick/Up = \`Libretro/0/Analog:Y0-\`
+Nunchuk/Stick/Down = \`Libretro/0/Analog:Y0+\`
+Nunchuk/Stick/Left = \`Libretro/0/Analog:X0-\`
+Nunchuk/Stick/Right = \`Libretro/0/Analog:X0+\`
+Nunchuk/Shake/X = L3
+Nunchuk/Shake/Y = L3
+Nunchuk/Shake/Z = L3
+Rumble/Motor = Rumble
+Options/Always Connected = True
+[Wiimote2]
+Device = Libretro/1/Joypad
+Buttons/A = \`Button 0\` | A
+Buttons/B = \`Button 1\` | B
+Buttons/1 = \`Button 2\` | X
+Buttons/2 = \`Button 3\` | Y
+Buttons/- = Select
+Buttons/+ = Start
+Buttons/Home = Home
+D-Pad/Up = Up
+D-Pad/Down = Down
+D-Pad/Left = Left
+D-Pad/Right = Right
+IR/Up = \`Libretro/1/Analog:Y1-\`
+IR/Down = \`Libretro/1/Analog:Y1+\`
+IR/Left = \`Libretro/1/Analog:X1-\`
+IR/Right = \`Libretro/1/Analog:X1+\`
+Shake/X = L3
+Shake/Y = L3
+Shake/Z = R3
+Extension = Classic
+Classic/Buttons/A = A
+Classic/Buttons/B = B
+Classic/Buttons/X = X
+Classic/Buttons/Y = Y
+Classic/Buttons/ZL = L2
+Classic/Buttons/ZR = R2
+Classic/Buttons/- = Select
+Classic/Buttons/+ = Start
+Classic/Buttons/Home = Home
+Classic/Left Stick/Up = \`Libretro/1/Analog:Y0-\`
+Classic/Left Stick/Down = \`Libretro/1/Analog:Y0+\`
+Classic/Left Stick/Left = \`Libretro/1/Analog:X0-\`
+Classic/Left Stick/Right = \`Libretro/1/Analog:X0+\`
+Classic/Right Stick/Up = \`Libretro/1/Analog:Y1-\`
+Classic/Right Stick/Down = \`Libretro/1/Analog:Y1+\`
+Classic/Right Stick/Left = \`Libretro/1/Analog:X1-\`
+Classic/Right Stick/Right = \`Libretro/1/Analog:X1+\`
+Classic/Triggers/L = \`Libretro/1/Analog:Trigger0+\`|(L2&!\`Libretro/1/Analog:Trigger0+\`)
+Classic/Triggers/R = \`Libretro/1/Analog:Trigger1+\`|(R2&!\`Libretro/1/Analog:Trigger1+\`)
+Classic/D-Pad/Up = Up
+Classic/D-Pad/Down = Down
+Classic/D-Pad/Left = Left
+Classic/D-Pad/Right = Right
+Nunchuk/Buttons/C = L
+Nunchuk/Buttons/Z = \`Libretro/1/Analog:Trigger0+\`|L2
+Nunchuk/Stick/Up = \`Libretro/1/Analog:Y0-\`
+Nunchuk/Stick/Down = \`Libretro/1/Analog:Y0+\`
+Nunchuk/Stick/Left = \`Libretro/1/Analog:X0-\`
+Nunchuk/Stick/Right = \`Libretro/1/Analog:X0+\`
+Nunchuk/Shake/X = L3
+Nunchuk/Shake/Y = L3
+Nunchuk/Shake/Z = L3
+Rumble/Motor = Rumble
+Options/Always Connected = True
+`;
+
+function ensureDolphinConfig(configDir) {
+  try {
+    ensureDirSync(configDir);
+    const gcPadPath = path.join(configDir, 'GCPadNew.ini');
+    if (!fs.existsSync(gcPadPath) || fs.statSync(gcPadPath).size < 100) {
+      fs.writeFileSync(gcPadPath, DOLPHIN_GCPAD_INI, 'utf8');
+    }
+    const wiiPath = path.join(configDir, 'WiimoteNew.ini');
+    if (!fs.existsSync(wiiPath) || fs.statSync(wiiPath).size < 100) {
+      fs.writeFileSync(wiiPath, DOLPHIN_WIIMOTE_INI, 'utf8');
+    }
+    const dolPath = path.join(configDir, 'Dolphin.ini');
+    let dolText = fs.existsSync(dolPath) ? fs.readFileSync(dolPath, 'utf8') : '';
+    if (!dolText.includes('[Core]')) {
+      dolText = `[Core]\nSIDevice0 = 6\nSIDevice1 = 6\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
+    } else {
+      if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 6\nSIDevice1 = 6');
+      if (!dolText.includes('WiimoteSource0')) dolText = dolText.replace('[Core]', '[Core]\nWiimoteSource0 = 1\nWiimoteSource1 = 1');
+    }
+    fs.writeFileSync(dolPath, dolText, 'utf8');
+  } catch (e) {
+    console.error('[engine] ensureDolphinConfig failed:', e && e.message ? e.message : e);
+  }
+}
+
+const DOLPHIN_STANDALONE_WIN_GCPAD = `[GCPad1]
+Device = XInput/0/Gamepad
+Buttons/A = \`Button A\`
+Buttons/B = \`Button B\`
+Buttons/X = \`Button X\`
+Buttons/Y = \`Button Y\`
+Buttons/Z = \`Shoulder R\`
+Buttons/Start = Start
+Main Stick/Up = \`Left Y+\`
+Main Stick/Down = \`Left Y-\`
+Main Stick/Left = \`Left X-\`
+Main Stick/Right = \`Left X+\`
+C-Stick/Up = \`Right Y+\`
+C-Stick/Down = \`Right Y-\`
+C-Stick/Left = \`Right X-\`
+C-Stick/Right = \`Right X+\`
+Triggers/L = \`Trigger L\`
+Triggers/R = \`Trigger R\`
+Triggers/L-Analog = \`Trigger L\`
+Triggers/R-Analog = \`Trigger R\`
+D-Pad/Up = \`Pad N\`
+D-Pad/Down = \`Pad S\`
+D-Pad/Left = \`Pad W\`
+D-Pad/Right = \`Pad E\`
+`;
+
+const DOLPHIN_STANDALONE_LINUX_GCPAD = `[GCPad1]
+Device = SDL/0/Gamepad
+Buttons/A = \`Button 0\`
+Buttons/B = \`Button 1\`
+Buttons/X = \`Button 2\`
+Buttons/Y = \`Button 3\`
+Buttons/Z = \`Button 10\`
+Buttons/Start = \`Button 6\`
+Main Stick/Up = \`Axis 1-\`
+Main Stick/Down = \`Axis 1+\`
+Main Stick/Left = \`Axis 0-\`
+Main Stick/Right = \`Axis 0+\`
+C-Stick/Up = \`Axis 3-\`
+C-Stick/Down = \`Axis 3+\`
+C-Stick/Left = \`Axis 2-\`
+C-Stick/Right = \`Axis 2+\`
+Triggers/L = \`Axis 4+\`
+Triggers/R = \`Axis 5+\`
+Triggers/L-Analog = \`Axis 4+\`
+Triggers/R-Analog = \`Axis 5+\`
+D-Pad/Up = \`Hat 0 N\`
+D-Pad/Down = \`Hat 0 S\`
+D-Pad/Left = \`Hat 0 W\`
+D-Pad/Right = \`Hat 0 E\`
+`;
+
+const DOLPHIN_STANDALONE_WIN_WIIMOTE = `[Wiimote1]
+Device = XInput/0/Gamepad
+Options/Sideways Wiimote = 1
+Buttons/A = \`Button A\`
+Buttons/B = \`Button B\`
+Buttons/1 = \`Button X\`
+Buttons/2 = \`Button Y\`
+Buttons/- = Back
+Buttons/+ = Start
+D-Pad/Up = \`Left Y+\`|\`Pad N\`
+D-Pad/Down = \`Left Y-\`|\`Pad S\`
+D-Pad/Left = \`Left X-\`|\`Pad W\`
+D-Pad/Right = \`Left X+\`|\`Pad E\`
+Extension = Nunchuk
+Nunchuk/Stick/Up = \`Left Y+\`
+Nunchuk/Stick/Down = \`Left Y-\`
+Nunchuk/Stick/Left = \`Left X-\`
+Nunchuk/Stick/Right = \`Left X+\`
+Nunchuk/Buttons/C = \`Shoulder L\`
+Nunchuk/Buttons/Z = \`Trigger L\`
+`;
+
+const DOLPHIN_STANDALONE_LINUX_WIIMOTE = `[Wiimote1]
+Device = SDL/0/Gamepad
+Options/Sideways Wiimote = 1
+Buttons/A = \`Button 0\`
+Buttons/B = \`Button 1\`
+Buttons/1 = \`Button 2\`
+Buttons/2 = \`Button 3\`
+Buttons/- = \`Button 4\`
+Buttons/+ = \`Button 6\`
+D-Pad/Up = \`Axis 1-\`|\`Hat 0 N\`
+D-Pad/Down = \`Axis 1+\`|\`Hat 0 S\`
+D-Pad/Left = \`Axis 0-\`|\`Hat 0 W\`
+D-Pad/Right = \`Axis 0+\`|\`Hat 0 E\`
+Extension = Nunchuk
+Nunchuk/Stick/Up = \`Axis 1-\`
+Nunchuk/Stick/Down = \`Axis 1+\`
+Nunchuk/Stick/Left = \`Axis 0-\`
+Nunchuk/Stick/Right = \`Axis 0+\`
+Nunchuk/Buttons/C = \`Button 9\`
+Nunchuk/Buttons/Z = \`Axis 4+\`
+`;
+
+function ensureStandaloneDolphinControllerConfig(emuPath) {
+  const dirs = [];
+  const home = os.homedir();
+  if (IS_WIN) {
+    if (process.env.USERPROFILE) dirs.push(path.join(process.env.USERPROFILE, 'Documents', 'Dolphin Emulator', 'Config'));
+    if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'Dolphin Emulator', 'Config'));
+    dirs.push(path.join(home, 'Documents', 'Dolphin Emulator', 'Config'));
+    if (emuPath) dirs.push(path.join(path.dirname(emuPath), 'User', 'Config'));
+  } else {
+    dirs.push(path.join(home, '.config', 'dolphin-emu'));
+    dirs.push(path.join(home, '.var', 'app', 'org.DolphinEmu.dolphin-emu', 'config', 'dolphin-emu'));
+  }
+  for (const configDir of dirs) {
+    try {
+      ensureDirSync(configDir);
+      const gcPadPath = path.join(configDir, 'GCPadNew.ini');
+      if (!fs.existsSync(gcPadPath) || fs.statSync(gcPadPath).size < 100) {
+        fs.writeFileSync(gcPadPath, IS_WIN ? DOLPHIN_STANDALONE_WIN_GCPAD : DOLPHIN_STANDALONE_LINUX_GCPAD, 'utf8');
+      }
+      const wiiPath = path.join(configDir, 'WiimoteNew.ini');
+      if (!fs.existsSync(wiiPath) || fs.statSync(wiiPath).size < 100) {
+        fs.writeFileSync(wiiPath, IS_WIN ? DOLPHIN_STANDALONE_WIN_WIIMOTE : DOLPHIN_STANDALONE_LINUX_WIIMOTE, 'utf8');
+      }
+      const dolPath = path.join(configDir, 'Dolphin.ini');
+      let dolText = fs.existsSync(dolPath) ? fs.readFileSync(dolPath, 'utf8') : '';
+      if (!dolText.includes('[Core]')) {
+        dolText = `[Core]\nSIDevice0 = 6\nSIDevice1 = 6\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
+      } else {
+        if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 6\nSIDevice1 = 6');
+        if (!dolText.includes('WiimoteSource0')) dolText = dolText.replace('[Core]', '[Core]\nWiimoteSource0 = 1\nWiimoteSource1 = 1');
+      }
+      fs.writeFileSync(dolPath, dolText, 'utf8');
+    } catch {
+      /* skip unwritable path */
+    }
+  }
+}
 
 async function ensureCoreSystemFiles(retroarchPath, coreId) {
   const spec = CORE_SYSTEM_FILES[coreId];
@@ -2383,7 +2900,15 @@ function spawnAndVerify(exe, args, waitMs = 1200) {
   return new Promise((resolve) => {
     const chunks = [];
     const tag = path.basename(exe);
-    const child = spawn(exe, args, { detached: true, cwd: path.dirname(exe), stdio: ['ignore', 'pipe', 'pipe'] });
+    const env = { ...process.env };
+    if (process.platform === 'linux') {
+      if (!env.DISPLAY && !env.WAYLAND_DISPLAY) env.DISPLAY = ':0';
+      if (!env.XDG_RUNTIME_DIR) {
+        const uid = process.getuid ? process.getuid() : 1000;
+        env.XDG_RUNTIME_DIR = `/run/user/${uid}`;
+      }
+    }
+    const child = spawn(exe, args, { detached: true, cwd: path.dirname(exe), env, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout?.on('data', (d) => { console.log(`[${tag}] ${d.toString('utf8').trimEnd()}`); });
     child.stderr?.on('data', (d) => {
       const text = d.toString('utf8');
@@ -2768,7 +3293,7 @@ function launchDedupeKey(body) {
     // Netplay host vs client are genuinely different actions on the same
     // game, so they must not collapse into each other.
     String(body?.netplay?.role ?? ''),
-  ].join(' ');
+  ].join('\u0000');
 }
 
 // A launch that has already STARTED an emulator stays claimed for this long
@@ -2947,6 +3472,12 @@ async function ensureEngineSystemFiles(coreId) {
   // PlayStation 2 BIOS for the PCSX2 core.
   const ps2 = raSystem && path.join(raSystem, 'pcsx2', 'bios');
   if (ps2 && fs.existsSync(ps2)) { try { fs.cpSync(ps2, path.join(engineSystemDir, 'pcsx2', 'bios'), { recursive: true, force: false }); } catch { /* skip */ } }
+
+  // GameCube & Wii Dolphin controller mappings and core config.
+  if (coreId === 'dolphin') {
+    ensureDolphinConfig(path.join(engineSavesDir, 'User', 'Config'));
+    ensureDolphinConfig(path.join(engineSystemDir, 'dolphin-emu', 'User', 'Config'));
+  }
 }
 
 // A battery save RetroArch kept for this game comes along once.
@@ -3120,13 +3651,12 @@ async function handleLaunch(body, origin) {
   // just to hit a failure that was already knowable up front.
   let emu = getEmulatorPath(platform);
   const { hostUrl, token } = getHostUrlAndToken(body);
-  // SaveState Engine plays RetroArch-system games (and GameCube/Wii, even
-  // with standalone Dolphin installed) inside the page with its own cores, so
-  // RetroArch isn't installed for them. PS2/PSP keep their standalone
-  // emulators when present. Netplay still uses RetroArch.
+  // SaveState Engine plays every console it has a core for inside the page
+  // (PS2 and PSP too, since 2026-10: one app, no separate emulators), so
+  // RetroArch isn't installed for them. If the engine can't start the game,
+  // the standalone emulator below still runs it. Netplay still uses RetroArch.
   const platKey = String(platform || '').toLowerCase();
-  const engineFor = !!(body.engine && IS_WIN && PLATFORM_CORES[platKey] && !netplay
-    && (!emu || isRetroArch(emu) || platKey === 'gamecube' || platKey === 'wii'));
+  const engineFor = !!(body.engine && IS_WIN && PLATFORM_CORES[platKey] && !netplay);
   if (!emu && !engineFor) {
     // "Auto setup" previously only ever covered RetroArch — a PS2/PS3/PSP/
     // Wii U game just failed outright here with no attempt to get the user
@@ -3145,7 +3675,7 @@ async function handleLaunch(body, origin) {
     // PLATFORM_CORES too (as 'pcsx2'/'ppsspp' core ids), so testing RetroArch
     // first would quietly divert them away from their dedicated installers.
     const autoInstaller =
-      { ps2: ensurePCSX2Installed, ps3: ensureRPCS3Installed, psp: ensurePPSSPPInstalled, wiiu: ensureCemuInstalled }[plat]
+      { ps2: ensurePCSX2Installed, ps3: ensureRPCS3Installed, psp: ensurePPSSPPInstalled, wiiu: ensureCemuInstalled, gamecube: ensureDolphinInstalled, wii: ensureDolphinInstalled }[plat]
       || (PLATFORM_CORES[plat] ? ensureRetroArchInstalled : null);
     if (autoInstaller) {
       const install = await autoInstaller();
@@ -3165,9 +3695,6 @@ async function handleLaunch(body, origin) {
     if (!emu) {
       return { status: 404, json: { success: false, error: `No emulator found for '${platform}'. Place emulator in ${emuRoot}/<EmulatorName>/, or set its path in Client Setup.` } };
     }
-  }
-  if (!emu && engineFor && !IS_WIN) {
-    return { status: 404, json: { success: false, error: `No emulator found for '${platform}'.` } };
   }
   // A RetroArch platform can have the emulator itself but not yet the
   // specific core it needs (fresh RetroArch install, or a core Play has
@@ -3319,6 +3846,9 @@ async function handleLaunch(body, origin) {
     const args = [];
     if (isRetroArch(emu)) args.push('-f');
     else if (plat === 'switch') args.push('--fullscreen');
+    if (plat === 'gamecube' || plat === 'wii' || /dolphin/i.test(path.basename(emu))) {
+      ensureStandaloneDolphinControllerConfig(emu);
+    }
     if (isRetroArch(emu)) {
       ensureSaneVideoDriver(emu);
       const core = getCorePath(emu, platform);
@@ -3405,9 +3935,18 @@ async function handleLaunchExe(body) {
     return { status: 404, json: { success: false, error: `Not installed on this device: ${executablePath}` } };
   }
   try {
+    const env = { ...process.env };
+    if (process.platform === 'linux') {
+      if (!env.DISPLAY && !env.WAYLAND_DISPLAY) env.DISPLAY = ':0';
+      if (!env.XDG_RUNTIME_DIR) {
+        const uid = process.getuid ? process.getuid() : 1000;
+        env.XDG_RUNTIME_DIR = `/run/user/${uid}`;
+      }
+    }
     const child = spawn(executablePath, [], {
       detached: true, stdio: 'ignore', windowsHide: false,
       cwd: path.dirname(executablePath),
+      env,
     });
     child.unref();
     return { status: 200, json: { success: true, launched: true, executablePath } };
@@ -3434,19 +3973,16 @@ async function handleLaunchExe(body) {
 // entirely for anything else so the browser blocks the response/preflight.
 function isTrustedOrigin(origin) {
   if (!origin) return true; // non-browser callers (no Origin header) — nothing to restrict
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(origin)) return true;
+  // Official SaveState domains
+  if (/^https?:\/\/([a-z0-9-]+\.)*savestate\.co\.za(:\d+)?$/i.test(origin)) return true;
+  // RFC1918 private LAN addresses
+  if (/^https?:\/\/(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/i.test(origin)) return true;
   let trusted = '';
   try { trusted = fs.readFileSync(hostUrlFile, 'utf8').trim(); } catch { /* none recorded yet */ }
-  if (trusted) return origin.startsWith(trusted);
-  // Trust-on-first-use: the client always calls GET /health BEFORE its first
-  // POST /config (which is what records preferred-host-url.txt — see
-  // useLauncherWatcher.ts), so nothing is trusted yet on a fresh install.
-  // Bootstrapping open here (rather than rejecting every install's first-ever
-  // call, which would break the feature entirely for any non-localhost host —
-  // LAN IP or the tunnel domain) closes itself the moment that first /config
-  // call succeeds and a trusted host gets recorded. The remaining exposure is a
-  // narrow race on first launch, not a permanent hole.
-  return true;
+  if (trusted && origin.startsWith(trusted)) return true;
+  if (!trusted) return true;
+  return false;
 }
 
 function corsHeaders(origin) {
@@ -3990,7 +4526,13 @@ function startEmbeddedLauncher(opts = {}) {
         if (system === 'ps3' && /\.pup$/i.test(name)) {
           const rp = getEmulatorPath('ps3');
           if (rp && !isRetroArch(rp)) {
-            try { const c = spawn(rp, ['--installfw', written[0]], { detached: true, stdio: 'ignore', cwd: path.dirname(rp) }); c.unref(); opened = 'rpcs3'; } catch { /* manual */ }
+            try {
+              const env = { ...process.env };
+              if (process.platform === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY) env.DISPLAY = ':0';
+              const c = spawn(rp, ['--installfw', written[0]], { detached: true, stdio: 'ignore', cwd: path.dirname(rp), env });
+              c.unref();
+              opened = 'rpcs3';
+            } catch { /* manual */ }
           }
         }
         send({ ok: true, name, md5, written, opened });
@@ -4063,22 +4605,22 @@ function startEmbeddedLauncher(opts = {}) {
           const body = await readBody(req);
           let dialog = null;
           try { ({ dialog } = require('electron')); } catch { /* Tauri build: no electron */ }
-          if (!dialog && IS_WIN) {
-            const picked = await pickFolderNative((body && body.title) || 'Select a folder');
-            send(picked.ok ? { ok: true, path: picked.path } : picked);
-            return;
-          }
           if (!dialog) {
-            // This build has no native picker of its own (the app migrated from
-            // Electron to Tauri). Previously the require() threw and this
-            // answered a bare 500, which the setup wizard surfaced as an
-            // unexplained failure on every Browse button. Say what's actually
-            // true so the UI can fall back to its own dialog or a typed path.
-            send({
-              ok: false,
-              unsupported: true,
-              error: 'This build has no native file picker. Type the path directly, or use the app\'s own folder picker.',
-            }, 400);
+            const mode = body && body.mode === 'file' ? 'file' : 'folder';
+            const picked = mode === 'file'
+              ? await pickFileNative((body && body.title) || 'Select a file')
+              : await pickFolderNative((body && body.title) || 'Select a folder');
+            if (picked.ok && picked.path) {
+              send({ ok: true, path: picked.path });
+            } else if (picked.canceled) {
+              send({ ok: false, canceled: true });
+            } else {
+              send({
+                ok: false,
+                unsupported: true,
+                error: picked.error || 'Type the path directly, or use the app\'s folder picker.',
+              }, 400);
+            }
             return;
           }
           const win = typeof opts.getMainWindow === 'function' ? opts.getMainWindow() : null;

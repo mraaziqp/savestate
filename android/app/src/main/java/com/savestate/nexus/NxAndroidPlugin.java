@@ -11,6 +11,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.StatFs;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.webkit.CookieManager;
@@ -87,6 +88,13 @@ public class NxAndroidPlugin extends Plugin {
 
     /** Starts a download into Downloads/SaveState/<folder>/; returns its id. */
     static long enqueue(Context ctx, String url, String folder, String fileName, String auth, String title) {
+        String sub = "SaveState" + (folder == null || folder.isEmpty() ? "" : "/" + folder);
+        File destDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), sub);
+        if (!destDir.exists()) destDir.mkdirs();
+        File targetFile = new File(destDir, fileName);
+        if (targetFile.exists() && targetFile.length() == 0) {
+            targetFile.delete();
+        }
         DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
         String cookies = CookieManager.getInstance().getCookie(url);
         if (cookies != null) req.addRequestHeader("Cookie", cookies);
@@ -96,10 +104,61 @@ public class NxAndroidPlugin extends Plugin {
         req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
         req.setAllowedOverMetered(true);
         req.setAllowedOverRoaming(false);
-        String sub = "SaveState" + (folder == null || folder.isEmpty() ? "" : "/" + folder);
         req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, sub + "/" + fileName);
         DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
         return dm.enqueue(req);
+    }
+
+    @PluginMethod
+    public void storageInfo(PluginCall call) {
+        JSObject r = new JSObject();
+        try {
+            File path = Environment.getExternalStorageDirectory();
+            StatFs stat = new StatFs(path.getPath());
+            long availableBytes = stat.getAvailableBytes();
+            long totalBytes = stat.getTotalBytes();
+            r.put("freeBytes", availableBytes);
+            r.put("totalBytes", totalBytes);
+            r.put("freeMB", availableBytes / (1024 * 1024));
+            r.put("totalMB", totalBytes / (1024 * 1024));
+            r.put("freeGB", (double) availableBytes / (1024.0 * 1024.0 * 1024.0));
+            r.put("totalGB", (double) totalBytes / (1024.0 * 1024.0 * 1024.0));
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Failed to retrieve storage info: " + e.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void pruneDownloads(PluginCall call) {
+        JSObject r = new JSObject();
+        int cleaned = 0;
+        try {
+            File base = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "SaveState");
+            if (base.exists() && base.isDirectory()) {
+                cleaned = purgeEmptyOrCorrupt(base);
+            }
+            r.put("cleaned", cleaned);
+            call.resolve(r);
+        } catch (Exception e) {
+            call.reject("Failed to prune downloads: " + e.getMessage());
+        }
+    }
+
+    private static int purgeEmptyOrCorrupt(File dir) {
+        int count = 0;
+        File[] files = dir.listFiles();
+        if (files == null) return 0;
+        for (File f : files) {
+            if (f.isDirectory()) {
+                count += purgeEmptyOrCorrupt(f);
+            } else if (f.isFile() && f.length() == 0 && System.currentTimeMillis() - f.lastModified() > 3600_000L) {
+                // Only left-overs: a download that has just started is an empty
+                // file too, and deleting it broke that download.
+                if (f.delete()) count++;
+            }
+        }
+        return count;
     }
 
     @PluginMethod
@@ -256,7 +315,16 @@ public class NxAndroidPlugin extends Plugin {
 
     private static String failure(int reason) {
         switch (reason) {
-            case DownloadManager.ERROR_INSUFFICIENT_SPACE: return "This phone ran out of space.";
+            case DownloadManager.ERROR_INSUFFICIENT_SPACE: {
+                try {
+                    StatFs stat = new StatFs(Environment.getExternalStorageDirectory().getPath());
+                    long free = stat.getAvailableBytes();
+                    if (free > 1024L * 1024L * 1024L) {
+                        return "Download paused: DownloadManager cache partition is full (" + (free / (1024 * 1024 * 1024)) + " GB free on disk). Clear old downloads or use browser download.";
+                    }
+                } catch (Exception e) {}
+                return "This phone ran out of space.";
+            }
             case DownloadManager.ERROR_DEVICE_NOT_FOUND: return "The phone's storage isn't available.";
             case DownloadManager.ERROR_HTTP_DATA_ERROR: return "The connection dropped. Try again.";
             case DownloadManager.ERROR_TOO_MANY_REDIRECTS: return "The server sent it somewhere else too many times.";

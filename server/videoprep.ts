@@ -95,6 +95,7 @@ export function classify(ext: string, streams: any[]): { kind: PrepKind; why: st
 export function encodeArgs(src: string, out: string, kind: PrepKind, info: any, enc: string): string[] {
   const a = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"];
   if (kind === "convert" && enc === "h264_nvenc") a.push("-hwaccel", "cuda");
+  a.push("-threads", "0");
   a.push("-i", src, "-map", "0:v:0", "-map", `0:a:${info.audio ?? 0}?`, "-map_chapters", "-1", "-sn", "-dn");
   if (kind === "remux") a.push("-c:v", "copy", "-tag:v", "avc1");
   else {
@@ -104,7 +105,7 @@ export function encodeArgs(src: string, out: string, kind: PrepKind, info: any, 
     const tone = info.hdr ? "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv," : "";
     a.push("-vf", `${scale}${tone}format=yuv420p`);
     const max = tall >= 1000 ? "8M" : tall >= 700 ? "5M" : "2.5M";
-    if (enc === "libx264") a.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", max, "-bufsize", max.replace("M", "") + "M");
+    if (enc === "libx264") a.push("-c:v", "libx264", "-preset", "faster", "-crf", "21", "-maxrate", max, "-bufsize", max.replace("M", "") + "M", "-threads", "0");
     else if (enc === "h264_nvenc") a.push("-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", "23", "-b:v", "0", "-maxrate", max, "-bufsize", `${parseFloat(max) * 2}M`, "-spatial-aq", "1");
     else a.push("-c:v", enc, "-b:v", max === "8M" ? "6M" : max === "5M" ? "3.5M" : "1.8M", "-maxrate", max);
     a.push("-profile:v", "high", "-g", "96", "-bf", "2");
@@ -115,12 +116,23 @@ export function encodeArgs(src: string, out: string, kind: PrepKind, info: any, 
   return a;
 }
 
+export function fmtEta(s: number): string {
+  if (s > 86400) return `${Math.round(s / 86400)} d`;
+  if (s > 3600) return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
+  if (s > 60) return `${Math.round(s / 60)} min`;
+  return `${Math.max(1, Math.round(s))} s`;
+}
+
 export function createVideoPrep(deps: VideoPrepDeps) {
   const settingsFile = path.join(deps.persistDir, "video-prep.json");
   let settings = { paused: false };
   let rows = new Map<string, Row>();
   let encoder: string | null = null;
-  let current: { rel: string; title: string; phase: string; progress: number; startedAt: number; proc: ChildProcess | null; stopFor: string | null } | null = null;
+  let current: {
+    rel: string; title: string; phase: string; progress: number; startedAt: number;
+    speed: string | null; speedBps: number | null; eta: number | null;
+    proc: ChildProcess | null; stopFor: string | null;
+  } | null = null;
   let tableReady = false;
   let lastScanAt = 0;
   let scanning = false;
@@ -330,14 +342,26 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     await mkdir(work, { recursive: true });
     const srcName = `source${path.extname(rel)}`;
     const out = path.join(work, "ready.mp4");
-    current = { rel, title: name, phase: "Getting it from Drive", progress: 0, startedAt: Date.now(), proc: null, stopFor: null };
+    current = { rel, title: name, phase: "Getting it from Drive", progress: 0, startedAt: Date.now(), speed: null, speedBps: null, eta: null, proc: null, stopFor: null };
     try {
       await save(rel, { status: "working", progress: 0, error: null });
-      // A local copy first: reading over Drive for Desktop would fill its cache.
-      await rcJob("operations/copyfile", { srcFs: `${deps.remote}:`, srcRemote: `${deps.driveFolder}/${rel}`, dstFs: work, dstRemote: srcName },
-        (b) => { if (current) current.progress = size ? Math.min(1, b / size) * 0.15 : 0; });
+      // A local copy first: reading over Drive for Desktop would fill its cache
+      // (and checks on Drive for Desktop paths have frozen the server).
       const src = path.join(work, srcName);
-      if (!existsSync(src)) throw new Error("the film didn't come down from Drive");
+      {
+        await rcJob("operations/copyfile", { srcFs: `${deps.remote}:`, srcRemote: `${deps.driveFolder}/${rel}`, dstFs: work, dstRemote: srcName },
+          (b) => {
+            if (current) {
+              current.progress = size ? Math.min(1, b / size) * 0.15 : 0;
+              const elapsed = (Date.now() - current.startedAt) / 1000;
+              if (elapsed > 1) {
+                current.speedBps = Math.round(b / elapsed);
+                current.eta = current.speedBps > 0 ? Math.round((size - b) / current.speedBps) : null;
+              }
+            }
+          });
+        if (!existsSync(src)) throw new Error("the film didn't come down from Drive");
+      }
 
       current!.phase = row.kind === "remux" ? "Repacking" : "Converting";
       const enc = await pickEncoder();
@@ -346,9 +370,29 @@ export function createVideoPrep(deps: VideoPrepDeps) {
         const p = spawn(deps.ffmpeg, encodeArgs(src, out, row.kind!, info, enc), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
         current!.proc = p;
         let errText = "";
+        let lastMilestone = 0;
+        let lastLog = Date.now();
         p.stdout.on("data", (d: Buffer) => {
-          const m = /out_time_(?:ms|us)=(\d+)/.exec(String(d));
-          if (m && duration > 0 && current) current.progress = 0.15 + Math.min(1, Number(m[1]) / 1e6 / duration) * 0.7;
+          const text = String(d);
+          const mTime = /out_time_(?:ms|us)=(\d+)/.exec(text);
+          const mSpeed = /speed=\s*([\d.]+)x/.exec(text);
+          const mFps = /fps=\s*([\d.]+)/.exec(text);
+          if (mTime && duration > 0 && current) {
+            const outSec = Number(mTime[1]) / 1e6;
+            const frac = Math.min(1, outSec / duration);
+            current.progress = 0.15 + frac * 0.7;
+            const speedX = mSpeed ? parseFloat(mSpeed[1]) : (outSec / Math.max(1, (Date.now() - current.startedAt) / 1000));
+            const fpsVal = mFps ? Math.round(parseFloat(mFps[1])) : 0;
+            current.speed = speedX > 0 ? `${speedX.toFixed(1)}x${fpsVal > 0 ? ` (${fpsVal} fps)` : ""}` : null;
+            current.eta = speedX > 0 ? Math.max(1, Math.round((duration - outSec) / speedX)) : null;
+
+            const pctNow = Math.floor(current.progress * 100);
+            if (pctNow >= lastMilestone + 15 || Date.now() - lastLog > 30000) {
+              lastMilestone = pctNow;
+              lastLog = Date.now();
+              deps.log("INFO", `video prep: ${name} [${current.phase}] ${pctNow}% (${current.speed ?? "transcoding"}${current.eta ? ` · ${fmtEta(current.eta)} left` : ""})`);
+            }
+          }
         });
         p.stderr.on("data", (d: Buffer) => { errText = (errText + String(d)).slice(-1500); });
         p.on("error", reject);
@@ -369,10 +413,23 @@ export function createVideoPrep(deps: VideoPrepDeps) {
 
       current!.phase = "Saving to Drive";
       const outRel = row.out_rel ?? outRelFor(rel);
-      await rcJob("operations/copyfile", { srcFs: work, srcRemote: "ready.mp4", dstFs: `${deps.remote}:`, dstRemote: `${deps.driveFolder}/${outRel}` },
-        (b) => { if (current) current.progress = 0.85 + Math.min(1, b / outBytes) * 0.15; });
-      const up = await deps.rc("operations/stat", { fs: `${deps.remote}:`, remote: `${deps.driveFolder}/${outRel}` }, 60_000).catch(() => null);
-      if (Number(up?.item?.Size) !== outBytes) throw new Error("the copy on Drive isn't the full size");
+      // Up with rclone, checked for its full size (a copy dropped into the
+      // Drive for Desktop folder uploads later, unchecked).
+      {
+        await rcJob("operations/copyfile", { srcFs: work, srcRemote: "ready.mp4", dstFs: `${deps.remote}:`, dstRemote: `${deps.driveFolder}/${outRel}` },
+          (b) => {
+            if (current) {
+              current.progress = 0.85 + Math.min(1, b / outBytes) * 0.15;
+              const elapsed = (Date.now() - current.startedAt) / 1000;
+              if (elapsed > 1) {
+                current.speedBps = Math.round(b / elapsed);
+                current.eta = current.speedBps > 0 ? Math.round((outBytes - b) / current.speedBps) : null;
+              }
+            }
+          });
+        const up = await deps.rc("operations/stat", { fs: `${deps.remote}:`, remote: `${deps.driveFolder}/${outRel}` }, 60_000).catch(() => null);
+        if (Number(up?.item?.Size) !== outBytes) throw new Error("the copy on Drive isn't the full size");
+      }
 
       await save(rel, { status: "done", progress: 1, out_rel: outRel, out_bytes: outBytes, error: null, requested_at: null });
       deps.log("INFO", `video prep: ${name} ready (${row.kind}, ${humanBytes(outBytes)}, ${Math.round((Date.now() - current!.startedAt) / 1000)} s)`);
@@ -475,8 +532,10 @@ export function createVideoPrep(deps: VideoPrepDeps) {
         kind: "convert", title: `Preparing films for every device: ${ready} of ${c.films} ready`,
         progress: current ? current.progress : c.films ? ready / c.films : null,
         status: settings.paused ? "paused" : "running", jobId: "video-prep", actions: settings.paused ? ["resume"] : ["pause"],
+        speed: current?.speedBps ?? undefined,
+        eta: current?.eta ?? undefined,
         detail: settings.paused ? `Paused. ${left} film(s) still to prepare.`
-          : current ? `${current.phase}: ${current.title} (${Math.round(current.progress * 100)}%). ${left - 1} more after it.`
+          : current ? `${current.phase}: ${current.title} (${Math.round(current.progress * 100)}%${current.speed ? ` · ${current.speed}` : ""}${current.eta ? ` · ${fmtEta(current.eta)} left` : ""}). ${left - 1} more after it.`
           : deps.gameModeActive() ? `Waiting until the game closes. ${left} to go.`
           : driveFree.bytes != null && driveFree.bytes < 200 * 1024 ** 3 ? `Stopped: Google Drive has less than 200 GB free (${humanBytes(driveFree.bytes)}). ${left} to go.` : `${left} to go (${c.remux} quick repacks, ${c.convert} conversions).`,
       }];

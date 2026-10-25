@@ -238,9 +238,9 @@ pub unsafe extern "C" fn input_state(port: c_uint, device: c_uint, index: c_uint
         RETRO_DEVICE_ANALOG => match index {
             RETRO_DEVICE_INDEX_ANALOG_LEFT | RETRO_DEVICE_INDEX_ANALOG_RIGHT if id <= 1 => p.sticks[index as usize][id as usize],
             RETRO_DEVICE_INDEX_ANALOG_BUTTON => match id {
-                RETRO_DEVICE_ID_JOYPAD_L2 => if p.triggers[0] > 0 { p.triggers[0] } else if p.buttons >> id & 1 == 1 { 0x7fff } else { 0 },
-                RETRO_DEVICE_ID_JOYPAD_R2 => if p.triggers[1] > 0 { p.triggers[1] } else if p.buttons >> id & 1 == 1 { 0x7fff } else { 0 },
-                id if id < 16 => if p.buttons >> id & 1 == 1 { 0x7fff } else { 0 },
+                0 | RETRO_DEVICE_ID_JOYPAD_L2 => if p.triggers[0] > 0 { p.triggers[0] } else if (p.buttons >> RETRO_DEVICE_ID_JOYPAD_L2) & 1 == 1 { 0x7fff } else { 0 },
+                1 | RETRO_DEVICE_ID_JOYPAD_R2 => if p.triggers[1] > 0 { p.triggers[1] } else if (p.buttons >> RETRO_DEVICE_ID_JOYPAD_R2) & 1 == 1 { 0x7fff } else { 0 },
+                id if id < 16 => if (p.buttons >> id) & 1 == 1 { 0x7fff } else { 0 },
                 _ => 0,
             },
             _ => 0,

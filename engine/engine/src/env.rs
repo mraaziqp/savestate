@@ -308,6 +308,12 @@ pub unsafe extern "C" fn environment(cmd: c_uint, data: *mut c_void) -> bool {
                 let mut c = data as *const retro_controller_info;
                 let mut n = 0;
                 while !(*c).types.is_null() {
+                    let types = (*c).types;
+                    let num = (*c).num_types;
+                    for i in 0..num {
+                        let t = &*types.add(i as usize);
+                        crate::info!("controller info port {} type {}: id={} desc={}", n, i, t.id, cstr(t.desc));
+                    }
                     n += 1;
                     c = c.add(1);
                 }

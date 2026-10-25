@@ -59,10 +59,15 @@ export function AdminUsers() {
         <div className="nxa-tabs" role="tablist" style={{ marginTop: 6 }}>
           <button role="tab" aria-selected={tab === "people"} className={tab === "people" ? "on" : ""} onClick={() => setTab("people")}>People</button>
           <button role="tab" aria-selected={tab === "groups"} className={tab === "groups" ? "on" : ""} onClick={() => setTab("groups")}>Groups</button>
+          <button role="tab" aria-selected={tab === "invites"} className={tab === "invites" ? "on" : ""} onClick={() => setTab("invites")}>Custom Invites</button>
+          <button role="tab" aria-selected={tab === "streams"} className={tab === "streams" ? "on" : ""} onClick={() => setTab("streams")}>Devices &amp; Streams</button>
         </div>
       </div>
       {error && <Note kind="bad">{error}</Note>}
-      {tab === "people" ? <People data={data} reload={load} /> : <Groups data={data} reload={load} />}
+      {tab === "people" && <People data={data} reload={load} />}
+      {tab === "groups" && <Groups data={data} reload={load} />}
+      {tab === "invites" && <InvitesTab data={data} />}
+      {tab === "streams" && <StreamsTab data={data} />}
     </div>
   );
 }
@@ -319,6 +324,417 @@ function Group({ g, data, reload }) {
         {busy && <span className="nxau-sub"><Icon name="spinner" /> Saving…</span>}
       </div>
       {error && <Note kind="bad">{error}</Note>}
+    </div>
+  );
+}
+
+// ── Custom Invites ────────────────────────────────────────────────────────
+function InvitesTab({ data }) {
+  const [invites, setInvites] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [wording, setWording] = useState("");
+  const [label, setLabel] = useState("");
+  const [tier, setTier] = useState(data.tiers?.[0] || "free");
+  const [maxUses, setMaxUses] = useState("");
+  const [expiresHours, setExpiresHours] = useState("0");
+  const [copiedId, setCopiedId] = useState(null);
+
+  const fetchInvites = useCallback(async () => {
+    try {
+      const list = await api("/api/hosts/invites");
+      setInvites(Array.isArray(list) ? list : []);
+      setError("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchInvites();
+  }, [fetchInvites]);
+
+  const cleanSlug = wording.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const effectiveSlug = cleanSlug ? (cleanSlug.includes("savestate") ? cleanSlug : `savestate-${cleanSlug}`) : "savestate-custom-name";
+  const previewUrl = typeof window !== "undefined" ? `${window.location.origin}/invite/${effectiveSlug}` : `/invite/${effectiveSlug}`;
+
+  async function handleCreate(e) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    setSuccess("");
+    try {
+      const res = await api("/api/hosts/invites", {
+        method: "POST",
+        body: {
+          wording: cleanSlug || undefined,
+          label: label.trim() || undefined,
+          tier,
+          max_uses: maxUses ? parseInt(maxUses, 10) : undefined,
+          expires_hours: expiresHours !== "0" ? parseInt(expiresHours, 10) : undefined,
+        },
+      });
+      const link = res.invite_url || `${window.location.origin}/invite/${res.code}`;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(link).catch(() => {});
+      }
+      setSuccess(`Created and copied to clipboard: ${link}`);
+      setWording("");
+      setLabel("");
+      setMaxUses("");
+      await fetchInvites();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(id) {
+    if (!confirm("Revoke this invite link? Anyone who hasn't redeemed it yet will not be able to use it.")) return;
+    try {
+      await api(`/api/hosts/invites/${id}`, { method: "DELETE" });
+      await fetchInvites();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  function handleCopy(inv) {
+    const link = inv.invite_url || `${window.location.origin}/invite/${inv.code}`;
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(link).catch(() => {});
+    }
+    setCopiedId(inv.id);
+    setTimeout(() => setCopiedId(null), 2500);
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <form className="nxa-card" onSubmit={handleCreate} style={{ display: "grid", gap: 14 }}>
+        <div className="nxa-card-head" style={{ marginBottom: 0 }}>
+          <div>
+            <h3 style={{ fontSize: 18, fontWeight: 900, margin: 0 }}>Create Custom "savestate" Invite Link</h3>
+            <p className="nxa-dim" style={{ marginTop: 4 }}>
+              Invite friends, family, or your own remote devices to connect directly to your SaveState host server.
+            </p>
+          </div>
+        </div>
+
+        <div className="nxau-grid">
+          <div className="nxau-box">
+            <h4>Custom Name / Wording</h4>
+            <input
+              className="nxa-input sm"
+              placeholder="e.g. family, livingroom, retro-club"
+              value={wording}
+              onChange={(e) => setWording(e.target.value)}
+              maxLength={60}
+            />
+            <span className="nxau-sub">
+              Live link: <code style={{ color: "var(--acc)", fontWeight: 700 }}>{previewUrl}</code>
+            </span>
+          </div>
+
+          <div className="nxau-box">
+            <h4>Label &amp; Membership Plan</h4>
+            <input
+              className="nxa-input sm"
+              placeholder="Label (optional, e.g. For Mike)"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              maxLength={80}
+            />
+            <select className="nxa-input sm" value={tier} onChange={(e) => setTier(e.target.value)}>
+              {data.tiers.map((t) => (
+                <option key={t} value={t}>Plan: {t}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="nxau-box">
+            <h4>Usage &amp; Expiration</h4>
+            <input
+              type="number"
+              min="1"
+              className="nxa-input sm"
+              placeholder="Max uses (blank = unlimited)"
+              value={maxUses}
+              onChange={(e) => setMaxUses(e.target.value)}
+            />
+            <select className="nxa-input sm" value={expiresHours} onChange={(e) => setExpiresHours(e.target.value)}>
+              <option value="0">Never expires</option>
+              <option value="24">Expires in 24 hours</option>
+              <option value="72">Expires in 3 days</option>
+              <option value="168">Expires in 7 days</option>
+              <option value="720">Expires in 30 days</option>
+            </select>
+          </div>
+        </div>
+
+        {error && <Note kind="bad">{error}</Note>}
+        {success && <Note kind="ok">{success}</Note>}
+
+        <div className="nxa-row">
+          <button type="submit" className="nxa-btn primary" disabled={busy}>
+            {busy ? <Icon name="spinner" /> : <Icon name="plus" />} Create &amp; Copy Invite Link
+          </button>
+        </div>
+      </form>
+
+      <div className="nxa-card" style={{ display: "grid", gap: 12 }}>
+        <div className="nxa-card-head" style={{ marginBottom: 0 }}>
+          <h3 style={{ fontSize: 18, fontWeight: 900, margin: 0 }}>Active Invite Links ({invites.length})</h3>
+        </div>
+
+        {loading && <p className="nxa-dim"><Icon name="spinner" /> Loading invite links…</p>}
+
+        {!loading && !invites.length && (
+          <p className="nxa-dim">No custom invite links created yet. Generate one above to invite devices or friends to your SaveState library.</p>
+        )}
+
+        <div className="nxau-list">
+          {invites.map((inv) => {
+            const fullUrl = inv.invite_url || `${window.location.origin}/invite/${inv.code}`;
+            const isExpired = inv.expires_at && new Date(inv.expires_at) < new Date();
+            const isFull = inv.max_uses && inv.use_count >= inv.max_uses;
+            const isCopied = copiedId === inv.id;
+
+            return (
+              <div key={inv.id} className="nxau-row" style={{ padding: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontWeight: 800, fontSize: 15, fontFamily: "ui-monospace, monospace" }}>
+                        {inv.code}
+                      </span>
+                      <span className="nxa-pill acc">{inv.tier || "free"}</span>
+                      {inv.label && <span className="nxa-pill">{inv.label}</span>}
+                      {isExpired && <span className="nxa-pill bad">Expired</span>}
+                      {isFull && <span className="nxa-pill warn">Usage Limit Reached</span>}
+                    </div>
+
+                    <div className="nxau-link" style={{ marginTop: 8, maxWidth: 540 }}>
+                      {fullUrl}
+                    </div>
+
+                    <div className="nxau-pills" style={{ marginTop: 8 }}>
+                      <span className="nxau-sub">
+                        Uses: <b>{inv.use_count || 0}</b>{inv.max_uses ? ` / ${inv.max_uses}` : " (unlimited)"}
+                      </span>
+                      <span className="nxau-sub">·</span>
+                      <span className="nxau-sub">
+                        {inv.expires_at ? `Expires ${when(inv.expires_at)}` : "Never expires"}
+                      </span>
+                      <span className="nxau-sub">·</span>
+                      <span className="nxau-sub">Created {when(inv.created_at)}</span>
+                    </div>
+                  </div>
+
+                  <div className="nxa-row" style={{ gap: 8 }}>
+                    <button className="nxa-btn sm" onClick={() => handleCopy(inv)}>
+                      <Icon name={isCopied ? "check" : "copy"} /> {isCopied ? "Copied!" : "Copy"}
+                    </button>
+                    <button className="nxa-btn sm" style={{ color: "var(--bad)" }} onClick={() => handleDelete(inv.id)}>
+                      <Icon name="trash" /> Revoke
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Devices & Streams ─────────────────────────────────────────────────────
+function StreamsTab({ data }) {
+  const [streams, setStreams] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [stoppingKey, setStoppingKey] = useState(null);
+  const [error, setError] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const userById = useMemo(() => {
+    return Object.fromEntries(data.users.map((u) => [String(u.id), u]));
+  }, [data.users]);
+
+  const loadStreams = useCallback(async () => {
+    try {
+      const res = await api("/api/admin/streams");
+      setStreams(Array.isArray(res.streams) ? res.streams : []);
+      setError("");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadStreams();
+    const timer = setInterval(loadStreams, 8000);
+    return () => clearInterval(timer);
+  }, [loadStreams]);
+
+  async function handleStop(s) {
+    setStoppingKey(s.key);
+    setError("");
+    setMsg("");
+    try {
+      await api("/api/admin/streams/stop", {
+        method: "POST",
+        body: { key: s.key, account: s.account, device: s.device },
+      });
+      setMsg(`Playback disconnected on ${s.label}.`);
+      await loadStreams();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setStoppingKey(null);
+    }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <div className="nxa-card" style={{ display: "grid", gap: 14 }}>
+        <div className="nxa-card-head" style={{ marginBottom: 0 }}>
+          <div>
+            <h3 style={{ fontSize: 18, fontWeight: 900, margin: 0 }}>Live Screens &amp; Active Playback</h3>
+            <p className="nxa-dim" style={{ marginTop: 4 }}>
+              Monitor active video and game streams running across connected client devices. You can disconnect any screen to free up capacity.
+            </p>
+          </div>
+          <button className="nxa-btn sm" onClick={loadStreams} disabled={loading}>
+            <Icon name="spinner" /> Refresh
+          </button>
+        </div>
+
+        {error && <Note kind="bad">{error}</Note>}
+        {msg && <Note kind="ok">{msg}</Note>}
+
+        {loading && !streams.length && (
+          <p className="nxa-dim"><Icon name="spinner" /> Checking active streams…</p>
+        )}
+
+        {!loading && !streams.length && (
+          <div style={{ padding: "24px 16px", textAlign: "center", background: "rgba(255,255,255,.02)", borderRadius: 12, border: "1px dashed var(--line)" }}>
+            <p style={{ fontWeight: 800, fontSize: 16, margin: 0 }}>No active streams right now</p>
+            <p className="nxa-dim" style={{ marginTop: 6, fontSize: 13 }}>
+              When users watch movies, stream games, or connect devices to your host, their live sessions and screens will be listed here.
+            </p>
+          </div>
+        )}
+
+        <div className="nxau-list">
+          {streams.map((s) => {
+            const user = userById[s.account];
+            const userName = user ? (user.display_name || user.username) : (s.who || `Account #${s.account}`);
+            const durationMin = Math.max(1, Math.round((Date.now() - s.since) / 60000));
+            const isStopping = stoppingKey === s.key;
+
+            return (
+              <div key={s.key} className="nxau-row" style={{ padding: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ width: 10, height: 10, borderRadius: "50%", background: "#22c55e", display: "inline-block", boxShadow: "0 0 8px #22c55e" }} />
+                      <span style={{ fontWeight: 800, fontSize: 15 }}>{s.label}</span>
+                      <span className="nxa-pill acc">{userName}</span>
+                      {s.openCount > 0 && <span className="nxa-pill ok">{s.openCount} feed{s.openCount === 1 ? "" : "s"}</span>}
+                    </div>
+
+                    <div style={{ marginTop: 6, fontSize: 13.5, fontWeight: 700, color: "#fff" }}>
+                      {s.title || "Active media playback"}
+                    </div>
+
+                    <div className="nxau-pills" style={{ marginTop: 6 }}>
+                      <span className="nxau-sub">Streaming for {durationMin} min</span>
+                      <span className="nxau-sub">·</span>
+                      <span className="nxau-sub">Device ID: <code style={{ fontSize: 11 }}>{s.device}</code></span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <button
+                      className="nxa-btn sm"
+                      style={{ color: "var(--bad)" }}
+                      disabled={isStopping}
+                      onClick={() => handleStop(s)}
+                    >
+                      <Icon name="x" /> {isStopping ? "Disconnecting…" : "Stop Stream"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="nxa-card" style={{ display: "grid", gap: 14 }}>
+        <div className="nxa-card-head" style={{ marginBottom: 0 }}>
+          <div>
+            <h3 style={{ fontSize: 18, fontWeight: 900, margin: 0 }}>SaveState Everywhere: Client Installers</h3>
+            <p className="nxa-dim" style={{ marginTop: 4 }}>
+              Equip all your devices with official SaveState native builds to connect to this server.
+            </p>
+          </div>
+        </div>
+
+        <div className="nxau-grid">
+          <div className="nxau-box">
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 16 }}>🪟</span> Windows Desktop
+            </h4>
+            <p className="nxau-sub">Direct hardware acceleration, full Dolphin &amp; PS2/GC emulator support, remote streaming.</p>
+            <a href="/api/downloads/desktop?platform=windows" className="nxa-btn sm primary" download style={{ textDecoration: "none", textAlign: "center" }}>
+              Download Windows App (.exe)
+            </a>
+          </div>
+
+          <div className="nxau-box">
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 16 }}>📱</span> Android Mobile &amp; Tablet
+            </h4>
+            <p className="nxau-sub">Full APK v1.0.70 with gamepad Bluetooth controller support and persistent scoped storage.</p>
+            <a href="/api/downloads/apk" className="nxa-btn sm primary" download style={{ textDecoration: "none", textAlign: "center" }}>
+              Download Android APK
+            </a>
+          </div>
+
+          <div className="nxau-box">
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 16 }}>🐧</span> Linux / Steam Deck
+            </h4>
+            <p className="nxau-sub">Debian/Ubuntu package and automated shell installer with standalone emulator support.</p>
+            <a href="/api/downloads/desktop?platform=linux" className="nxa-btn sm primary" download style={{ textDecoration: "none", textAlign: "center" }}>
+              Download Linux Package (.deb)
+            </a>
+          </div>
+
+          <div className="nxau-box">
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 16 }}>🎮</span> PlayStation Vita
+            </h4>
+            <p className="nxau-sub">Native homebrew VPK v1.1 + dedicated lightweight handheld web portal.</p>
+            <div style={{ display: "flex", gap: 6 }}>
+              <a href="/api/downloads/vita" className="nxa-btn sm primary" download style={{ flex: 1, textDecoration: "none", textAlign: "center" }}>
+                Download VPK
+              </a>
+              <a href="/vita" className="nxa-btn sm" target="_blank" rel="noreferrer" style={{ textDecoration: "none", textAlign: "center" }}>
+                Web Portal
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

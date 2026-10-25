@@ -212,6 +212,52 @@ export function createPlanLimits(deps: PlanLimitsDeps) {
       deps.log("INFO", `${caller.username ?? "member"} stopped playback on ${s.label}`);
       res.json({ ok: true, stopped: true });
     });
+
+    // Admin: list all active streams across all users on the host
+    app.get("/api/admin/streams", async (req, res) => {
+      let caller: Caller;
+      try { caller = await deps.callerOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
+      if (!caller.admin && !caller.host && caller.role !== "ultra_admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      const now = Date.now();
+      const list: Array<any> = [];
+      for (const [key, s] of streams) {
+        if (!live(s, now)) { streams.delete(key); continue; }
+        list.push({
+          key,
+          account: s.account,
+          device: s.device,
+          label: s.label,
+          who: s.who,
+          title: s.title,
+          since: s.since,
+          lastAt: s.lastAt,
+          openCount: s.open.size,
+        });
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ streams: list, total: list.length });
+    });
+
+    // Admin: terminate any active stream on the host
+    app.post("/api/admin/streams/stop", async (req, res) => {
+      let caller: Caller;
+      try { caller = await deps.callerOf(req); } catch { return res.status(401).json({ error: "Unauthorized" }); }
+      if (!caller.admin && !caller.host && caller.role !== "ultra_admin") {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+      const account = String(req.body?.account ?? "");
+      const device = String(req.body?.device ?? "");
+      const key = req.body?.key ? String(req.body.key) : `${account}|${device}`;
+      const s = streams.get(key);
+      if (!s) return res.json({ ok: true, stopped: false });
+      for (const r of s.open) { try { r.destroy(); } catch { /* gone */ } }
+      streams.delete(key);
+      stopped.set(key, Date.now());
+      deps.log("INFO", `Admin ${caller.username ?? "admin"} stopped playback on ${s.label} (${s.account})`);
+      res.json({ ok: true, stopped: true });
+    });
   }
 
   return { streamGuard, gameGuard, register, streamLimit, screensOf: (userId: string) => activeFor(userId).length, activeCount: () => [...streams.values()].filter((s) => live(s)).length };

@@ -199,6 +199,10 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
   ch = patch(ch, "vault download hands phone games to the emulator app", `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}`,
     "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){",
     `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}if(!nxCanBrowser(t.platform)&&!await _()){`);
+  // The hub loaded 2,000 games; the library passed 3,700 (2026-10-25) and
+  // half of it was missing from the hub's systems and counts.
+  ch = patch(ch, "hub loads every game", 'fetch("/api/games?limit=20000",{headers:ce()})',
+    'fetch("/api/games?limit=2000",{headers:ce()})', 'fetch("/api/games?limit=20000",{headers:ce()})');
   // The launch screen said "Running emulator on local machine…" on a phone too.
   ch = patch(ch, "launch screen wording", "Getting the game ready…",
     'children:"Running emulator on local machine…"', 'children:"Getting the game ready…"');
@@ -280,12 +284,12 @@ shell = patch(shell, "admin pages wait for the account (deps)", "},[x,Ue,kt,Ee,r
 // and offers the play-mode picker for dual-supported systems.
 {
   const from = /(?:async function gc\(t(?:,\w+)?\)\{[\s\S]*?return nxR\}|async function gc\(t\)\{if\(!1&&oo&&!Fe\(\)\})/;
-  const to = 'async function gc(t,nxOpt){if(nxOpt?.forceLocal){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",mode:"local",game:t,retry:()=>gc(t,nxOpt)}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",mode:"local",game:t,result:nxR,retry:()=>gc(t,nxOpt)}}));return nxR}if(nxOpt?.forceBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}const canBrowser=!!(window.nxRuns?.runsOn?window.nxRuns.runsOn(t.platform).browser:!1);if(window.__nxForceBrowserPlay&&canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}let pref=null;try{pref=localStorage.getItem("nx_play_pref_"+String(t.platform).toLowerCase())}catch{}if(pref==="browser"&&canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}if(pref==="local"||!canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",mode:"local",game:t,retry:()=>gc(t,{forceLocal:!0})}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",mode:"local",game:t,result:nxR,retry:()=>gc(t,{forceLocal:!0})}}));return nxR}window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"choose",game:t,launchLocal:()=>gc(t,{forceLocal:!0}),launchBrowser:()=>gc(t,{forceBrowser:!0})}}));return{ok:!0,choicePending:!0}}';
+  const to = 'async function gc(t,nxOpt){if(nxOpt?.forceLocal){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",mode:"local",game:t,retry:()=>gc(t,nxOpt)}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",mode:"local",game:t,result:nxR,retry:()=>gc(t,nxOpt)}}));return nxR}if(nxOpt?.forceBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}const canBrowser=!!(window.nxRuns?.runsOn?window.nxRuns.runsOn(t.platform).browser:!1);const isMob=typeof navigator!=="undefined"&&(/android|iphone|ipad|ipod|mobile/i.test(navigator.userAgent)||(navigator.maxTouchPoints>0&&typeof screen!=="undefined"&&screen.width<=1024));if(isMob&&!nxOpt?.forceLocal){if(canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}if(window.nxPhonePlay){window.nxPhonePlay(t)}else{window.dispatchEvent(new CustomEvent("nexus:phone-play",{detail:{game:t}}))}return{ok:!0,phone:!0}}if(window.__nxForceBrowserPlay&&canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}let pref=null;try{pref=localStorage.getItem("nx_play_pref_"+String(t.platform).toLowerCase())}catch{}if(pref==="browser"&&canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"browser",mode:"browser",game:t}}));return{ok:!0}}if(pref==="local"||!canBrowser){window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"starting",mode:"local",game:t,retry:()=>gc(t,{forceLocal:!0})}}));const nxR=await nxGcInner(t);window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:nxR.ok?"started":"failed",mode:"local",game:t,result:nxR,retry:()=>gc(t,{forceLocal:!0})}}));return nxR}window.dispatchEvent(new CustomEvent("nexus:play",{detail:{phase:"choose",game:t,launchLocal:()=>gc(t,{forceLocal:!0}),launchBrowser:()=>gc(t,{forceBrowser:!0})}}));return{ok:!0,choicePending:!0}}';
   shell = patch(shell, "central launch router with browser and local choice", "nxOpt?.forceLocal", from, to);
 }
 shell = patch(shell, "native launch returns the game's pid", "pid:n.data?.pid,emulator:n.data?.emulator",
   'return{ok:!0}}catch{return{ok:!1,error:"Could not contact local launcher"}}}',
-  'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}}catch{return{ok:!1,error:"SaveState for Windows didn\\u2019t answer. Try again, or open Games > Set up games."}}}');
+  'return{ok:!0,pid:n.data?.pid,emulator:n.data?.emulator}}catch{return{ok:!1,error:"SaveState didn\\u2019t answer. Try again, or open Games > Set up games."}}}');
 // SaveState Engine: Play asks the launcher to run the game inside SaveState
 // (engine:true) unless the person chose RetroArch (localStorage nx_engine
 // "off") or asked for RetroArch for this game just now (window.__nxEngineSkip).
@@ -318,7 +322,7 @@ shell = patch(shell, "controller navigation hook", "window.__nxGamepadNav(u,",
 shell = patch(shell, "card play asks the launcher on https", "if(!1&&oo&&!Fe())return{ok:!1,error:",
   "if(oo&&!Fe())return{ok:!1,error:", "if(!1&&oo&&!Fe())return{ok:!1,error:");
 for (const old of ['"Client launcher not running"', '"Client launcher not installed/running"']) {
-  if (shell.includes(old)) shell = shell.split(old).join('"SaveState for Windows isn\u2019t answering on this PC. Open Games > Set up games to install or update it, and choose Allow if the browser asks to connect to apps on this computer."');
+  if (shell.includes(old)) shell = shell.split(old).join('"SaveState isn\u2019t answering on this computer. Open Games > Set up games to install or update it, and choose Allow if the browser asks to connect to apps on this computer."');
 }
 
 // Admin > Manage Users: every account and every group (AdminUsers.jsx). The
@@ -741,7 +745,7 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   // without it the card says what to install instead of downloading.
   ch = patch(ch, "play offline: heavy games go to the launcher", "nxHeavyNeedsApp",
     "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;",
-    'b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){const nxHeavyNeedsApp=`${String(t.platform).toUpperCase()} games play through SaveState for Windows. Open Games > Set up games to install it (a one-time step), then press Play again.`;f(M=>new Map(M).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:nxHeavyNeedsApp}));o?.(`Couldn\'t play ${t.title}: ${nxHeavyNeedsApp}`,"error",void 0,1e4);return}');
+    'b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){const nxHeavyNeedsApp=`${String(t.platform).toUpperCase()} games play through SaveState. Open Games > Set up games to install it (a one-time step), then press Play again.`;f(M=>new Map(M).set(t.id,{phase:"error",progress:0,received:0,total:0,speed:0,error:nxHeavyNeedsApp}));o?.(`Couldn\'t play ${t.title}: ${nxHeavyNeedsApp}`,"error",void 0,1e4);return}');
   ch = patch(ch, "play offline: browser storage only for browser games", "if(y.isSupported&&nxCanBrowser(t.platform)){try{const M=x(t),k=await y.downloadRomToDevice(",
     "if(y.isSupported){try{const M=x(t),k=await y.downloadRomToDevice(", "if(y.isSupported&&nxCanBrowser(t.platform)){try{const M=x(t),k=await y.downloadRomToDevice(");
   // The launcher getting the game ready (copying it to this PC) is the first
@@ -1153,7 +1157,20 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
     'import{t as W}from"./EmulatorPlayer-', `import{s as nxCanBrowser}from"./${touchFile}";import{t as W}from"./EmulatorPlayer-`);
   ll = patch(ll, "games tab heavy games use the launcher", "nxHeavyLaunch",
     "const X=(0,l.useCallback)(async t=>{if(!g.has(t.id)){",
-    'const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=await nxLauncherUp(1500).catch(()=>!1);if(!nxHeavyLaunch){x(`${String(t.platform).toUpperCase()} games play through SaveState for Windows. Open Games > Set up games to install it, then press Play again.`);return}const r0=await nxLaunchNative({id:t.id,title:t.title,platform:t.platform,relativePath:t.relativePath}).catch(e0=>({ok:!1,error:e0?.message}));if(!r0?.ok)x(`Couldn\'t start ${t.title}: ${r0?.error??"SaveState for Windows didn\'t answer"}`);return}if(!g.has(t.id)){');
+    'const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=await nxLauncherUp(1500).catch(()=>!1);if(!nxHeavyLaunch){x(`${String(t.platform).toUpperCase()} games play through SaveState. Open Games > Set up games to install it, then press Play again.`);return}const r0=await nxLaunchNative({id:t.id,title:t.title,platform:t.platform,relativePath:t.relativePath}).catch(e0=>({ok:!1,error:e0?.message}));if(!r0?.ok)x(`Couldn\'t start ${t.title}: ${r0?.error??"SaveState didn\'t answer"}`);return}if(!g.has(t.id)){');
+  // The Host Library asked for 500 games and searched only those: with 3,791
+  // in the library PSP vanished from it and "Daxter" matched nothing
+  // (2026-10-25). It loads them all, draws the first 300 matches (each card
+  // animates in; 3,791 at once stalled a phone) and says how to find the rest.
+  ll = patch(ll, "host library loads every game", 'fetch("/api/games",{headers:B(),signal:o.signal})',
+    'fetch("/api/games?limit=500",{headers:B(),signal:o.signal})', 'fetch("/api/games",{headers:B(),signal:o.signal})');
+  ll = patch(ll, "host library draws the first 300 matches", "children:O.slice(0,300).map((t,o)=>{",
+    "children:(0,e.jsx)(M,{children:O.map((t,o)=>{", "children:(0,e.jsx)(M,{children:O.slice(0,300).map((t,o)=>{");
+  ll = patch(ll, "host library card animation capped", "delay:Math.min(o,30)*.01",
+    "transition:{delay:o*.01,duration:.2}", "transition:{delay:Math.min(o,30)*.01,duration:.2}");
+  ll = patch(ll, "host library says how to find the rest", "search or pick a console to find the rest",
+    '!c&&O.length>0&&(0,e.jsx)("div",{className:"grid grid-cols-3',
+    '!c&&O.length>300&&(0,e.jsx)("p",{className:"text-center text-xs text-white/40 py-2",children:`Showing 300 of ${O.length}: search or pick a console to find the rest.`}),!c&&O.length>0&&(0,e.jsx)("div",{className:"grid grid-cols-3');
   if (ll !== before) writeFileSync(file, ll);
 }
 

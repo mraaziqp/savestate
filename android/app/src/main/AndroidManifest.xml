@@ -15,7 +15,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:banner="@drawable/tv_banner"
-        android:theme="@style/AppTheme">
+        android:theme="@style/AppTheme"
+        android:requestLegacyExternalStorage="true">
         <!-- Android TV leanback launchers require a banner; without one the
              app can be rejected from the home row even with the category set. -->
 

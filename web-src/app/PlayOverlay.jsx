@@ -230,7 +230,7 @@ export function PlayOverlay() {
                   <span className="nx-playmode-card-title">Play Native (Local PC)</span>
                   <span className="nx-playmode-tag local">Full Speed · Offline</span>
                 </div>
-                <p className="nx-playmode-card-desc">Runs through SaveState for Windows / standalone emulator with dedicated GPU hardware acceleration and offline access.</p>
+                <p className="nx-playmode-card-desc">Runs through SaveState / standalone emulator with dedicated GPU hardware acceleration and offline access.</p>
               </div>
             </button>
           </div>
@@ -296,7 +296,7 @@ export function PlayOverlay() {
   const order = ["preparing", "starting", "started", "closed"];
   const at = order.indexOf(phase);
   const busy = phase === "preparing" || phase === "starting";
-  const needsApp = /SaveState for Windows|Set up games/i.test(s.error ?? "");
+  const needsApp = /SaveState for (Windows|Linux)|SaveState desktop app|Set up games/i.test(s.error ?? "");
 
   return (
     <div className="nxplay nxa" role="dialog" aria-modal="true" aria-live="polite" aria-label={`Playing ${game.title}`}>

@@ -362,19 +362,35 @@ import "./savesync.js";
     } catch { /* offline */ }
   }, true);
 
-  // ── Games kept for offline play ─────────────────────────────────────────
-  // Big Picture keeps downloaded games in this browser's private storage
-  // (OPFS "nexus-roms"). Unless the site's storage is marked persistent the
-  // browser may delete it when the disk runs low, and a game that played
-  // offline yesterday would download again. Asked only once games are kept,
-  // so nobody is asked for storage they don't use.
+  // ── Games kept for offline play & Storage Quota Allocation ───────────────
+  // Unless the site's storage is marked persistent, the browser / WebView
+  // allocates only a tiny best-effort temporary quota (often 1-2 GB). Requesting
+  // persistence unlocks the device's full available storage pool (e.g. 20-30+ GB).
+  const requestPersistence = async () => {
+    try {
+      if (navigator.storage?.persist && !(await navigator.storage.persisted?.())) {
+        const granted = await navigator.storage.persist();
+        if (granted) console.info("[storage] Storage persistence granted; full quota available.");
+      }
+      if (navigator.storage?.estimate) {
+        const est = await navigator.storage.estimate();
+        const quotaMB = Math.round((est.quota || 0) / (1024 * 1024));
+        const usageMB = Math.round((est.usage || 0) / (1024 * 1024));
+        console.info(`[storage] Quota: ${quotaMB} MB, Used: ${usageMB} MB`);
+      }
+    } catch { /* storage API not supported */ }
+  };
+  // Asked when someone presses Play on a phone (PhonePlay), or once games are
+  // kept in this browser: asking on every page load showed Firefox's storage
+  // prompt to people who never keep a game.
+  window.__nxRequestStoragePersistence = requestPersistence;
   setTimeout(async () => {
     try {
-      if (!navigator.storage?.persist || !navigator.storage.getDirectory || await navigator.storage.persisted()) return;
+      if (!navigator.storage?.getDirectory) return;
       const root = await navigator.storage.getDirectory();
       const roms = await root.getDirectoryHandle("nexus-roms").catch(() => null);
       if (!roms) return;
-      for await (const _ of roms.keys()) { await navigator.storage.persist(); break; }
+      for await (const _ of roms.keys()) { await requestPersistence(); break; }
     } catch { /* no OPFS */ }
   }, 15_000);
 
