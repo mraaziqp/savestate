@@ -265,9 +265,14 @@ export function createDownloader(deps: DownloaderDeps) {
   // or size moves to this profile: 720p or 1080p, upgraded to 1080p later.
   const command = (app: { url: string; key: string }, body: Record<string, unknown>) => arrSend(app, "POST", "command", body).catch(() => null);
   const FALLBACK_PROFILE = "SaveState HD (720p or 1080p)";
-  async function fallbackProfile(app: { url: string; key: string }, fromId: number): Promise<number | null> {
+  // Anime is Japanese audio with English subtitles: the release policy's
+  // "Non-English" (-500, against foreign dubs) refused every Baki and Attack
+  // on Titan release (2026-10-26). Anime shows get this one instead.
+  const ANIME_PROFILE = "SaveState Anime (720p or 1080p, Japanese audio)";
+  async function fallbackProfile(app: { url: string; key: string }, fromId: number, anime = false): Promise<number | null> {
+    const name = anime ? ANIME_PROFILE : FALLBACK_PROFILE;
     const profiles = (await arrGet(app.url, app.key, "v3", "qualityprofile").catch(() => [])) as any[];
-    const have = profiles.find((p) => p.name === FALLBACK_PROFILE);
+    const have = profiles.find((p) => p.name === name);
     if (have) return have.id;
     const base = profiles.find((p) => p.id === fromId) ?? profiles[0];
     if (!base) return null;
@@ -276,10 +281,11 @@ export function createDownloader(deps: DownloaderDeps) {
       ? { ...it, items: it.items.map(open), allowed: it.items.some((x: any) => hd(x.quality?.name ?? x.name ?? "")) || !!it.allowed }
       : { ...it, allowed: hd(it.quality?.name ?? it.name ?? "") || !!it.allowed };
     const { id: _id, ...rest } = base;
-    const made = await arrSend(app, "POST", "qualityprofile", { ...rest, name: FALLBACK_PROFILE, upgradeAllowed: true, items: base.items.map(open) }).catch((e) => { deps.log("WARN", `Fallback profile not made: ${e.message}`); return null; });
+    const formatItems = anime ? (base.formatItems ?? []).map((fi: any) => (/non-english/i.test(fi.name ?? "") ? { ...fi, score: 0 } : fi)) : base.formatItems;
+    const made = await arrSend(app, "POST", "qualityprofile", { ...rest, name, upgradeAllowed: true, items: base.items.map(open), formatItems }).catch((e) => { deps.log("WARN", `Fallback profile not made: ${e.message}`); return null; });
     return made?.id ?? null;
   }
-  const qualityOnly = (why: string) => why.split("; ").filter(Boolean).every((w) => /not wanted in profile|larger than maximum|smaller than minimum|is not an upgrade|does not meet the cutoff/i.test(w));
+  const qualityOnly = (why: string, anime = false) => why.split("; ").filter(Boolean).every((w) => /not wanted in profile|larger than maximum|smaller than minimum|is not an upgrade|does not meet the cutoff/i.test(w) || (anime && /Non-English/i.test(w)));
   const topReason = (whys: string[]) => {
     const n = new Map<string, number>();
     for (const w of whys) for (const x of w.split("; ").filter(Boolean)) { const k = x.replace(/\d+(\.\d+)?/g, "N"); n.set(k, (n.get(k) ?? 0) + 1); }
@@ -361,12 +367,14 @@ export function createDownloader(deps: DownloaderDeps) {
               }
               return false;
             };
-            if (!(await tryPush()) && whys.length && whys.every(qualityOnly)) {
-              const fb = await fallbackProfile(S, s.qualityProfileId);
+            if (!(await tryPush()) && whys.length && (whys.every((w) => qualityOnly(w, anime)) || (anime && whys.some((w) => /Non-English/i.test(w))))) {
+              const fb = await fallbackProfile(S, s.qualityProfileId, anime);
               if (fb && fb !== s.qualityProfileId) {
-                await arrSend(S, "PUT", `series/${s.id}`, { ...s, qualityProfileId: fb }).then(() => { s.qualityProfileId = fb; deps.log("INFO", `${s.title}: no 1080p copy within the size policy; now accepts 720p too (upgrades to 1080p later)`); }).catch(() => {});
+                await arrSend(S, "PUT", `series/${s.id}`, { ...s, qualityProfileId: fb }).then(() => { s.qualityProfileId = fb; deps.log("INFO", anime ? `${s.title}: anime profile (Japanese audio with subtitles, 720p or 1080p)` : `${s.title}: no 1080p copy within the size policy; now accepts 720p too (upgrades to 1080p later)`); }).catch(() => {});
                 whys.length = 0;
-                if (!(await tryPush())) await command(S, { name: "SeriesSearch", seriesId: s.id });
+                await tryPush();
+                // Sonarr searches the rest of the show with the new profile itself.
+                await command(S, { name: "SeriesSearch", seriesId: s.id });
               }
             }
             if (!result.startsWith("sent") && whys.length) result = `nothing approved (${topReason(whys)})`;
@@ -424,7 +432,7 @@ export function createDownloader(deps: DownloaderDeps) {
             }
             return false;
           };
-          if (!(await tryPush()) && whys.length && whys.every(qualityOnly)) {
+          if (!(await tryPush()) && whys.length && whys.every((w) => qualityOnly(w))) {
             const fb = await fallbackProfile(R, m.qualityProfileId);
             if (fb && fb !== m.qualityProfileId) {
               await arrSend(R, "PUT", `movie/${m.id}`, { ...m, qualityProfileId: fb }).then(() => { m.qualityProfileId = fb; deps.log("INFO", `${m.title}: no 1080p copy within the size policy; now accepts 720p too (upgrades to 1080p later)`); }).catch(() => {});
