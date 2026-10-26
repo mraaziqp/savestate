@@ -221,6 +221,38 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
   if (out !== text) writeFileSync(file, out);
 }
 
+// 3u. Phase 7: in the Android app, consoles SaveState plays itself (Game Boy,
+//     GBA, SNES, NES, PSP: our own builds of their cores) go to the app's
+//     player through PhonePlay, before the browser player or another app.
+{
+  const NATIVE = "window.nxRuns?.nativeCore?.(t.platform)";
+  shell = patch(shell, "play router: the app's own player first", `if(${NATIVE}&&window.nxPhonePlay){window.nxPhonePlay(t);return{ok:!0}}if(canBrowser)`,
+    "if(window.nxRuns?.isPhone?.()){if(canBrowser){",
+    `if(window.nxRuns?.isPhone?.()){if(${NATIVE}&&window.nxPhonePlay){window.nxPhonePlay(t);return{ok:!0}}if(canBrowser){`);
+  const oldHand = /if\(!nxCanBrowser\(t\.platform\)&&window\.nxRuns\?\.phoneHere\?\.\(t\.platform\)&&window\.nxPhonePlay\)\{window\.nxPhonePlay\(t\);return\}/g;
+  const newHand = `if((${NATIVE}||!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform))&&window.nxPhonePlay){window.nxPhonePlay(t);return}`;
+  for (const prefix of ["ConsoleHub-", "LocalLibraryPanel-"]) {
+    const file = path.join(assets, find(prefix));
+    const before = readFileSync(file, "utf8");
+    let t = patch(before, `${prefix} hands built-in consoles to the app's player`, `(${NATIVE}||!nxCanBrowser(t.platform)`, oldHand, newHand);
+    if (prefix === "ConsoleHub-") {
+      t = patch(t, "big picture: the app's own player first", "if(d&&(window.nxRuns?.nativeCore?.(d.platform)||",
+        "if(d&&!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere?.(d.platform)&&window.nxPhonePlay)",
+        "if(d&&(window.nxRuns?.nativeCore?.(d.platform)||!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere?.(d.platform))&&window.nxPhonePlay)");
+    }
+    if (t !== before) writeFileSync(file, t);
+  }
+  const file = path.join(assets, find("ExpandableDetail-"));
+  const before = readFileSync(file, "utf8");
+  let t = patch(before, "game page Play: the app's own player first", `f&&(${NATIVE}||!be(t.platform)&&window.nxRuns?.phoneHere?.(t.platform))?window.nxPhonePlay?.(t):`,
+    "f&&!be(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)?window.nxPhonePlay?.(t):",
+    `f&&(${NATIVE}||!be(t.platform)&&window.nxRuns?.phoneHere?.(t.platform))?window.nxPhonePlay?.(t):`);
+  t = patch(t, "game page play path: the app's own player first", `if(y){if(${NATIVE}&&window.nxPhonePlay){p(!1);window.nxPhonePlay(t);return}`,
+    "if(y){if(p(!1),be(t.platform)){await Se();return}",
+    `if(y){if(${NATIVE}&&window.nxPhonePlay){p(!1);window.nxPhonePlay(t);return}if(p(!1),be(t.platform)){await Se();return}`);
+  if (t !== before) writeFileSync(file, t);
+}
+
 // 3t. Games panel on a phone: the search box shared a row with the console
 //     chips and was squeezed to a sliver; on a narrow screen it gets its own
 //     full-width line.

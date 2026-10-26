@@ -835,3 +835,41 @@ streaming from the PC (Phase 6, `?play=CODE`) covers what a phone can't run.
   known spin, see 13); it passed the next five runs.
 - Next: step 7.2 (EGL/GLES on a SurfaceView, AAudio, JNI, GameActivity,
   core download) after the owner's approval.
+
+### 14.4 Step 7.2 results (2026-10-26)
+
+Our own cores, built from official sources by `engine\cores\build-core.ps1`
+(arm64-v8a, NDK 27.3, stripped; sources in G:\Projects\savestate-cores,
+outputs in releases\cores\android with cores.json: source, commit, SHA-256):
+gambatte (Game Boy/Color), mgba (GBA), snes9x (SNES), fceumm (NES) and
+ppsspp (PSP, 21 MB, CMake/Ninja with -DLIBRETRO=ON) plus ppsspp-system.zip
+(PPSSPP's flash0 fonts, atlases and compatibility lists from its own tree).
+
+The Android player (engine/engine/src/android, hw_egl.rs): one GLES 3
+context on the emulation thread; GPU cores draw into a framebuffer that is
+blitted straight to the SurfaceView, software frames are uploaded to a
+texture (RGB565, XRGB8888 via texture swizzle, RGBA8) and blitted the same
+way; no shaders, no read-back. AAudio at the device rate with a resampler
+whose ratio follows the buffer fill (+-0.5%). Paced at the core's own fps
+with eglSwapInterval 0 (90/120 Hz screens don't speed games up). Battery
+saves every 30 s and on exit; save/load state to a file. JNI:
+com.savestate.nexus.NxEngine (start, surface, input, pause, save/load state,
+stop, status). Log lines go to logcat (tag SaveState).
+
+The app: GameActivity (full screen, sideways, on-screen controls per console
+in TouchPad, Bluetooth/USB controllers, Back menu: resume, save, load, quit)
+downloads a core from /api/engine/android/files on first use, checks its
+SHA-256 against /api/engine/android/cores and keeps it; PPSSPP's system files
+likewise. NxAndroid 5 adds `engine` and `play`; the page sends Game Boy,
+GBA, SNES, NES and PSP games to the app's player (PhonePlay), with the
+emulator apps as "instead". The APK carries the engine for arm64, armeabi-v7a
+and x86_64 (Android refuses an APK with no native build for the device);
+games play inside the app on arm64 phones. APK 1.0.72 (9.9 MB).
+
+Verified here: the cores and the APK build; the library exports the JNI
+calls and needs only Android system libraries; the host routes refuse
+anonymous requests and odd file names, and a downloaded core matches its
+checksum; the browser flows are unchanged. Not verified yet: playing on a
+real phone (no ARM device or emulator on this PC). Next, after the owner's
+phone test: 7.3 (saves to the host, menu polish), then 7.4 (dolphin, armsx2,
+citra, cemu).

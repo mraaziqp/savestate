@@ -64,6 +64,9 @@ pub fn emit(level: Level, source: &str, msg: &str) {
     };
     let line = format!("[{tag}][{source}] {}", msg.trim_end());
     let _ = writeln!(std::io::stderr(), "{line}");
+    // Android: stderr goes nowhere; logcat (tag SaveState) is where it's read.
+    #[cfg(target_os = "android")]
+    android_log(level, &line);
     if let Some(f) = SINK.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         let _ = writeln!(f, "{line}");
     }
@@ -364,5 +367,18 @@ mod tests {
         assert_eq!(format_printf(b"%lld %llu %zu %%", &[(-3i64) as usize, 12, 5]), "-3 12 5 %");
         assert_eq!(format_printf(b"%s", &[0]), "(null)");
         assert_eq!(format_printf(b"%g %g", &[0.0001f64.to_bits() as usize, 1234567.0f64.to_bits() as usize]), "0.0001 1.23457e6");
+    }
+}
+
+#[cfg(target_os = "android")]
+fn android_log(level: Level, line: &str) {
+    #[link(name = "log")]
+    extern "C" {
+        fn __android_log_write(prio: std::ffi::c_int, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> std::ffi::c_int;
+    }
+    // ANDROID_LOG_DEBUG 3, INFO 4, WARN 5, ERROR 6.
+    let prio = match level { Level::Debug => 3, Level::Info => 4, Level::Warn => 5, Level::Error => 6 };
+    if let Ok(text) = std::ffi::CString::new(line.replace('\0', " ")) {
+        unsafe { __android_log_write(prio, c"SaveState".as_ptr(), text.as_ptr()) };
     }
 }

@@ -54,7 +54,14 @@ export const PHONE_APPS = {
   ],
 };
 // Folder names under Downloads/SaveState on the phone.
-export const PHONE_FOLDER = { psp: "PSP", ps2: "PS2", gamecube: "GameCube", wii: "Wii", "3ds": "3DS", dreamcast: "Dreamcast", saturn: "Saturn" };
+export const PHONE_FOLDER = { psp: "PSP", ps2: "PS2", gamecube: "GameCube", wii: "Wii", "3ds": "3DS", dreamcast: "Dreamcast", saturn: "Saturn",
+  gb: "Game Boy", gbc: "Game Boy", gba: "GBA", snes: "SNES", nes: "NES" };
+
+// Consoles SaveState's Android app plays itself (Phase 7: our own builds of
+// these cores, engine/cores/build-core.ps1), no other app needed.
+export const NATIVE_CORES = { gb: "gambatte", gbc: "gambatte", gba: "mgba", snes: "snes9x", nes: "fceumm", psp: "ppsspp" };
+/** The core the app plays this console with, when the app's engine works on this phone. */
+export const nativeCore = (platform) => (inAndroidApp() && typeof window !== "undefined" && window.__nxEngineOK ? NATIVE_CORES[norm(platform)] ?? null : null);
 
 const ua = () => (typeof navigator === "undefined" ? "" : navigator.userAgent);
 export const isAndroid = () => /Android/i.test(ua());
@@ -99,4 +106,4 @@ export function whereLabel(platform) {
 /** The Android apps for a console, on an Android phone only. */
 export const phoneHere = (platform) => (isAndroid() ? PHONE_APPS[norm(platform)] ?? null : null);
 
-if (typeof window !== "undefined") window.nxRuns = { norm, runsOn, playsHere, phoneHere, here, whereLabel, isPhone, inAndroidApp, PHONE_APPS, PHONE_FOLDER };
+if (typeof window !== "undefined") window.nxRuns = { norm, runsOn, playsHere, phoneHere, here, whereLabel, isPhone, inAndroidApp, nativeCore, PHONE_APPS, PHONE_FOLDER, NATIVE_CORES };

@@ -260,6 +260,7 @@ pub unsafe extern "C" fn perf_get_counter() -> retro_perf_tick_t {
 }
 
 pub unsafe extern "C" fn perf_get_cpu_features() -> u64 {
+    #[cfg_attr(not(any(target_arch = "x86_64", target_arch = "aarch64")), allow(unused_mut))]
     let mut f = 0u64;
     // ARM phones (Phase 7): every arm64 CPU has NEON/ASIMD.
     #[cfg(target_arch = "aarch64")]

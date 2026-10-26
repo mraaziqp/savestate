@@ -53,7 +53,7 @@ import java.io.OutputStream;
  */
 @CapacitorPlugin(name = "NxAndroid")
 public class NxAndroidPlugin extends Plugin {
-    static final int VERSION = 4;
+    static final int VERSION = 5;
 
     private DownloadManager dm() {
         return (DownloadManager) getContext().getSystemService(Context.DOWNLOAD_SERVICE);
@@ -159,6 +159,41 @@ public class NxAndroidPlugin extends Plugin {
             }
         }
         return count;
+    }
+
+    /** Whether games can play inside SaveState on this phone (Phase 7): { available, reason }. */
+    @PluginMethod
+    public void engine(PluginCall call) {
+        JSObject r = new JSObject();
+        r.put("available", NxEngine.available());
+        r.put("reason", NxEngine.available() ? "" : NxEngine.unavailableReason());
+        call.resolve(r);
+    }
+
+    /**
+     * Plays a game already in Downloads/SaveState/<folder>/<fileName> inside
+     * SaveState (GameActivity) with SaveState's own core `core` from `origin`.
+     */
+    @PluginMethod
+    public void play(PluginCall call) {
+        if (!NxEngine.available()) { call.reject(NxEngine.unavailableReason()); return; }
+        String folder = safe(call.getString("folder", ""), "");
+        String fileName = safe(call.getString("fileName", ""), "");
+        File game = targetOf(folder, fileName);
+        if (fileName.isEmpty() || !game.exists()) { call.reject("The game isn't on this phone yet. Press Play to download it."); return; }
+        android.app.Activity a = getActivity();
+        if (a == null) { call.reject("SaveState isn't open."); return; }
+        Intent i = new Intent(a, GameActivity.class);
+        i.putExtra("origin", call.getString("origin", ""));
+        i.putExtra("token", call.getString("token", ""));
+        i.putExtra("core", call.getString("core", ""));
+        i.putExtra("platform", call.getString("platform", ""));
+        i.putExtra("title", call.getString("title", fileName));
+        i.putExtra("game", game.getAbsolutePath());
+        a.startActivity(i);
+        JSObject r = new JSObject();
+        r.put("opened", "engine");
+        call.resolve(r);
     }
 
     @PluginMethod

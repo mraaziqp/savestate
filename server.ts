@@ -25417,6 +25417,49 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
+  // SaveState's own builds of libretro cores for the Android app (Phase 7):
+  // compiled from their official sources by engine/cores/build-core.ps1 into
+  // releases/cores/android. The app downloads a core the first time a game
+  // needs it, checks its SHA-256 against this list, and keeps it.
+  const androidCores = path.join(process.cwd(), "releases", "cores", "android");
+  const androidFileSha = new Map<string, { mtimeMs: number; sha256: string; size: number }>();
+  const shaOfAndroidFile = async (file: string) => {
+    const full = path.join(androidCores, file);
+    const st = await stat(full);
+    const memo = androidFileSha.get(file);
+    if (memo && memo.mtimeMs === st.mtimeMs) return memo;
+    const info = { mtimeMs: st.mtimeMs, sha256: crypto.createHash("sha256").update(await readFile(full)).digest("hex"), size: st.size };
+    androidFileSha.set(file, info);
+    return info;
+  };
+  app.get("/api/engine/android/cores", async (req, res) => {
+    if (!requireAnyAuth(req, res)) return;
+    try {
+      const manifest = JSON.parse((await readFile(path.join(androidCores, "cores.json"), "utf8")).replace(/^﻿/, ""));
+      const system: Record<string, { file: string; sha256: string; size: number }> = {};
+      for (const f of (await readdir(androidCores)).filter((n) => /-system\.zip$/.test(n))) {
+        const s = await shaOfAndroidFile(f);
+        system[f.replace(/-system\.zip$/, "")] = { file: f, sha256: s.sha256, size: s.size };
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ abi: "arm64-v8a", cores: manifest, system });
+    } catch {
+      res.status(404).json({ error: "No Android cores are published on this host." });
+    }
+  });
+  app.get("/api/engine/android/files/:file", async (req, res) => {
+    if (!requireAnyAuth(req, res)) return;
+    const file = String(req.params.file);
+    if (!/^[a-z0-9_]+_libretro_android\.so$|^[a-z0-9_]+-system\.zip$/.test(file)) return res.status(400).json({ error: "Not a core file." });
+    try {
+      await stat(path.join(androidCores, file));
+      res.setHeader("Cache-Control", "no-store");
+      res.sendFile(path.join(androidCores, file), { headers: { "Content-Type": "application/octet-stream" } });
+    } catch {
+      res.status(404).json({ error: "That core isn't published on this host." });
+    }
+  });
+
   // The Windows runner the installer saves as nexus-runner.vbs. Started at
   // sign-in (Task Scheduler) and by nexusemu:// links. It starts the launcher
   // with no window and restarts it within about 10 s if it stops; before, a

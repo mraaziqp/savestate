@@ -28,6 +28,27 @@ $env:ANDROID_SDK_ROOT = $env:ANDROID_HOME
 $buildTools = Get-ChildItem (Join-Path $env:ANDROID_HOME 'build-tools') -Directory | Sort-Object { [version]($_.Name -replace '[^\d.]','') } -Descending | Select-Object -First 1
 Write-Host "JDK $($env:JAVA_HOME); SDK $($env:ANDROID_HOME); build-tools $($buildTools.Name)"
 
+# SaveState Engine for phones (Phase 7): the release library goes in the APK.
+# Games play in the app on arm64 (SaveState's cores are arm64 builds); the
+# 32-bit ARM and x86_64 builds are there so the APK installs on every phone,
+# TV box and Chromebook: Android refuses an APK whose native code has no build
+# for the device. Those keep using the emulator apps.
+Write-Host '==> Building SaveState Engine for Android'
+$strip = Join-Path $env:ANDROID_HOME 'ndk\27.3.13750724\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe'
+foreach ($a in @(@{ abi = 'arm64'; dir = 'arm64-v8a'; target = 'aarch64-linux-android' },
+                 @{ abi = 'armv7'; dir = 'armeabi-v7a'; target = 'armv7-linux-androideabi' },
+                 @{ abi = 'x86_64'; dir = 'x86_64'; target = 'x86_64-linux-android' })) {
+  # cargo reports progress on stderr; cmd merges it so PowerShell doesn't take it for an error.
+  $engineLog = & cmd /c "`"$(Join-Path $root 'engine\build-android.cmd')`" --release $($a.abi) 2>&1"
+  if ($LASTEXITCODE -ne 0) { $engineLog | Select-Object -Last 30 | Write-Host; throw "engine build for Android ($($a.abi)) failed" }
+  $jniDir = Join-Path $root "android\app\src\main\jniLibs\$($a.dir)"
+  New-Item -ItemType Directory -Force $jniDir | Out-Null
+  $so = Join-Path $jniDir 'libsavestate_engine.so'
+  Copy-Item (Join-Path $root "engine\target\$($a.target)\release\libsavestate_engine.so") $so -Force
+  & $strip --strip-unneeded $so
+  Write-Host "    $($a.dir): libsavestate_engine.so $([math]::Round((Get-Item $so).Length / 1MB, 1)) MB"
+}
+
 Write-Host '==> Copying web assets into the Android project'
 & npx cap sync android
 if ($LASTEXITCODE -ne 0) { throw 'cap sync failed' }
@@ -38,7 +59,8 @@ Push-Location (Join-Path $root 'android')
 $ver = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
 $parts = $ver.Split('.') | ForEach-Object { [int]$_ }
 $verCode = $parts[0] * 1000000 + $parts[1] * 10000 + $parts[2]
-& .\gradlew.bat --no-daemon assembleRelease "-PnxVersionCode=$verCode" "-PnxVersionName=$ver"
+# Notes javac prints on stderr aren't failures: cmd merges the streams (the exit code decides).
+& cmd /c ".\gradlew.bat --no-daemon assembleRelease -PnxVersionCode=$verCode -PnxVersionName=$ver 2>&1"
 $code = $LASTEXITCODE
 Pop-Location
 if ($code -ne 0) { throw 'gradle build failed' }

@@ -10,7 +10,7 @@
 // build.mjs 3m), or a "nexus:phone-play" event with { game }.
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useStyles, api, token, Icon, Note } from "./lib.jsx";
-import { PHONE_APPS, PHONE_FOLDER, norm, inAndroidApp } from "./devices.js";
+import { PHONE_APPS, PHONE_FOLDER, norm, inAndroidApp, nativeCore } from "./devices.js";
 
 const native = (method, options = {}) => window.Capacitor.nativePromise("NxAndroid", method, options);
 // The app's NxAndroid version, or 0 outside it. Before 3 every download id
@@ -18,6 +18,11 @@ const native = (method, options = {}) => window.Capacitor.nativePromise("NxAndro
 // got the download manager's address, which Dolphin couldn't read.
 const nativeVersion = async () => { if (!inAndroidApp()) return 0; try { return Number((await native("info")).version) || 1; } catch { return 0; } };
 const FIXED_IN = 4;
+// The app plays some consoles itself (NxAndroid 5+, Phase 7: our own cores in
+// SaveState's engine). Known once, at load, so Play can choose at once.
+if (typeof window !== "undefined" && inAndroidApp()) {
+  nativeVersion().then((v) => (v >= 5 ? native("engine") : null)).then((r) => { if (r) window.__nxEngineOK = !!r.available; }).catch(() => {});
+}
 // Where each emulator adds a folder to its game list.
 const FOLDER_HELP = {
   "PPSSPP": "Games › Browse… › Download › SaveState › PSP",
@@ -67,6 +72,7 @@ function Sheet({ game, onClose }) {
   const apps = PHONE_APPS[sys] ?? [];
   const folder = PHONE_FOLDER[sys] ?? "Games";
   const name = fileOf(game);
+  const core = nativeCore(game.platform);
   const [inApp, setInApp] = useState(null); // null while checking
   const [appVersion, setAppVersion] = useState(0);
   const [installed, setInstalled] = useState({});
@@ -126,6 +132,14 @@ function Sheet({ game, onClose }) {
     } catch (e) { setMsg({ kind: "bad", text: e.message || "It didn't open." }); }
   }, [installed, sys]);
 
+  // Inside SaveState: the app's own player with SaveState's build of the core.
+  const playHere = useCallback(async () => {
+    setMsg(null);
+    try {
+      await native("play", { folder, fileName: name, origin: location.origin, token: token(), core, platform: sys, title: game.title });
+    } catch (e) { setMsg({ kind: "bad", text: e.message || "It didn't start." }); }
+  }, [core, sys]);
+
   async function start() {
     window.__nxRequestStoragePersistence?.();
     setMsg(null);
@@ -147,7 +161,7 @@ function Sheet({ game, onClose }) {
       const r = await native("download", { url, token: token(), folder, fileName: name, title: game.title });
       remember(game.id, r.id);
       setDl({ id: r.id, status: r.done ? "done" : "waiting", path: r.path });
-      if (r.done) { if (app) openIt(r.id); } else follow(r.id, () => app && openIt(r.id));
+      if (r.done) { if (core) playHere(); else if (app) openIt(r.id); } else follow(r.id, () => (core ? playHere() : app && openIt(r.id)));
     } catch (e) { setDl({ status: "failed", error: e.message }); }
   }
 
@@ -187,11 +201,11 @@ function Sheet({ game, onClose }) {
       <div className="nxphone-box">
         <div className="nxphone-cover"><img src={cover} alt="" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} /></div>
         <h2>{game.title}</h2>
-        {!apps.length && <p className="nxphone-err">{String(game.platform ?? "This console").toUpperCase()} has no emulator for phones. Stream it from the host instead (game details › Stream from the host PC).</p>}
+        {!apps.length && !core && <p className="nxphone-err">{String(game.platform ?? "This console").toUpperCase()} has no emulator for phones. Stream it from the host instead (game details › Stream from the host PC).</p>}
 
-        {apps.length > 0 && inApp === null && <p><Icon name="spinner" /> Checking this phone…</p>}
+        {(apps.length > 0 || core) && inApp === null && <p><Icon name="spinner" /> Checking this phone…</p>}
 
-        {apps.length > 0 && inApp !== null && (
+        {(apps.length > 0 || core) && inApp !== null && (
           <>
             {inApp && appVersion < FIXED_IN && (
               <div className="nxphone-col">
@@ -199,7 +213,7 @@ function Sheet({ game, onClose }) {
                 <a className="nxa-btn primary" href={`${location.origin}/api/downloads/apk`}><Icon name="down" /> Update the SaveState app</a>
               </div>
             )}
-            {inApp && !app && (
+            {inApp && !app && !core && (
               <div className="nxphone-col">
                 <p>{String(game.platform).toUpperCase()} games play on this phone in {[...new Set(apps.map((a) => a.name))].join(" or ")}. Install it first; this page notices when you come back.</p>
                 {apps.filter((a) => a.get).map((a) => (
@@ -210,7 +224,8 @@ function Sheet({ game, onClose }) {
                 ))}
               </div>
             )}
-            {inApp && app && !dl && <p>Downloads {big ? `${mb(big)} ` : ""}to this phone once (Downloads › SaveState › {folder}), then opens in {app.name}. After that it plays offline.</p>}
+            {inApp && core && !dl && <p>Downloads {big ? `${mb(big)} ` : ""}to this phone once (Downloads › SaveState › {folder}), then plays right here in SaveState. After that it plays offline.</p>}
+            {inApp && app && !core && !dl && <p>Downloads {big ? `${mb(big)} ` : ""}to this phone once (Downloads › SaveState › {folder}), then opens in {app.name}. After that it plays offline.</p>}
             {!inApp && !dl && <p>This downloads the game to this phone. Then open it in {[...new Set(apps.map((a) => a.name))].join(" or ")} (from your Downloads folder). In the SaveState Android app it opens by itself.</p>}
 
             {busy && (
@@ -225,9 +240,10 @@ function Sheet({ game, onClose }) {
             {dl?.status === "done" && !msg && <p>{game.title} is on this phone ({dl.path || `Downloads › SaveState › ${folder}`}).</p>}
 
             <div className="nxphone-col">
-              {(!dl || dl.status === "failed") && (inApp === false || app) && <button className="nxa-btn primary" onClick={start}><Icon name="game" /> {dl?.status === "failed" ? "Try again" : inApp ? `Download and play` : "Download to this phone"}</button>}
-              {inApp && !app && !dl && <button className="nxa-btn" onClick={start}><Icon name="down" /> Download it now anyway</button>}
-              {dl?.status === "done" && app && <button className="nxa-btn primary" onClick={() => openIt(dl.id)}><Icon name="game" /> Play in {app.name}</button>}
+              {(!dl || dl.status === "failed") && (inApp === false || app || core) && <button className="nxa-btn primary" onClick={start}><Icon name="game" /> {dl?.status === "failed" ? "Try again" : inApp ? `Download and play` : "Download to this phone"}</button>}
+              {inApp && !app && !core && !dl && <button className="nxa-btn" onClick={start}><Icon name="down" /> Download it now anyway</button>}
+              {dl?.status === "done" && core && <button className="nxa-btn primary" onClick={playHere}><Icon name="game" /> Play</button>}
+              {dl?.status === "done" && app && <button className={core ? "nxa-btn" : "nxa-btn primary"} onClick={() => openIt(dl.id)}><Icon name="game" /> {core ? `Play in ${app.name} instead` : `Play in ${app.name}`}</button>}
               {busy && <button className="nxa-btn" onClick={() => { native("cancel", { id: dl.id }).catch(() => {}); clearInterval(poll.current); setDl(null); }}><Icon name="x" /> Cancel download</button>}
               {inApp && bios && <button className="nxa-btn" onClick={copyBios}><Icon name="shield" /> Copy my PS2 BIOS to this phone</button>}
             </div>
