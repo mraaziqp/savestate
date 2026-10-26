@@ -222,7 +222,9 @@ export function createDownloader(deps: DownloaderDeps) {
 
   async function prowlarrSearch(p: { url: string; apiKey: string }, query: string, cat: string): Promise<any[]> {
     try {
-      const r = await fetch(`${p.url}/api/v1/search?query=${encodeURIComponent(query)}&type=search&limit=100&categories=${cat}`, { headers: { "X-Api-Key": p.apiKey }, signal: AbortSignal.timeout(120000) });
+      // Several categories are repeated parameters ("5000,5070" in one returned nothing).
+      const cats = cat.split(",").map((c) => `&categories=${c.trim()}`).join("");
+      const r = await fetch(`${p.url}/api/v1/search?query=${encodeURIComponent(query)}&type=search&limit=100${cats}`, { headers: { "X-Api-Key": p.apiKey }, signal: AbortSignal.timeout(120000) });
       return r.ok ? ((await r.json()) as any[]) : [];
     } catch { return []; }
   }
@@ -252,6 +254,37 @@ export function createDownloader(deps: DownloaderDeps) {
     } catch (e: any) { return { approved: false, why: e?.message ?? String(e) }; }
   }
   const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  async function arrSend(app: { url: string; key: string }, method: string, p: string, body: unknown): Promise<any> {
+    const r = await fetch(`${app.url.replace(/\/$/, "")}/api/v3/${p}`, { method, headers: { "X-Api-Key": app.key, "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+    if (!r.ok) throw new Error(`${method} ${p}: HTTP ${r.status}`);
+    return r.json().catch(() => null);
+  }
+  // Older shows and many films barely exist in 1080p within the size policy
+  // (Shadowhunters S01, 2026-10-26: 870 releases, none approved, all 720p,
+  // 480p or 3 GB 1080p). A title whose releases are refused only for quality
+  // or size moves to this profile: 720p or 1080p, upgraded to 1080p later.
+  const command = (app: { url: string; key: string }, body: Record<string, unknown>) => arrSend(app, "POST", "command", body).catch(() => null);
+  const FALLBACK_PROFILE = "SaveState HD (720p or 1080p)";
+  async function fallbackProfile(app: { url: string; key: string }, fromId: number): Promise<number | null> {
+    const profiles = (await arrGet(app.url, app.key, "v3", "qualityprofile").catch(() => [])) as any[];
+    const have = profiles.find((p) => p.name === FALLBACK_PROFILE);
+    if (have) return have.id;
+    const base = profiles.find((p) => p.id === fromId) ?? profiles[0];
+    if (!base) return null;
+    const hd = (name: string) => /(^|[\s-])(720p|1080p)$/i.test(name) && !/remux/i.test(name);
+    const open = (it: any): any => it.items?.length
+      ? { ...it, items: it.items.map(open), allowed: it.items.some((x: any) => hd(x.quality?.name ?? x.name ?? "")) || !!it.allowed }
+      : { ...it, allowed: hd(it.quality?.name ?? it.name ?? "") || !!it.allowed };
+    const { id: _id, ...rest } = base;
+    const made = await arrSend(app, "POST", "qualityprofile", { ...rest, name: FALLBACK_PROFILE, upgradeAllowed: true, items: base.items.map(open) }).catch((e) => { deps.log("WARN", `Fallback profile not made: ${e.message}`); return null; });
+    return made?.id ?? null;
+  }
+  const qualityOnly = (why: string) => why.split("; ").filter(Boolean).every((w) => /not wanted in profile|larger than maximum|smaller than minimum|is not an upgrade|does not meet the cutoff/i.test(w));
+  const topReason = (whys: string[]) => {
+    const n = new Map<string, number>();
+    for (const w of whys) for (const x of w.split("; ").filter(Boolean)) { const k = x.replace(/\d+(\.\d+)?/g, "N"); n.set(k, (n.get(k) ?? 0) + 1); }
+    return [...n].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+  };
 
   async function deepSearch(limit = { seasons: 12, movies: 8 }) {
     if (lastRun.running) return lastRun;
@@ -291,25 +324,57 @@ export function createDownloader(deps: DownloaderDeps) {
             budget--; lastRun.checked++;
             const title = s.title.replace(/\s*\(\d{4}\)$/, "");
             const one = missing.length === 1 ? missing[0] : null;
+            // Anime numbers episodes straight through ("Baki - 01"); Sonarr
+            // only reads that in anime mode ("Unable to identify correct
+            // episode(s)" for Baki, 2026-10-26).
+            const anime = s.seriesType === "anime" || (s.genres ?? []).some((g: string) => /anime/i.test(g));
+            if (anime && s.seriesType !== "anime") {
+              await arrSend(S, "PUT", `series/${s.id}`, { ...s, seriesType: "anime" }).then(() => { s.seriesType = "anime"; deps.log("INFO", `${s.title}: switched to anime episode numbering`); }).catch(() => {});
+            }
             const queries = one
               ? [`${title} S${pad(season)}E${pad(one.episodeNumber)}`, `${title} ${s.year} S${pad(season)}E${pad(one.episodeNumber)}`]
               : [`${title} S${pad(season)}`, `${title} Season ${season}`, `${title} ${s.year} S${pad(season)}`, `${title} (${s.year}) Season ${season}`];
+            if (anime) queries.push(season === 1 ? title : `${title} ${season}`, `${title} Batch`);
             const seen = new Map<string, any>();
-            for (const q of queries) { for (const r of await prowlarrSearch(prowlarr, q, "5000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+            // 5070 = TV/Anime: where nyaa and the anime sites file it.
+            for (const q of queries) { for (const r of await prowlarrSearch(prowlarr, q, anime ? "5000,5070" : "5000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
             const t = norm(title);
             const seasonRe = one ? new RegExp(`\\bs0?${season}e0?${one.episodeNumber}\\b`, "i") : new RegExp(`\\b(s0?${season}(?!\\s?e\\d)|season\\s?0?${season})\\b`, "i");
             const otherSeason = /\bs(\d{1,2})\b|season\s?(\d{1,2})\b/gi;
             const candidates = [...seen.values()].filter((r) => {
               const n = norm(r.title);
-              if ((r.seeders ?? 0) < MIN_SEEDERS || !n.startsWith(t + " ") || !seasonRe.test(r.title.replace(/[._]/g, " "))) return false;
+              // Anime release names often carry a fansub tag first ("[SubsPlease] Baki - 01") and no season.
+              const bare = norm(r.title.replace(/^\s*\[[^\]]*\]\s*/, ""));
+              if ((r.seeders ?? 0) < MIN_SEEDERS || !(n.startsWith(t + " ") || (anime && bare.startsWith(t + " ")))) return false;
+              if (!anime && !seasonRe.test(r.title.replace(/[._]/g, " "))) return false;
               // A pack of several seasons, or of another season, is not this one.
               const seasons = new Set([...r.title.replace(/[._]/g, " ").matchAll(otherSeason)].map((m) => Number(m[1] ?? m[2])));
               return seasons.size <= 1;
             }).filter((r) => (Number(r.size) || 0) < freeFor(s.path) - KEEP_FREE_BYTES).sort((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0));
             let result = candidates.length ? "nothing approved" : "no well-seeded copy found (or not enough disk space)";
-            for (const c of candidates.slice(0, 4)) {
-              const d = await push(S, c);
-              if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${s.title} S${pad(season)}${one ? `E${pad(one.episodeNumber)}` : ""}`); receipt({ kind: "search", title: `Found and sent to Sonarr: ${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); break; }
+            const whys: string[] = [];
+            const tryPush = async () => {
+              for (const c of candidates.slice(0, 4)) {
+                const d = await push(S, c);
+                if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${s.title} S${pad(season)}${one ? `E${pad(one.episodeNumber)}` : ""}`); receipt({ kind: "search", title: `Found and sent to Sonarr: ${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); return true; }
+                whys.push(d.why);
+              }
+              return false;
+            };
+            if (!(await tryPush()) && whys.length && whys.every(qualityOnly)) {
+              const fb = await fallbackProfile(S, s.qualityProfileId);
+              if (fb && fb !== s.qualityProfileId) {
+                await arrSend(S, "PUT", `series/${s.id}`, { ...s, qualityProfileId: fb }).then(() => { s.qualityProfileId = fb; deps.log("INFO", `${s.title}: no 1080p copy within the size policy; now accepts 720p too (upgrades to 1080p later)`); }).catch(() => {});
+                whys.length = 0;
+                if (!(await tryPush())) await command(S, { name: "SeriesSearch", seriesId: s.id });
+              }
+            }
+            if (!result.startsWith("sent") && whys.length) result = `nothing approved (${topReason(whys)})`;
+            // Part of the season is already there, so whole-season packs are refused:
+            // Sonarr's own search goes episode by episode (Modern Family S07-S10).
+            if (!result.startsWith("sent") && !one && whys.some((w) => /meets cutoff|wasn't requested|is not an upgrade/i.test(w))) {
+              await command(S, { name: "EpisodeSearch", episodeIds: missing.map((e: any) => e.id) });
+              result += "; asked Sonarr to search the missing episodes one by one";
             }
             tried[key] = { at: Date.now(), result, title: `${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}` };
             deps.log("INFO", `Deep search ${s.title} S${pad(season)} (${missing.length} missing): ${result}`);
@@ -333,19 +398,41 @@ export function createDownloader(deps: DownloaderDeps) {
           if (!m.monitored || m.hasFile || !m.isAvailable || busy.has(m.id) || (tried[key] && Date.now() - tried[key].at < DAY)) continue;
           budget--; lastRun.checked++;
           const seen = new Map<string, any>();
-          const t = norm(m.title);
-          const pick = () => [...seen.values()].filter((r) => (r.seeders ?? 0) >= MIN_SEEDERS && norm(r.title).startsWith(t + " ") && r.title.includes(String(m.year)) && (Number(r.size) || 0) < freeFor(m.path ?? "") - KEEP_FREE_BYTES)
+          // Films are also released under their original and other titles
+          // (the Attack on Titan films as "Shingeki no Kyojin ...": 2026-10-26).
+          const names = [...new Set([m.title, m.originalTitle, ...(m.alternateTitles ?? []).map((a: any) => a.title)]
+            .filter((x): x is string => !!x && /[a-z]/i.test(x)).map((x) => x.trim()))].slice(0, 4);
+          const ts = names.map(norm).filter(Boolean);
+          const anime = (m.genres ?? []).some((g: string) => /anim/i.test(g)) && /^ja/i.test(m.originalLanguage?.name ?? m.originalLanguage ?? "");
+          const pick = () => [...seen.values()].filter((r) => (r.seeders ?? 0) >= MIN_SEEDERS && ts.some((t) => norm(r.title.replace(/^\s*\[[^\]]*\]\s*/, "")).startsWith(t + " ")) && r.title.includes(String(m.year)) && (Number(r.size) || 0) < freeFor(m.path ?? "") - KEEP_FREE_BYTES)
             .sort((a, b) => (b.seeders ?? 0) - (a.seeders ?? 0));
-          for (const q of [`${m.title} ${m.year}`, `${m.title} (${m.year})`]) { for (const r of await prowlarrSearch(prowlarr, q, "2000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+          for (const n of names) {
+            for (const q of [`${n} ${m.year}`, `${n} (${m.year})`]) { for (const r of await prowlarrSearch(prowlarr, q, anime ? "2000,5070" : "2000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
+            if (pick().length >= 3) break;
+          }
           // Shorts and TV films are often filed as TV ("Too Many Cooks (2014
           // Adult Swim) ... TV Short"), where Radarr never looks.
           if (!pick().length) { for (const r of await prowlarrSearch(prowlarr, `${m.title} ${m.year}`, "5000")) seen.set(r.guid ?? r.title, r); await pause(1500); }
           const candidates = pick();
           let result = candidates.length ? "nothing approved" : "no well-seeded copy found (or not enough disk space)";
-          for (const c of candidates.slice(0, 4)) {
-            const d = await push(R, c);
-            if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${m.title} (${m.year})`); receipt({ kind: "search", title: `Found and sent to Radarr: ${m.title} (${m.year})`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); break; }
+          const whys: string[] = [];
+          const tryPush = async () => {
+            for (const c of candidates.slice(0, 4)) {
+              const d = await push(R, c);
+              if (d.approved) { result = `sent: ${c.title} (${c.seeders} seeders)`; lastRun.sent.push(`${m.title} (${m.year})`); receipt({ kind: "search", title: `Found and sent to Radarr: ${m.title} (${m.year})`, detail: `${c.title} · ${c.seeders} seeders · ${(Number(c.size || 0) / 1024 ** 3).toFixed(1)} GB · ${c.indexer}` }); return true; }
+              whys.push(d.why);
+            }
+            return false;
+          };
+          if (!(await tryPush()) && whys.length && whys.every(qualityOnly)) {
+            const fb = await fallbackProfile(R, m.qualityProfileId);
+            if (fb && fb !== m.qualityProfileId) {
+              await arrSend(R, "PUT", `movie/${m.id}`, { ...m, qualityProfileId: fb }).then(() => { m.qualityProfileId = fb; deps.log("INFO", `${m.title}: no 1080p copy within the size policy; now accepts 720p too (upgrades to 1080p later)`); }).catch(() => {});
+              whys.length = 0;
+              if (!(await tryPush())) await command(R, { name: "MoviesSearch", movieIds: [m.id] });
+            }
           }
+          if (!result.startsWith("sent") && whys.length) result = `nothing approved (${topReason(whys)})`;
           tried[key] = { at: Date.now(), result, title: `${m.title} (${m.year})` };
           deps.log("INFO", `Deep search ${m.title} (${m.year}): ${result}`);
         }

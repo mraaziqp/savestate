@@ -6257,6 +6257,31 @@ async function startServer() {
       detail: `${(have / 1024 ** 3).toFixed(1)} of ${(size / 1024 ** 3).toFixed(1)} GB so far. They appear in Games, and go to Google Drive, once each one is complete.` }];
   });
 
+  // Sizes of ROM folders offered for upload (Drives page): measured in the
+  // background, one folder at a time, kept 30 minutes.
+  const romSizes = new Map<string, { bytes: number; at: number }>();
+  const romSizing = new Set<string>();
+  const romFolderBytes = (root: string): number => {
+    const hit = romSizes.get(root);
+    if ((!hit || Date.now() - hit.at > 30 * 60_000) && !romSizing.has(root)) {
+      romSizing.add(root);
+      void (async () => {
+        let bytes = 0;
+        const walk = async (dir: string) => {
+          const ents = await readdir(dir, { withFileTypes: true }).catch(() => []);
+          for (const e of ents) {
+            const p = path.join(dir, e.name);
+            if (e.isDirectory()) await walk(p);
+            else if (e.isFile()) bytes += (await stat(p).catch(() => null))?.size ?? 0;
+          }
+        };
+        await walk(root).catch(() => {});
+        romSizes.set(root, { bytes, at: Date.now() });
+      })().finally(() => romSizing.delete(root));
+    }
+    return hit?.bytes ?? 0;
+  };
+
   // Google Drive accounts, local disks and upload-and-verify jobs (server/drives.ts).
   const drives = createDrives({
     persistDir: PERSIST_DIR,
@@ -6280,23 +6305,16 @@ async function startServer() {
       // NEXUS_LOCAL_ROM_DIRS: ROM folders on this PC that the library does not scan itself.
       const candidateRoots = [
         ...(vc ? getExtraRoots(vc) : []),
-        ...(process.env.NEXUS_LOCAL_ROM_DIRS ?? "E:\\ROMS;K:\\retroarch\\ROMS").split(/[;,]/).map((p) => p.trim()).filter(Boolean),
-        "K:\\retroarch\\ROMS", "K:\\Emulation", "E:\\ROMS", "C:\\RetroArch", "D:\\ROMS", "G:\\Roms", "J:\\retroarch\\ROMS"
+        ...(process.env.NEXUS_LOCAL_ROM_DIRS ?? "E:\\ROMS").split(/[;,]/).map((p) => p.trim()).filter(Boolean),
+        "E:\\ROMS", "D:\\ROMS", "G:\\Roms"
       ];
       for (const r of [...new Set(candidateRoots.map((p) => path.resolve(p)))]) {
         if (!(await fsAccess(r).then(() => true, () => false))) continue; // async: a missing drive letter must not stall the server
         // ROM folders already inside the Drive library need no upload.
         if (vaultRoot && r.toLowerCase().startsWith(vaultRoot)) continue;
-        let bytes = 0;
-        try {
-          const files = await readdir(r, { withFileTypes: true, recursive: true }).catch(() => []);
-          for (const f of files.slice(0, 5000)) {
-            if (f.isFile()) {
-              const st = await stat(path.join((f as any).parentPath || r, f.name)).catch(() => null);
-              if (st) bytes += st.size;
-            }
-          }
-        } catch {}
+        // Measured in the background and kept 30 min: walking the folder on
+        // every request took minutes on a disk busy with uploads.
+        const bytes = romFolderBytes(r);
         const gb = bytes > 0 ? ` (${(bytes / 1024 ** 3).toFixed(1)} GB)` : "";
         out.push({ label: `ROMs: ${r}${gb}`, source: r, kind: "roms", dest: `NexusArchive/roms/${romDest(r)}`, bytes });
       }
@@ -11103,9 +11121,11 @@ async function startServer() {
   // version changes, so a reinstalled or reset Arr app picks it up again.
   //
   // Sizes are MB per minute of runtime (the Arr apps' own unit): 1080p at
-  // most 50 (an hour-long episode <= 3 GB, a two-hour film <= 6 GB), and they
-  // lean towards 15 (~0.9 GB an hour), which is where good x265 encodes sit.
-  const ARR_POLICY_VERSION = 2;
+  // most 80 (a 42-minute episode <= 3.4 GB, a two-hour film <= 9.6 GB; v3,
+  // 2026-10-26: at 50 the common 3 GB WEB episodes were refused and older
+  // shows found nothing), and they lean towards 15 (~0.9 GB an hour), which
+  // is where good x265 encodes sit. Remux and 4K stay out.
+  const ARR_POLICY_VERSION = 3;
   // Releases with fewer seeders than this are not grabbed. At the default of
   // 1, Sonarr and Radarr happily picked a release one stranger was seeding,
   // and the download sat at a few percent for days.
@@ -11122,8 +11142,8 @@ async function startServer() {
   // [preferred, max] in MB/min, by quality name.
   const ARR_POLICY_SIZES: Array<[RegExp, number, number]> = [
     [/^(HDTV|WEBDL|WEBRip|Bluray)-720p$/i, 10, 25],
-    [/^(HDTV|WEBDL|WEBRip)-1080p$/i, 15, 50],
-    [/^Bluray-1080p$/i, 18, 55],
+    [/^(HDTV|WEBDL|WEBRip)-1080p$/i, 15, 80],
+    [/^Bluray-1080p$/i, 18, 90],
   ];
   // Never wanted outside a profile that explicitly asks for 4K.
   const ARR_POLICY_BANNED_QUALITY = /2160p|remux|br-?disk|raw-?hd|^cam$|telesync|telecine|workprint|regional|dvdscr/i;
