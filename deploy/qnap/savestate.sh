@@ -36,7 +36,7 @@ mount_library() {
 }
 
 supervise() {
-  echo $ > "$PIDS/supervisor.pid"
+  echo $$ > "$PIDS/supervisor.pid"
   PC_URL="${PC_URL:-http://192.168.31.217:3000}"
   pc_bad=0; pc_ok=0; failover=0
   while :; do
