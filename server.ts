@@ -27055,7 +27055,12 @@ Loop
     });
   });
 
+  // The same answer for everyone (private device libraries are left out for
+  // all), from two cloud-database reads of every track: 2-5 s each visit. One
+  // answer is shared for 2 minutes; a new scan shows within that.
+  let musicCollection: { at: number; body: any } | null = null;
   app.get("/api/music/collection", async (req, res) => {
+    if (musicCollection && Date.now() - musicCollection.at < 120_000) return res.json(musicCollection.body);
     try {
       let localTracks: any[] = [];
       let clientLibraries: any[] = [];
@@ -27099,7 +27104,9 @@ Loop
         })));
       }
 
-      return res.json({ tracks: allTracks, libraries: clientLibraries.map(l => ({ id: l.id, clientName: l.client_name, deviceName: l.device_name, isPrivate: l.is_private, totalTracks: l.total_tracks })) });
+      const body = { tracks: allTracks, libraries: clientLibraries.map(l => ({ id: l.id, clientName: l.client_name, deviceName: l.device_name, isPrivate: l.is_private, totalTracks: l.total_tracks })) };
+      musicCollection = { at: Date.now(), body };
+      return res.json(body);
     } catch (err) {
       return res.status(500).json({ error: String(err) });
     }

@@ -342,12 +342,25 @@ export function createVideoPrep(deps: VideoPrepDeps) {
   }
   async function rcJob(method: string, params: Record<string, unknown>, onBytes?: (b: number) => void) {
     const { jobid } = await deps.rc(method, { ...params, _async: true }, 60_000);
+    // A copy that has moved nothing for 5 minutes is stuck: one part of a
+    // multi-part download from Drive (South Park S02E13 sat "full size" but
+    // unfinished for 15 minutes, holding up every film behind it, 2026-10-27).
+    let lastBytes = -1, movedAt = Date.now();
     for (;;) {
       await new Promise((r) => setTimeout(r, 3000));
       if (current?.stopFor) { await deps.rc("job/stop", { jobid }).catch(() => {}); throw new Error(current.stopFor); }
       const st = await deps.rc("job/status", { jobid }, 30_000);
-      if (onBytes) { const s = await deps.rc("core/stats", { group: `job/${jobid}` }, 30_000).catch(() => null); if (s) onBytes(Number(s.bytes) || 0); }
+      const s = await deps.rc("core/stats", { group: `job/${jobid}` }, 30_000).catch(() => null);
+      if (s) {
+        const bytes = Number(s.bytes) || 0;
+        onBytes?.(bytes);
+        if (bytes !== lastBytes) { lastBytes = bytes; movedAt = Date.now(); }
+      }
       if (st.finished) { if (!st.success) throw new Error(st.error || `${method} failed`); return; }
+      if (Date.now() - movedAt > 5 * 60_000) {
+        await deps.rc("job/stop", { jobid }).catch(() => {});
+        throw new Error("Drive stopped sending it (nothing for 5 minutes)");
+      }
     }
   }
 
