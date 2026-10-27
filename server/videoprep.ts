@@ -92,9 +92,13 @@ export function classify(ext: string, streams: any[]): { kind: PrepKind; why: st
 }
 
 /** ffmpeg arguments for one film (exported for tests). */
-export function encodeArgs(src: string, out: string, kind: PrepKind, info: any, enc: string): string[] {
+// soft: decode on the CPU and step over damaged packets. The graphics card's
+// decoder stops at the first broken frame, so a damaged source (the "pseudo"
+// One Piece batch: 27 s of a 24-minute episode) came out short.
+export function encodeArgs(src: string, out: string, kind: PrepKind, info: any, enc: string, soft = false): string[] {
   const a = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats"];
-  if (kind === "convert" && enc === "h264_nvenc") a.push("-hwaccel", "cuda");
+  if (soft) a.push("-fflags", "+genpts+discardcorrupt", "-err_detect", "ignore_err");
+  else if (kind === "convert" && enc === "h264_nvenc") a.push("-hwaccel", "cuda");
   a.push("-threads", "0");
   a.push("-i", src, "-map", "0:v:0", "-map", `0:a:${info.audio ?? 0}?`, "-map_chapters", "-1", "-sn", "-dn");
   if (kind === "remux") a.push("-c:v", "copy", "-tag:v", "avc1");
@@ -115,6 +119,13 @@ export function encodeArgs(src: string, out: string, kind: PrepKind, info: any, 
   a.push("-movflags", "+faststart", "-f", "mp4", out);
   return a;
 }
+
+// Errors that aren't the film's fault: rclone's connection dropping (a server
+// restart ends its rclone with it), Drive refusing sign-ins for a while (48
+// films "failed" with "couldn't find root directory ID ... invalid
+// authentication", 2026-10-26), rate limits and timeouts. The film goes back
+// in the queue uncounted.
+export const TRANSIENT = /^fetch failed$|ECONNREFUSED|ECONNRESET|socket hang up|googleapi: Error (401|403|429|5\d\d)|couldn't find root directory ID|rateLimitExceeded|aborted due to timeout|TimeoutError/i;
 
 export function fmtEta(s: number): string {
   if (s > 86400) return `${Math.round(s / 86400)} d`;
@@ -174,6 +185,8 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       const next = new Map<string, Row>();
       for (const row of r.rows) next.set(row.rel, { ...row, out_bytes: row.out_bytes == null ? null : Number(row.out_bytes), src_bytes: row.src_bytes == null ? null : Number(row.src_bytes) });
       rows = next;
+      // Counted as failed before those errors were known to pass by themselves.
+      for (const r of rows.values()) if (r.status === "failed" && TRANSIENT.test(r.error ?? "")) await save(r.rel, { status: "queued", attempts: 0, error: null });
     } catch { /* database not ready yet: keep what we have */ }
   }
   let fullAt = 0;
@@ -366,8 +379,8 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       current!.phase = row.kind === "remux" ? "Repacking" : "Converting";
       const enc = await pickEncoder();
       const duration = Number(info.duration) || 0;
-      await new Promise<void>((resolve, reject) => {
-        const p = spawn(deps.ffmpeg, encodeArgs(src, out, row.kind!, info, enc), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      const encode = (soft: boolean) => new Promise<void>((resolve, reject) => {
+        const p = spawn(deps.ffmpeg, encodeArgs(src, out, row.kind!, info, enc, soft), { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
         current!.proc = p;
         let errText = "";
         let lastMilestone = 0;
@@ -402,13 +415,24 @@ export function createVideoPrep(deps: VideoPrepDeps) {
           else reject(new Error(errText.trim().split(/\r?\n/).pop() || `ffmpeg exit ${code}`));
         });
       });
+      const short = (c: any) => duration > 60 && Math.abs(c.duration - duration) > Math.max(5, duration * 0.02);
+      let soft = false;
+      try { await encode(false); } catch (e) { if (current?.stopFor) throw e; soft = true; }
+      let check = soft ? null : await probe(out);
+      // Short, or the converter gave up: once more, decoding on the CPU past the damage.
+      if (soft || (check && short(check))) {
+        deps.log("INFO", `video prep: ${name}: ${soft ? "the converter stopped" : `came out ${Math.round(check!.duration)} s of ${Math.round(duration)} s`}; trying again past damaged frames`);
+        if (current) { current.progress = 0.15; current.phase = "Converting (second try)"; }
+        await rm(out, { force: true });
+        await encode(true);
+        check = await probe(out);
+      }
       current!.proc = null;
 
       // Checked before it goes up: it opens, has a picture, and is the full length.
-      const check = await probe(out);
       const outV = check?.streams.find((s: any) => s.codec_type === "video");
       if (!check || !outV || String(outV.codec_name) !== "h264") throw new Error("the prepared copy didn't check out");
-      if (duration > 60 && Math.abs(check.duration - duration) > Math.max(5, duration * 0.02)) throw new Error(`the prepared copy is ${Math.round(check.duration)} s long, the film ${Math.round(duration)} s`);
+      if (short(check)) throw new Error(`the prepared copy is ${Math.round(check.duration)} s long, the film ${Math.round(duration)} s`);
       const outBytes = (await stat(out)).size;
 
       current!.phase = "Saving to Drive";
@@ -439,7 +463,7 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       // The connection to rclone dropping (a server restart ends its rclone
       // with it) isn't the film's fault: "Power" episodes reached 3 failed
       // attempts that way on 2026-10-19. It goes back in the queue uncounted.
-      const transient = /^fetch failed$|ECONNREFUSED|ECONNRESET|socket hang up/i.test(msg);
+      const transient = TRANSIENT.test(msg);
       if (current?.stopFor || transient) {
         await save(rel, { status: "queued", progress: null });
         if (transient) deps.log("INFO", `video prep: ${name}: lost the connection to rclone; it goes back in the queue`);

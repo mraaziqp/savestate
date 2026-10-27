@@ -133,7 +133,10 @@ export function RemotePlayer({ code, onClose }) {
       if (S.dc?.readyState === "open" && key !== S.sent) { S.sent = key; S.dc.send(JSON.stringify({ t: "in", b, a, g })); }
     };
     raf = requestAnimationFrame(tick);
-    return () => { cancelAnimationFrame(raf); window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); };
+    // The controller is the game's while it plays: the app's menus behind it
+    // stop following it (boot.js, controller navigation).
+    window.__nxGameOpen = true;
+    return () => { window.__nxGameOpen = false; cancelAnimationFrame(raf); window.removeEventListener("keydown", kd); window.removeEventListener("keyup", ku); };
   }, []);
 
   // A little connection information every 2 s.

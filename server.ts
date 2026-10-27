@@ -38,6 +38,7 @@ import { registerRtc } from "./server/rtc.ts";
 import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
+import { createIntegrations } from "./server/integrations.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
@@ -4503,7 +4504,13 @@ async function startServer() {
   // each of them a console line, an SSE push and an INSERT into Neon.
   const recentLogs = new Map<string, { at: number; skipped: number }>();
   const LOG_REPEAT_WINDOW_MS = 60_000;
+  // Connections page: Jarvis / Agent Builder / NAS status and what passes between them.
+  const integrations = createIntegrations({
+    brainKey: () => String((mem.vaultConfig as any).brain_api_key ?? ""),
+    isAdmin: async (req) => (await access.callerOf(req)).admin,
+  });
   function log(level: string, message: string, source = "system") {
+    integrations.fromLog(level, message, source);
     const key = `${level}|${source}|${message}`;
     const now = Date.now();
     const seen = recentLogs.get(key);
@@ -5856,6 +5863,8 @@ async function startServer() {
     if (Array.isArray(t)) (req.query as any).token = String(t[0] ?? "");
     next();
   });
+  app.use(integrations.middleware());
+  integrations.register(app);
 
   const PUBLIC_API_PREFIXES = [
     "/api/health",              // includes /api/health/full
@@ -23667,6 +23676,100 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     })().catch(() => {});
   }
 
+  // ffprobe's answer for one file (tracks, codec, length), kept in memory and
+  // on disk (probe-cache.json) for the next time.
+  async function probeTracks(target: string, ck: string | null): Promise<MediaTrackInfo> {
+    const { execFile } = await import("child_process");
+    const info = await new Promise<MediaTrackInfo>((resolve, reject) => {
+      execFile(FFPROBE_BIN, [
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-show_format",
+        target,
+      ], { timeout: 45000 }, (err, stdout) => {
+        if (err) return reject(err);
+        try {
+          const data = JSON.parse(stdout) as any;
+          const streams: any[] = Array.isArray(data?.streams) ? data.streams : [];
+          const vStream = streams.find((s) => s.codec_type === "video");
+          const duration =
+            parseFloat(data?.format?.duration) ||
+            parseFloat(vStream?.duration) || 0;
+          const videoCodec = String(vStream?.codec_name ?? "").toLowerCase();
+          const pixFmt = String(vStream?.pix_fmt ?? "").toLowerCase();
+          const is10Bit = /10le|10be|p010|yuv420p10|yuv422p10|yuv444p10/i.test(pixFmt);
+          const width = parseInt(vStream?.width ?? "0", 10) || 0;
+          const height = parseInt(vStream?.height ?? "0", 10) || 0;
+
+          let audioIdx = 0;
+          let subIdx = 0;
+          const audioTracks: MediaTrackInfo["audioTracks"] = [];
+          const subtitleTracks: MediaTrackInfo["subtitleTracks"] = [];
+
+          for (const s of streams) {
+            const lang = String(s.tags?.language ?? s.tags?.LANGUAGE ?? "und").toLowerCase();
+            const title = String(s.tags?.title ?? s.tags?.TITLE ?? "").trim();
+            if (s.codec_type === "audio") {
+              audioTracks.push({
+                index: audioIdx++,
+                language: lang,
+                title,
+                codec: String(s.codec_name ?? ""),
+                channels: Number(s.channels ?? 2),
+                default: !!(s.disposition?.default),
+              });
+            } else if (s.codec_type === "subtitle") {
+              // index counts every subtitle stream (it is ffmpeg's 0:s:N), so
+              // skipping a bitmap track must not renumber the ones after it.
+              const index = subIdx++;
+              const codec = String(s.codec_name ?? "").toLowerCase();
+              if (BITMAP_SUB_CODECS.has(codec)) continue;
+              subtitleTracks.push({
+                index,
+                language: lang,
+                title,
+                codec,
+                default: !!(s.disposition?.default),
+                forced: !!(s.disposition?.forced) || /\bforced\b/i.test(title),
+                hearingImpaired: !!(s.disposition?.hearing_impaired) || /\b(sdh|hi|cc)\b/i.test(title),
+              });
+            }
+          }
+          resolve({ duration, videoCodec, is10Bit, width, height, audioTracks, subtitleTracks });
+        } catch (e) { reject(e); }
+      });
+    });
+
+    _mediaTrackCache.set(target, { info, ts: Date.now() });
+    if (info.duration > 0) _mediaDurationCache.set(target, { duration: info.duration, ts: Date.now() });
+    if (ck && info.duration > 0) { _probeDisk[`tracks|${ck}`] = info; _probeDirty = true; }
+    return info;
+  }
+
+  // Every video's tracks found ahead of time, one file at a time and only
+  // while nobody is watching or playing. Only 187 of 2,467 were known
+  // (2026-10-27): a first Play of an HEVC or 10-bit film tried the file
+  // directly, waited ~3.5 s for a picture that never came, and switched to the
+  // converted stream once this 3-7 s probe answered.
+  async function warmTrackCache() {
+    if (LOW_MEMORY || process.env.NEXUS_DISABLE_WARMUP === "1") return;
+    let probed = 0;
+    for (const m of [...mem.media]) {
+      if (m.kind !== "video" || !m.path) continue;
+      const target = videoPrep.copyFor(m.path) ?? m.path;
+      if (_mediaTrackCache.has(target)) continue;
+      const ck = await probeCacheKey(target);
+      if (!ck || _probeDisk[`tracks|${ck}`]) continue;
+      while (siteBusy()) await new Promise((r) => setTimeout(r, 60_000));
+      await probeTracks(target, ck).then(() => probed++, () => {});
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    if (probed) log("INFO", `Media details found ahead of time for ${probed} video(s)`, "media");
+  }
+  setTimeout(() => void warmTrackCache().catch(() => {}), 5 * 60_000).unref?.();
+  setInterval(() => void warmTrackCache().catch(() => {}), 6 * 3600_000).unref?.();
+
   app.get("/api/media/info", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
@@ -23691,70 +23794,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
 
     try {
-      const { execFile } = await import("child_process");
-      const info = await new Promise<MediaTrackInfo>((resolve, reject) => {
-        execFile(FFPROBE_BIN, [
-          "-v", "quiet",
-          "-print_format", "json",
-          "-show_streams",
-          "-show_format",
-          target,
-        ], { timeout: 45000 }, (err, stdout) => {
-          if (err) return reject(err);
-          try {
-            const data = JSON.parse(stdout) as any;
-            const streams: any[] = Array.isArray(data?.streams) ? data.streams : [];
-            const vStream = streams.find((s) => s.codec_type === "video");
-            const duration =
-              parseFloat(data?.format?.duration) ||
-              parseFloat(vStream?.duration) || 0;
-            const videoCodec = String(vStream?.codec_name ?? "").toLowerCase();
-            const pixFmt = String(vStream?.pix_fmt ?? "").toLowerCase();
-            const is10Bit = /10le|10be|p010|yuv420p10|yuv422p10|yuv444p10/i.test(pixFmt);
-            const width = parseInt(vStream?.width ?? "0", 10) || 0;
-            const height = parseInt(vStream?.height ?? "0", 10) || 0;
-
-            let audioIdx = 0;
-            let subIdx = 0;
-            const audioTracks: MediaTrackInfo["audioTracks"] = [];
-            const subtitleTracks: MediaTrackInfo["subtitleTracks"] = [];
-
-            for (const s of streams) {
-              const lang = String(s.tags?.language ?? s.tags?.LANGUAGE ?? "und").toLowerCase();
-              const title = String(s.tags?.title ?? s.tags?.TITLE ?? "").trim();
-              if (s.codec_type === "audio") {
-                audioTracks.push({
-                  index: audioIdx++,
-                  language: lang,
-                  title,
-                  codec: String(s.codec_name ?? ""),
-                  channels: Number(s.channels ?? 2),
-                  default: !!(s.disposition?.default),
-                });
-              } else if (s.codec_type === "subtitle") {
-                // index counts every subtitle stream (it is ffmpeg's 0:s:N), so
-                // skipping a bitmap track must not renumber the ones after it.
-                const index = subIdx++;
-                const codec = String(s.codec_name ?? "").toLowerCase();
-                if (BITMAP_SUB_CODECS.has(codec)) continue;
-                subtitleTracks.push({
-                  index,
-                  language: lang,
-                  title,
-                  codec,
-                  default: !!(s.disposition?.default),
-                  forced: !!(s.disposition?.forced) || /\bforced\b/i.test(title),
-                  hearingImpaired: !!(s.disposition?.hearing_impaired) || /\b(sdh|hi|cc)\b/i.test(title),
-                });
-              }
-            }
-            resolve({ duration, videoCodec, is10Bit, width, height, audioTracks, subtitleTracks });
-          } catch (e) { reject(e); }
-        });
-      });
-      _mediaTrackCache.set(target, { info, ts: Date.now() });
-      if (info.duration > 0) _mediaDurationCache.set(target, { duration: info.duration, ts: Date.now() });
-      if (ck && info.duration > 0) { _probeDisk[`tracks|${ck}`] = info; _probeDirty = true; }
+      const info = await probeTracks(target, ck);
       warmFromInfo(req, target, rel, info);
       return res.json({ ok: true, ...info, rel });
     } catch (e) {

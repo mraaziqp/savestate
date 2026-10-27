@@ -93,7 +93,7 @@ import "./savesync.js";
     + '.nx-music-bar input[type=range]{-webkit-appearance:none;appearance:none;background:linear-gradient(rgba(255,255,255,.16),rgba(255,255,255,.16)) center/100% 4px no-repeat!important;border-radius:0}'
     + '.nx-music-bar input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
     + '.nx-music-bar input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:#c084fc;border:0}'
-    + '.nx-controller-focus,button.nx-controller-focus,a.nx-controller-focus,[role="button"].nx-controller-focus,[data-gameid].nx-controller-focus{outline:3px solid #22d3ee!important;outline-offset:3px!important;box-shadow:0 0 24px rgba(34,211,238,.75),inset 0 0 10px rgba(34,211,238,.3)!important;transform:scale(1.03)!important;transition:outline .12s ease,box-shadow .12s ease,transform .15s ease!important}'
+    + '.nx-controller-focus,button.nx-controller-focus,a.nx-controller-focus,[role="button"].nx-controller-focus,[data-gameid].nx-controller-focus{outline:3px solid #22d3ee!important;outline-offset:3px!important;box-shadow:0 0 24px rgba(34,211,238,.75),inset 0 0 10px rgba(34,211,238,.3)!important;transform:scale(1.03)!important;transition:outline .12s ease,box-shadow .12s ease,transform .15s ease!important;scroll-margin:72px 24px}'
     + '.nx-controller-pressed{transform:scale(.97)!important;filter:brightness(1.25)!important}';
   document.head.appendChild(style);
   const showAdmin = (yes) => {
@@ -422,222 +422,187 @@ import "./savesync.js";
     } catch { /* not allowed here (no gesture, a desktop browser): leave it */ }
   };
 
-  // ── 2D Spatial Controller Navigation Engine ─────────────────────────────
+  // ── Controller navigation ───────────────────────────────────────────────
+  // The shell's gamepad loop hands every press here first (build.mjs,
+  // "controller navigation hook"); false leaves it to the shell (LB/RB switch
+  // tabs in menu order, Menu opens the sidebar).
+  //
+  // Rewritten 2026-10-27; the first version was "very messy" to use:
+  //   - every press measured every element twice (getComputedStyle), slow
+  //     with thousands of cards; now only the few in the right direction are
+  //     checked, nearest first;
+  //   - held directions scrolled smoothly, so the next press measured the page
+  //     mid-scroll and skipped items; repeats now scroll at once;
+  //   - inputs, selects, tabs and role="button" items couldn't be reached;
+  //   - a card's own buttons were stops of their own; a card is one stop;
+  //   - a list re-rendering lost the focus and it restarted at the top; it now
+  //     carries on from the same spot on screen;
+  //   - B jumped to the sidebar; it now goes back: closes the dialog or
+  //     detail open, leaves a text box, and only then goes to the menu.
   const FOCUS_CLS = "nx-controller-focus";
   const PRESS_CLS = "nx-controller-pressed";
-  let lastFocused = null;
+  const FOCUSABLE = 'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="tab"], [role="link"], [role="option"], [role="menuitem"], [role="switch"], [role="checkbox"], [role="radio"], [tabindex]:not([tabindex="-1"]), [data-gameid], [data-card], [data-gpnav="1"]';
+  const CARD = "[data-gameid], [data-card], .nx-game-card";
+  const MODALS = '.nxplay, .nx-playmode-modal, .nx-detail, [role="dialog"], [aria-modal="true"], .nx-modal';
+  let lastFocused = null, lastPoint = null, lastMoveAt = 0;
 
   function clearFocus() {
     document.querySelectorAll("." + FOCUS_CLS).forEach((el) => el.classList.remove(FOCUS_CLS));
   }
+  window.addEventListener("pointerdown", () => { clearFocus(); lastFocused = null; }, { passive: true });
 
-  function applyFocus(el) {
-    if (!el) return;
+  // The part of the page the controller works in: the newest dialog, else all of it.
+  function scope() {
+    const marked = document.querySelectorAll("[data-gpnav-scope]");
+    if (marked.length) return marked[marked.length - 1];
+    const open = Array.from(document.querySelectorAll(MODALS)).filter((m) => m.getBoundingClientRect().width > 0);
+    return open[open.length - 1] || document.body;
+  }
+  const navShown = (el) => {
+    if (el.disabled || el.getAttribute("aria-disabled") === "true" || el.closest('[aria-hidden="true"], [inert]')) return false;
+    try { return el.checkVisibility ? el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true, opacityProperty: true, visibilityProperty: true }) : true; } catch { return true; }
+  };
+  // Every stop with its box; sizes only (cheap), visibility is checked later
+  // for the few that matter.
+  function stops(root) {
+    const out = [];
+    for (const el of root.querySelectorAll(FOCUSABLE)) {
+      // A card is one stop: its own buttons are reached through it.
+      if (el.parentElement && el.parentElement.closest(CARD) && root.contains(el.parentElement.closest(CARD))) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+      out.push({ el, r });
+    }
+    return out;
+  }
+  function inDirection(r1, r2, dir) {
+    const c1x = r1.left + r1.width / 2, c1y = r1.top + r1.height / 2;
+    const c2x = r2.left + r2.width / 2, c2y = r2.top + r2.height / 2;
+    if (dir === "right") return c2x > c1x + 4 && r2.left >= r1.left + 2;
+    if (dir === "left") return c2x < c1x - 4 && r2.right <= r1.right - 2;
+    if (dir === "down") return c2y > c1y + 4 && r2.top >= r1.top + 2;
+    return c2y < c1y - 4 && r2.bottom <= r1.bottom - 2;
+  }
+  // Gap along the direction, plus twice the sideways gap (none when the two
+  // share a row or column), plus a little for off-centre: the item straight
+  // ahead wins, then the nearest in the same row or column.
+  function score(r1, r2, dir) {
+    const h = dir === "left" || dir === "right";
+    const along = dir === "right" ? r2.left - r1.right : dir === "left" ? r1.left - r2.right : dir === "down" ? r2.top - r1.bottom : r1.top - r2.bottom;
+    const side = h ? Math.max(0, Math.max(r1.top, r2.top) - Math.min(r1.bottom, r2.bottom)) : Math.max(0, Math.max(r1.left, r2.left) - Math.min(r1.right, r2.right));
+    const off = h ? Math.abs((r1.top + r1.bottom) / 2 - (r2.top + r2.bottom) / 2) : Math.abs((r1.left + r1.right) / 2 - (r2.left + r2.right) / 2);
+    return Math.max(0, along) + side * 2 + off * 0.15;
+  }
+  function nearest(fromRect, list, dir, skip) {
+    const ranked = list.filter((s) => s.el !== skip && inDirection(fromRect, s.r, dir)).map((s) => ({ el: s.el, d: score(fromRect, s.r, dir) })).sort((a, b) => a.d - b.d);
+    for (const c of ranked.slice(0, 40)) if (navShown(c.el)) return c.el;
+    return null;
+  }
+  // Where to start: the item nearest the last spot (after a re-render), else
+  // the first thing in the page's content, top left.
+  function startPoint(list) {
+    if (lastPoint) {
+      let best = null, bd = Infinity;
+      for (const s of list) {
+        const d = Math.hypot(s.r.left + s.r.width / 2 - lastPoint.x, s.r.top + s.r.height / 2 - lastPoint.y);
+        if (d < bd && navShown(s.el)) { bd = d; best = s.el; }
+      }
+      if (best && bd < 400) return best;
+    }
+    const content = list.filter((s) => !s.el.closest("aside, nav") && s.r.bottom > 0 && s.r.top < innerHeight);
+    content.sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
+    return (content.find((s) => navShown(s.el)) || list.find((s) => navShown(s.el)))?.el ?? null;
+  }
+  function focusEl(el, quick) {
     clearFocus();
     el.classList.add(FOCUS_CLS);
-    try { el.focus({ preventScroll: true }); } catch {}
-    try { el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" }); } catch {}
+    try { el.focus({ preventScroll: true, focusVisible: true }); } catch { /* not focusable: the outline still shows */ }
+    try { el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: quick ? "instant" : "smooth" }); } catch { /* old browser */ }
     lastFocused = el;
+    const r = el.getBoundingClientRect();
+    lastPoint = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }
-
-  window.addEventListener("pointerdown", () => clearFocus(), { passive: true });
-
-  function findNearest(curr, list, dir) {
-    const r1 = curr.getBoundingClientRect();
-    const c1 = { x: r1.left + r1.width / 2, y: r1.top + r1.height / 2 };
-    let best = null;
-    let minScore = Infinity;
-
-    for (const el of list) {
-      if (el === curr) continue;
-      const r2 = el.getBoundingClientRect();
-      const c2 = { x: r2.left + r2.width / 2, y: r2.top + r2.height / 2 };
-
-      let isCandidate = false;
-      let dp = 0;
-      let doff = 0;
-      let overlap = 0;
-
-      if (dir === "right") {
-        if (c2.x > c1.x + 4 && r2.left >= r1.left + 2) {
-          isCandidate = true;
-          dp = Math.abs(c2.x - c1.x);
-          doff = Math.abs(c2.y - c1.y);
-          overlap = Math.max(0, Math.min(r1.bottom, r2.bottom) - Math.max(r1.top, r2.top));
-        }
-      } else if (dir === "left") {
-        if (c2.x < c1.x - 4 && r2.right <= r1.right - 2) {
-          isCandidate = true;
-          dp = Math.abs(c2.x - c1.x);
-          doff = Math.abs(c2.y - c1.y);
-          overlap = Math.max(0, Math.min(r1.bottom, r2.bottom) - Math.max(r1.top, r2.top));
-        }
-      } else if (dir === "down") {
-        if (c2.y > c1.y + 4 && r2.top >= r1.top + 2) {
-          isCandidate = true;
-          dp = Math.abs(c2.y - c1.y);
-          doff = Math.abs(c2.x - c1.x);
-          overlap = Math.max(0, Math.min(r1.right, r2.right) - Math.max(r1.left, r2.left));
-        }
-      } else if (dir === "up") {
-        if (c2.y < c1.y - 4 && r2.bottom <= r1.bottom - 2) {
-          isCandidate = true;
-          dp = Math.abs(c2.y - c1.y);
-          doff = Math.abs(c2.x - c1.x);
-          overlap = Math.max(0, Math.min(r1.right, r2.right) - Math.max(r1.left, r2.left));
-        }
-      }
-
-      if (!isCandidate) continue;
-      const penalty = overlap > 0 ? 0.75 : 2.4;
-      const score = dp + doff * penalty;
-      if (score < minScore) {
-        minScore = score;
-        best = el;
-      }
+  function current(root) {
+    const a = document.activeElement;
+    if (a && a !== document.body && root.contains(a) && a.matches(FOCUSABLE)) return a;
+    if (lastFocused && document.body.contains(lastFocused) && root.contains(lastFocused)) return lastFocused;
+    return null;
+  }
+  const typing = (el) => !!el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !/^(button|submit|checkbox|radio|range|color|file|reset|image)$/i.test(el.type || "")));
+  function press(el) {
+    // A card: its own play/open control, else the card.
+    const target = el.matches(CARD) && !el.matches('button, a, [role="button"]') ? (el.querySelector('button, a[href], [role="button"]') || el.firstElementChild || el) : el;
+    el.classList.add(PRESS_CLS);
+    setTimeout(() => el.classList.remove(PRESS_CLS), 150);
+    if (typing(el) || el.tagName === "SELECT") { try { el.focus(); } catch { /* ignore */ } if (el.tagName === "SELECT") { try { el.showPicker?.(); } catch { /* needs a gesture */ } } return; }
+    target.click();
+  }
+  function back(root, ctx, curr) {
+    if (typing(document.activeElement)) { const el = document.activeElement; el.blur(); focusEl(el, true); return true; }
+    if (ctx?.te) { ctx.ce(null); return true; }
+    if (root !== document.body) {
+      const close = root.querySelector('[aria-label="Close" i], [aria-label^="Close" i], [data-close], .nxplay-close, [aria-label="Back" i]');
+      if (close && navShown(close)) { close.click(); return true; }
+      window.dispatchEvent(new CustomEvent("nexus:play-close"));
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      return true;
     }
-    return best;
+    if (curr && !curr.closest("aside, nav")) {
+      const side = document.querySelector('aside [aria-current="page"], aside [data-active="true"], nav [aria-current="page"]') || document.querySelector("aside button, nav button");
+      if (side && navShown(side)) { focusEl(side, false); return true; }
+    }
+    return false;
   }
 
   window.__nxGamepadNav = function (action, ctx) {
-    if (document.getElementById("ejs-game-container") || window.__nxGameOpen) {
-      return true;
-    }
-
-    // Modal trap
-    const modal = document.querySelector(".nxplay, .nx-playmode-modal, .nx-detail, [role='dialog'], .nx-modal");
-    if (modal) {
-      const modalItems = Array.from(modal.querySelectorAll('button:not([disabled]), [role="button"]:not([aria-disabled="true"]), input:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')).filter((el) => {
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && window.getComputedStyle(el).display !== "none" && window.getComputedStyle(el).visibility !== "hidden";
-      });
-
-      if (action === "cancel") {
-        if (ctx?.te) { ctx.ce(null); return true; }
-        const cancelBtn = modal.querySelector('button[aria-label="Close"], button.nxa-btn:last-child, .nxplay-row button:last-child');
-        if (cancelBtn) { cancelBtn.click(); return true; }
-        window.dispatchEvent(new CustomEvent("nexus:play-close"));
-        return true;
-      }
-
-      if (action === "confirm") {
-        const active = document.activeElement;
-        if (active && modal.contains(active) && typeof active.click === "function") {
-          active.classList.add(PRESS_CLS);
-          setTimeout(() => active.classList.remove(PRESS_CLS), 150);
-          active.click();
-          return true;
-        }
-        if (modalItems.length > 0) {
-          applyFocus(modalItems[0]);
-          modalItems[0].click();
-          return true;
-        }
-        return true;
-      }
-
-      if (action === "up" || action === "down" || action === "left" || action === "right") {
-        let curr = document.activeElement;
-        if (!curr || !modal.contains(curr)) curr = modalItems[0];
-        if (!curr) return true;
-        const best = findNearest(curr, modalItems, action);
-        if (best) applyFocus(best);
-        return true;
-      }
-      return true;
-    }
-
-    // Shoulder buttons: Tab switching
-    const MAIN_TABS = ["media", "library", "consoles", "music", "codex", "party"];
-    if (action === "lb" && ctx?.S) {
-      const idx = MAIN_TABS.indexOf(ctx.x);
-      const prev = idx <= 0 ? MAIN_TABS[MAIN_TABS.length - 1] : MAIN_TABS[idx - 1];
-      ctx.S(prev);
-      return true;
-    }
-    if (action === "rb" && ctx?.S) {
-      const idx = MAIN_TABS.indexOf(ctx.x);
-      const next = idx < 0 || idx >= MAIN_TABS.length - 1 ? MAIN_TABS[0] : MAIN_TABS[idx + 1];
-      ctx.S(next);
-      return true;
-    }
-
-    // Menu button
-    if (action === "menu") {
-      if (ctx?.te) { ctx.ce(null); return true; }
-      if (typeof ctx?._t === "function") { ctx._t((v) => !v); return true; }
-    }
-
-    // Gather interactive elements
-    const candidates = Array.from(document.querySelectorAll(
-      'aside button:not([disabled]), aside a[href], nav button:not([disabled]), nav a[href], ' +
-      '.nxwhere button, [role="group"] button, ' +
-      '[data-gameid], .nx-game-card, [data-card], ' +
-      'main button:not([disabled]), main a[href], ' +
-      'header button:not([disabled]), header input:not([disabled])'
-    )).filter((el) => {
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0 && window.getComputedStyle(el).display !== "none" && window.getComputedStyle(el).visibility !== "hidden";
-    });
-
-    if (candidates.length === 0) return false;
-
-    let curr = document.activeElement;
-    if (!curr || curr === document.body || !document.body.contains(curr)) {
-      curr = lastFocused && document.body.contains(lastFocused)
-        ? lastFocused
-        : (document.querySelector('.nxwhere button[aria-pressed="true"]') || document.querySelector('[data-gameid]') || candidates[0]);
-      if (curr) { applyFocus(curr); return true; }
-    }
-
-    // Confirm (A)
-    if (action === "confirm") {
-      if (curr && typeof curr.click === "function") {
-        curr.classList.add(PRESS_CLS);
-        setTimeout(() => curr.classList.remove(PRESS_CLS), 150);
-        curr.click();
-        return true;
-      }
+    // A game has the controller.
+    if (document.getElementById("ejs-game-container") || window.__nxGameOpen) return true;
+    // Tabs and the menu: the shell knows their order.
+    if (action === "lb" || action === "rb") {
+      if (document.querySelector("[data-gpnav-scope]")) return true;
+      lastFocused = null; lastPoint = null; clearFocus();
+      setTimeout(() => { const list = stops(scope()); const first = startPoint(list); if (first) focusEl(first, true); }, 400);
       return false;
     }
+    if (action === "menu") return false;
 
-    // Cancel (B)
-    if (action === "cancel") {
-      const sidebarActive = document.querySelector('aside [aria-current="page"], aside [data-active="true"], aside button');
-      if (sidebarActive && curr !== sidebarActive) {
-        applyFocus(sidebarActive);
-        return true;
-      }
-      return false;
+    const root = scope();
+    let curr = current(root);
+    if (action === "cancel") return back(root, ctx, curr);
+
+    const list = stops(root);
+    if (!list.length) return false;
+    if (!curr) {
+      // Nothing chosen yet (or it went away in a re-render): start here, and
+      // for a direction carry on from it.
+      curr = startPoint(list);
+      if (!curr) return false;
+      focusEl(curr, true);
+      if (action === "confirm") return true;
     }
+    if (action === "confirm") { press(curr); return true; }
 
-    // Directional (Up, Down, Left, Right)
     if (action === "up" || action === "down" || action === "left" || action === "right") {
-      let best = findNearest(curr, candidates, action);
-
-      if (!best) {
-        const inSidebar = !!curr.closest("aside, nav");
-        if (action === "left" && !inSidebar) {
-          const sideItem = document.querySelector('aside [aria-current="page"], aside [data-active="true"], aside button, nav button');
-          if (sideItem) best = sideItem;
-        } else if (action === "right" && inSidebar) {
-          const contentItem = document.querySelector('.nxwhere button[aria-pressed="true"], .nxwhere button, [data-gameid], main button');
-          if (contentItem) best = contentItem;
-        } else if (action === "up" && curr.closest("main")) {
-          const whereItem = document.querySelector('.nxwhere button[aria-pressed="true"], .nxwhere button');
-          if (whereItem && whereItem !== curr) best = whereItem;
-        } else if (action === "down" && curr.closest(".nxwhere")) {
-          const firstCard = document.querySelector('[data-gameid], .nx-game-card, main [role="button"], main button');
-          if (firstCard && firstCard !== curr) best = firstCard;
-        }
+      // In a text box, left and right move the cursor until it reaches an end.
+      if (typing(curr) && (action === "left" || action === "right")) {
+        try {
+          const atStart = curr.selectionStart === 0 && curr.selectionEnd === 0;
+          const atEnd = curr.selectionStart === curr.value.length;
+          if ((action === "left" && !atStart) || (action === "right" && !atEnd)) return true;
+        } catch { /* number inputs have no cursor */ }
       }
-
-      if (best) {
-        applyFocus(best);
-        return true;
+      const now = Date.now();
+      const quick = now - lastMoveAt < 320; // a held direction
+      lastMoveAt = now;
+      const best = nearest(curr.getBoundingClientRect(), list, action, curr);
+      if (best) { focusEl(best, quick); return true; }
+      // The end of a list that loads more as it scrolls: scroll a little.
+      if (action === "down" || action === "up") {
+        const box = curr.closest("main") || document.scrollingElement;
+        try { (box.scrollHeight > box.clientHeight ? box : document.scrollingElement).scrollBy({ top: action === "down" ? 240 : -240, behavior: "instant" }); } catch { /* ignore */ }
       }
+      return true;
     }
-
     return false;
   };
 

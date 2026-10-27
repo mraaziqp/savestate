@@ -268,9 +268,15 @@ export function createDrives(deps: DrivesDeps) {
         proc.kill();
       }
     }
-    if ([...jobs].some((j) => j.status === "copying" || j.status === "verifying" || j.status === "deleting")) return;
+    // Only copies share the uplink: a check (reading hashes) or a free (local
+    // deletes) running for one folder no longer holds up the next upload.
+    if (jobs.some((j) => j.status === "copying")) return;
     if (deps.gameModeActive?.()) return;
-    const next = jobs.find((j) => j.status === "queued");
+    // The least left to send goes first: a 540 GB series folder had the ROM
+    // folders waiting days behind it (2026-10-27). A daily re-sync (nothing
+    // counted yet) is a quick check, so it goes first too.
+    const left = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
+    const next = jobs.filter((j) => j.status === "queued").sort((a, b) => left(a) - left(b))[0];
     if (next) void runCopy(next);
   }
   const restarting = new Set<string>();

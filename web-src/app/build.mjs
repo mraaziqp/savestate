@@ -53,7 +53,7 @@ import { ${toEsm.exp} as __toESM } from "./${toEsm.file}";
 import { ${reactReq.exp} as __react } from "./${reactReq.file}";
 const React = __toESM(__react(), 1);
 export default React;
-export const { useState, useEffect, useRef, useMemo, useCallback, lazy, Suspense, Fragment, createElement, memo } = React;
+export const { useState, useEffect, useRef, useMemo, useCallback, useDeferredValue, useLayoutEffect, lazy, Suspense, Fragment, createElement, memo } = React;
 `;
 const oldEmulation = `export const loadOldEmulationHub = () => import("./${emulationHub}").then((m) => ({ default: m.EmulationHub }));`;
 const oldCloud = `export const loadOldCloudHub = () => import("./${find("CloudHub-")}").then((m) => ({ default: m.CloudHub }));`;
@@ -96,6 +96,7 @@ for (const f of readdirSync(assets)) {
 // ── Wiring ──────────────────────────────────────────────────────────────
 // patch(text, name, done, from, to): `done` is a string only the patched code
 // contains. `from` may be a string or a RegExp matching the original.
+const HAND_3U = "if((window.nxRuns?.nativeCore?.(t.platform)||!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform))&&window.nxPhonePlay){window.nxPhonePlay(t);return}";
 function patch(text, name, done, from, to) {
   if (text.includes(done)) return text;
   const hit = typeof from === "string" ? text.includes(from) : from.test(text);
@@ -140,6 +141,8 @@ const before = shell;
     `NxGetStarted=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GetStarted}))),` +
     `NxScreens=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ScreensInUse}))),` +
     `NxAdminUsers=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AdminUsers}))),` +
+    `NxConnections=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Connections}))),` +
+    `NxShelf=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameShelf}))),` +
     `NxGameSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameSetup}))),` +
     `NxPlayOverlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayOverlay}))),` +
     `NxPhonePlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PhonePlay}))),` +
@@ -193,10 +196,13 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
   let ch = readFileSync(file, "utf8");
   const before = ch;
   const hand = "if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}";
-  ch = patch(ch, "vault play hands phone games to the emulator app", `const c=(0,s.useCallback)(async t=>{${hand}`,
+  // 3u (below) widens the hand-over for the app's own player; a rebuild
+  // finds that version here and leaves it be.
+  const done = ch.includes(HAND_3U) ? HAND_3U : hand;
+  ch = patch(ch, "vault play hands phone games to the emulator app", `const c=(0,s.useCallback)(async t=>{${done}`,
     "const c=(0,s.useCallback)(async t=>{if(y.isSupported&&nxCanBrowser(t.platform)){",
     `const c=(0,s.useCallback)(async t=>{${hand}if(y.isSupported&&nxCanBrowser(t.platform)){`);
-  ch = patch(ch, "vault download hands phone games to the emulator app", `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}`,
+  ch = patch(ch, "vault download hands phone games to the emulator app", `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${done}`,
     "b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;if(!nxCanBrowser(t.platform)&&!await _()){",
     `b=(0,s.useCallback)(async(t,d=!1)=>{if(X.current.has(t.id))return;${hand}if(!nxCanBrowser(t.platform)&&!await _()){`);
   // The hub loaded 2,000 games; the library passed 3,700 (2026-10-25) and
@@ -207,7 +213,7 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
   ch = patch(ch, "launch screen wording", "Getting the game ready…",
     'children:"Running emulator on local machine…"', 'children:"Getting the game ready…"');
   // Big Picture's Play: "PSP can't run in a browser. On a PC, install..." on a phone.
-  ch = patch(ch, "big picture hands phone games to the emulator app", "const d=l.find(n=>n.id===t);if(d&&!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere",
+  ch = patch(ch, "big picture hands phone games to the emulator app", "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);",
     "onLaunch:async t=>{const d=l.find(n=>n.id===t);if(d&&!nxCanBrowser(d.platform)&&window.nxRuns?.phoneHere?.(d.platform)&&window.nxPhonePlay){j(!1);window.nxPhonePlay(d);return}");
   if (ch !== before) writeFileSync(file, ch);
@@ -215,7 +221,8 @@ shell = patch(shell, "play router on phones", "if(window.nxRuns?.isPhone?.()){if
 {
   const file = path.join(assets, find("LocalLibraryPanel-"));
   const text = readFileSync(file, "utf8");
-  const out = patch(text, "games tab hands phone games to the emulator app", "if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=",
+  const done = text.includes(HAND_3U) ? HAND_3U : "if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}";
+  const out = patch(text, "games tab hands phone games to the emulator app", done + "if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=",
     "const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=",
     "const X=(0,l.useCallback)(async t=>{if(!nxCanBrowser(t.platform)&&window.nxRuns?.phoneHere?.(t.platform)&&window.nxPhonePlay){window.nxPhonePlay(t);return}if(!nxCanBrowser(t.platform)){const nxHeavyLaunch=");
   if (out !== text) writeFileSync(file, out);
@@ -517,10 +524,28 @@ shell = patch(shell, "add games tab", `x==="addgames"&&Pe("manage_system")&&(0,e
 shell = patch(shell, "add games menu", `{id:"addgames",icon:be,label:"Add games"`,
   `{id:"minigames",icon:be,label:"Mini Games",color:"#f472b6",glow:"rgba(244,114,182,0.25)"}`,
   `{id:"minigames",icon:be,label:"Mini Games",color:"#f472b6",glow:"rgba(244,114,182,0.25)"},{id:"addgames",icon:be,label:"Add games",color:"#34d399",glow:"rgba(52,211,153,0.25)"}`);
-shell = patch(shell, "add games is admin-only in the menu", `cloud:"manage_system",addgames:"manage_system"}`,
+shell = patch(shell, "add games is admin-only in the menu", `cloud:"manage_system",addgames:"manage_system"`,
   `cloud:"manage_system"}`, `cloud:"manage_system",addgames:"manage_system"}`);
 shell = patch(shell, "add games title", `addgames:"Add games",`, `ql={help:"Help & guides",`, `ql={addgames:"Add games",help:"Help & guides",`);
-shell = patch(shell, "add games is known", `"minigames","help","addgames"]`, `"household","receipts","minigames","help"]`, `"household","receipts","minigames","help","addgames"]`);
+// Games tab, full list: the game shelf (GameShelf.jsx): systems with counts,
+// search, sorting and an A-Z strip, smooth with thousands of games. The
+// hub’s system tiles open it on that system.
+shell = patch(shell, "game shelf", "render:nxG=>(0,e.jsx)(NxShelf,{games:nxG,platform:Bn?.[0]?.platform??null,",
+  "NxWhere,{games:Bn??at,render:nxG=>(0,e.jsx)(Nl,{games:nxG,loading:Pt,isScanning:sa,gpFocusIdx:ft,",
+  "NxWhere,{games:at,render:nxG=>(0,e.jsx)(NxShelf,{games:nxG,platform:Bn?.[0]?.platform??null,loading:Pt,isScanning:sa,");
+// Connections (admins): Jarvis, the Agent Builder and the NAS, live, with
+// the log of what passes between them and SaveState (Connections.jsx).
+shell = patch(shell, "connections tab", `x==="connections"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxConnections,{})}),`,
+  `x==="help"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGuides,{})}),`,
+  `x==="connections"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxConnections,{})}),x==="help"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGuides,{})}),`);
+shell = patch(shell, "connections menu", `{id:"connections",icon:xs,label:"Connections"`,
+  `{id:"help",icon:xs,label:"Help & guides",color:"#a3e635",glow:"rgba(163,230,53,0.25)"}`,
+  `{id:"help",icon:xs,label:"Help & guides",color:"#a3e635",glow:"rgba(163,230,53,0.25)"},{id:"connections",icon:xs,label:"Connections",color:"#60a5fa",glow:"rgba(96,165,250,0.25)"}`);
+shell = patch(shell, "connections is admin-only in the menu", `addgames:"manage_system",connections:"manage_system"}`,
+  `addgames:"manage_system"}`, `addgames:"manage_system",connections:"manage_system"}`);
+shell = patch(shell, "connections title", `connections:"Connections",`, `ql={addgames:"Add games",`, `ql={connections:"Connections",addgames:"Add games",`);
+shell = patch(shell, "add games is known", `"minigames","help","addgames"`, `"household","receipts","minigames","help"]`, `"household","receipts","minigames","help","addgames"]`);
+shell = patch(shell, "connections is known", `"help","addgames","connections"]`, `"minigames","help","addgames"]`, `"minigames","help","addgames","connections"]`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
