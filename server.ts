@@ -1301,6 +1301,15 @@ const ROM_INDEX_TTL_MS = (LOW_MEMORY ? 60 : 10) * 60_000;
 type RomIndex = Map<string, string>;   // lower-cased file name -> full path
 let romIndex: { key: string; at: number; names: RomIndex } | null = null;
 let romIndexBuilding: Promise<RomIndex> | null = null;
+// Kept on disk: after every server start the first game list waited for a
+// full walk of the Drive ROM folder (25 s, over a minute while Drive for
+// Desktop was busy, 2026-10-27). The saved index is served at once (and
+// rebuilt behind it), as a stale one already was while running.
+const ROM_INDEX_FILE = path.join(PERSIST_DIR, "rom-index.json");
+const romIndexLoaded = readFile(ROM_INDEX_FILE, "utf8").then((t) => {
+  const j = JSON.parse(t) as { key: string; names: [string, string][] };
+  if (!romIndex && j?.key && Array.isArray(j.names)) romIndex = { key: j.key, at: 0, names: new Map(j.names) };
+}).catch(() => {});
 let globalIncompleteFiles: ReturnType<typeof createIncompleteFiles> | null = null;
 async function romFileIndex(roots: string[]): Promise<RomIndex> {
   const key = roots.join("|").toLowerCase();
@@ -1320,12 +1329,14 @@ async function romFileIndex(roots: string[]): Promise<RomIndex> {
       // Local disks first: the first copy of a name found is the one used.
       for (const r of [...roots].sort((a, b) => Number(isCloudPath(a)) - Number(isCloudPath(b)))) await walk(r, 0);
       romIndex = { key, at: Date.now(), names };
+      void writeFile(ROM_INDEX_FILE, JSON.stringify({ key, names: [...names] })).catch(() => {});
       return names;
     })().finally(() => { romIndexBuilding = null; });
     return romIndexBuilding;
   };
   // Walking the Drive folder takes ~25s, so a stale index is served while a
-  // fresh one is built; only the very first call waits.
+  // fresh one is built; only the very first call ever waits.
+  await romIndexLoaded;
   if (romIndex && romIndex.key === key) {
     if (Date.now() - romIndex.at >= ROM_INDEX_TTL_MS) void build().catch(() => {});
     return romIndex.names;
@@ -7162,7 +7173,20 @@ async function startServer() {
   // before the user ever logged in — requiring auth here would silently drop
   // exactly the reports that matter most. Auth is read opportunistically only
   // to attribute a report to a user when a valid token happens to be present.
-  app.post("/api/client-issues/report", async (req, res) => {
+  // Anyone may report (a crash before sign-in still matters), each report is
+  // a database row of up to 20 KB: 30 per 10 minutes per address. Also used
+  // by /api/user/support.
+  const reportLimiter = rateLimit({
+    keyGenerator: (req) => {
+      const peer = req.socket.remoteAddress ?? "";
+      const viaTunnel = peer === "127.0.0.1" || peer === "::1" || peer === "::ffff:127.0.0.1";
+      const cf = String(req.headers["cf-connecting-ip"] ?? "").trim();
+      return ipKeyGenerator(viaTunnel && cf ? cf : (peer || "unknown"));
+    },
+    windowMs: 10 * 60_000, limit: 30, standardHeaders: "draft-7", legacyHeaders: false,
+    message: { ok: false, error: "Too many reports from here; try again in a few minutes." },
+  });
+  app.post("/api/client-issues/report", reportLimiter, async (req, res) => {
     try {
       const body = req.body ?? {};
       const message = String(body.message ?? '').trim().slice(0, 2000);
@@ -16008,7 +16032,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     });
   });
 
-  app.get("/api/client/bootstrap-pack", async (_req, res) => {
+  app.get("/api/client/bootstrap-pack", async (req, res) => {
+    // It names this PC's LAN and Tailscale addresses: open on the LAN, but
+    // from the internet (through the tunnel) only to someone signed in.
+    if (req.headers["cf-connecting-ip"] && !(await access.callerOf(req)).authed) return res.status(401).json({ error: "Sign in to download the client pack." });
     try {
       const net = getHostNetworkSummary();
       const preferredHostUrl = net.tailscaleUrl ?? net.lanUrl ?? `http://localhost:${PORT}`;
@@ -29084,7 +29111,7 @@ Loop
     }
   });
 
-  app.post("/api/user/support", express.json(), async (req, res) => {
+  app.post("/api/user/support", reportLimiter, express.json(), async (req, res) => {
     try {
       const auth = getOptionalAuthUser(req);
       const { subject, category = "general", message, email } = req.body ?? {};
