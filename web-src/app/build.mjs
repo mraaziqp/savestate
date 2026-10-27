@@ -143,6 +143,7 @@ const before = shell;
     `NxAdminUsers=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.AdminUsers}))),` +
     `NxConnections=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Connections}))),` +
     `NxShelf=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameShelf}))),` +
+    `NxPause=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PauseAll}))),` +
     `NxGameSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.GameSetup}))),` +
     `NxPlayOverlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayOverlay}))),` +
     `NxPhonePlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PhonePlay}))),` +
@@ -153,7 +154,7 @@ const before = shell;
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPause,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 

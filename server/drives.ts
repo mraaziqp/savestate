@@ -33,6 +33,8 @@ export type DrivesDeps = {
   onUploaded?: (kind: OffloadKind) => void;
   /** No new jobs start while a game is running on the host. */
   gameModeActive?: () => boolean;
+  /** Pause all (server/pause-all.ts): the copy running now stops too, not just the next one. */
+  pausedAll?: () => boolean;
   /** Someone is watching, listening or browsing right now (uploads hold back). */
   siteBusy?: () => boolean;
   /** Someone is watching, listening or playing right now (that needs the upload line). */
@@ -267,6 +269,17 @@ export function createDrives(deps: DrivesDeps) {
         restarting.add(j.id);
         proc.kill();
       }
+    }
+    // Paused by the owner: the running copy stops now and goes back in the
+    // queue (rclone carries on from the files already sent).
+    if (deps.pausedAll?.()) {
+      for (const j of jobs) {
+        const proc = running.get(j.id);
+        if (j.status !== "copying") continue;
+        // Still looking for duplicates (no rclone yet): it sees the pause and stops there.
+        if (proc) { restarting.add(j.id); proc.kill(); } else j.status = "queued";
+      }
+      return;
     }
     // Only copies share the uplink: a check (reading hashes) or a free (local
     // deletes) running for one folder no longer holds up the next upload.
@@ -513,6 +526,7 @@ export function createDrives(deps: DrivesDeps) {
     saveNow();
     await findDupes(job, bin).catch((e) => deps.log("WARN", `Upload ${job.id}: duplicate check skipped: ${e?.message ?? e}`));
     if (job.status !== "copying") return; // paused or removed while looking
+    if (deps.pausedAll?.()) { job.status = "queued"; saveNow(); return; } // Pause all pressed meanwhile
     deps.log("INFO", `Upload ${job.id}: ${job.source} -> ${job.remote}:${job.dest}`);
     const rcPort = 6100 + Math.floor(Math.random() * 800);
     const rcPass = crypto.randomBytes(12).toString("hex");
@@ -1235,5 +1249,5 @@ export function createDrives(deps: DrivesDeps) {
     });
   }
 
-  return { register, findRclone, rc, emailOf, applyRate, jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
+  return { register, findRclone, rc, emailOf, applyRate, nudge: () => pump(), jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
 }

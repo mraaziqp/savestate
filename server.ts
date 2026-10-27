@@ -39,6 +39,7 @@ import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
 import { createIntegrations } from "./server/integrations.ts";
+import { createPauseAll } from "./server/pause-all.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
@@ -2647,6 +2648,25 @@ function detectSeriesMetaRaw(nameNoExt: string, relPath: string): { isSeries: bo
       title: fromName || normalizeSeriesTitle(titleFromSeasonSegment || folderTitle || "") || null,
       season: Number.parseInt(xPattern[2], 10),
       episode: Number.parseInt(xPattern[3], 10),
+    };
+  }
+
+  // Pattern 2b: anime releases, "[VON] Baki (2018) - 01v2 [1080p]" and
+  // "Shingeki no Kyojin s2 - 01v3 (26)": a dash, the episode number and maybe
+  // a version, no SxxEyy. They had no episode number and sorted to the front
+  // of their season (2026-10-27). "Title - 1080p" is not one (the lookahead).
+  const animeDash = isInsideMovies ? null
+    : nameNoExt.replace(/^\s*\[[^\]]*\]\s*/, "").match(/^(.*?)(?:[\s._]+s(\d{1,2}))?\s+-\s+(\d{1,4})(?:v\d)?(?=\s*(?:\[|\(|$))/i);
+  // "Season 1 - Interview - 60 Minutes" (an extra) is not one either.
+  if (animeDash && !isYear(animeDash[3]) && !/^season\b/i.test(animeDash[1].trim())) {
+    const rawTitle = animeDash[1].replace(/\(\s*(19|20)\d{2}\s*\)/g, "").trim();
+    return {
+      isSeries: true,
+      // The show's own folder names it: "Attack On Titan/Season 4" holds
+      // "Shingeki no Kyojin - 61", and it must stay one show.
+      title: (seasonFromPath != null ? normalizeSeriesTitle(titleFromSeasonSegment || folderTitle || "") : "") || normalizeSeriesTitle(rawTitle) || null,
+      season: animeDash[2] ? Number.parseInt(animeDash[2], 10) : seasonFromPath ?? 1,
+      episode: Number.parseInt(animeDash[3], 10),
     };
   }
 
@@ -5491,7 +5511,7 @@ async function startServer() {
     compressQueueRunning = true;
     try {
       while (compressQueue.length > 0) {
-        while (gameMode.active()) await new Promise((r) => setTimeout(r, 30_000));
+        while (holdBackground()) await new Promise((r) => setTimeout(r, 30_000));
         const relPath = compressQueue.shift()!;
         if (compressCancelSet.has(relPath)) {
           compressCancelSet.delete(relPath);
@@ -6141,6 +6161,19 @@ async function startServer() {
   });
   gameMode.register(app);
 
+  // Pause all (server/pause-all.ts): the owner's one button for the PC back;
+  // everything in the background waits until Resume.
+  const pauseAll = createPauseAll({
+    persistDir: PERSIST_DIR,
+    isAdmin: async (req) => (await access.callerOf(req)).admin,
+    qbt: () => qbtAuthed(),
+    ollamaUrl: process.env.OLLAMA_URL?.trim() || "http://127.0.0.1:11434",
+    changed: () => { try { drives.nudge(); } catch { /* not started yet: its own timer catches up */ } },
+    log: (level, msg) => log(level, msg, "system"),
+  });
+  pauseAll.register(app);
+  function holdBackground() { return gameMode.active() || pauseAll.active(); }
+
   // ── Is anyone using the site? (uploads run flat out when nobody is) ─────
   // Watching, listening, playing or opening the app counts; a background tab
   // polling for status does not. Long single-request streams count while open.
@@ -6310,10 +6343,11 @@ async function startServer() {
 
   // Google Drive accounts, local disks and upload-and-verify jobs (server/drives.ts).
   const drives = createDrives({
+    pausedAll: () => pauseAll.active(),
     persistDir: PERSIST_DIR,
     log: (level, msg) => log(level, msg, "drives"),
     callerOf: (req) => access.callerOf(req),
-    gameModeActive: () => gameMode.active(),
+    gameModeActive: () => holdBackground(),
     siteBusy: () => siteBusy(),
     streamingNow: () => openStreams > 0,
     isIncomplete: (p: string) => incompleteFiles.get(p) != null,
@@ -6391,7 +6425,7 @@ async function startServer() {
     mediaRoot: () => mediaRoot,
     videos: () => mem.media.filter((m) => m.kind === "video").map((m) => ({ path: m.path, name: m.name, size: m.size })),
     ffmpeg: FFMPEG_BIN, ffprobe: FFPROBE_BIN, persistDir: PERSIST_DIR,
-    rc: drives.rc, gameModeActive: () => gameMode.active(),
+    rc: drives.rc, gameModeActive: () => holdBackground(),
     converter: VIDEO_PREP_CONVERTER,
     remote: process.env.NEXUS_VIDEO_PREP_REMOTE?.trim() || "gdrive",
     driveFolder: process.env.NEXUS_VIDEO_PREP_FOLDER?.trim() || "NexusArchive",
@@ -14637,7 +14671,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (done.length) log("INFO", `Wanted retry: ${done.join("; ")}`, "arr");
     return done;
   }
-  setInterval(() => { if (!gameMode.active()) void retryWantedArr().catch(() => {}); }, 12 * 3600_000).unref?.();
+  setInterval(() => { if (!holdBackground()) void retryWantedArr().catch(() => {}); }, 12 * 3600_000).unref?.();
   app.post("/api/arr/retry-wanted", async (req, res) => {
     const auth = requireAuthenticatedUser(req, res);
     if (!auth) return;
@@ -21255,7 +21289,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   const ART_RETRY_MS = 24 * 3600_000;
   app.post("/api/art/fetch-batch", async (req, res) => {
     if (!(await access.callerOf(req)).admin) return res.json({ started: false, count: 0 });
-    if (artBatchRunning || gameMode.active()) return res.json({ started: false, running: artBatchRunning, count: 0 });
+    if (artBatchRunning || holdBackground()) return res.json({ started: false, running: artBatchRunning, count: 0 });
     const limit = Math.min(parseInt(String((req.body as any)?.limit ?? 500)), LOW_MEMORY ? 60 : 5000);
     let games: { id: string; title: string; platform: string; relative_path?: string }[] = [];
     if (dbConnected && pool) {
@@ -23805,7 +23839,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (_mediaTrackCache.has(target)) continue;
       const ck = await probeCacheKey(target);
       if (!ck || _probeDisk[`tracks|${ck}`]) continue;
-      while (siteBusy()) await new Promise((r) => setTimeout(r, 60_000));
+      while (siteBusy() || holdBackground()) await new Promise((r) => setTimeout(r, 60_000));
       await probeTracks(target, ck).then(() => probed++, () => {});
       await new Promise((r) => setTimeout(r, 1500));
     }
@@ -27001,7 +27035,7 @@ Loop
   }
   // Drop a song into a music folder and it shows up without anyone pressing Scan.
   setTimeout(() => { void runDeepScanInBackground().catch(() => {}); }, 90_000).unref?.();
-  setInterval(() => { if (!gameMode.active()) void runDeepScanInBackground().catch(() => {}); }, 6 * 3600_000).unref?.();
+  setInterval(() => { if (!holdBackground()) void runDeepScanInBackground().catch(() => {}); }, 6 * 3600_000).unref?.();
 
   // Endpoints for music
   app.post("/api/music/deep-scan", async (req, res) => {
@@ -29793,7 +29827,7 @@ Format as JSON:
       })
       .catch(() => {});
   };
-  setInterval(() => { if (!gameMode.active()) autoScanMedia(); }, 30 * 60 * 1000).unref();
+  setInterval(() => { if (!holdBackground()) autoScanMedia(); }, 30 * 60 * 1000).unref();
   setInterval(() => {
     if (!mediaRootDown) return;
     stat(path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT)).then((st) => { if (st.isDirectory()) autoScanMedia(); }).catch(() => {});
@@ -29801,7 +29835,7 @@ Format as JSON:
 
   // Auto-scan vault/games periodically (every 30 minutes — chokidar handles real-time)
   setInterval(async () => {
-    if (gameMode.active()) return;
+    if (holdBackground()) return;
     const cfg = await getVaultConfig().catch(() => null);
     if (cfg?.root_path) {
       const initialCount = mem.games.length;

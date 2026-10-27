@@ -264,6 +264,26 @@ export function createDownloader(deps: DownloaderDeps) {
   // 480p or 3 GB 1080p). A title whose releases are refused only for quality
   // or size moves to this profile: 720p or 1080p, upgraded to 1080p later.
   const command = (app: { url: string; key: string }, body: Record<string, unknown>) => arrSend(app, "POST", "command", body).catch(() => null);
+
+  // One whole season through Sonarr's own search and grab. Its refusals that
+  // only say "you have some of these" or "not 1080p" are accepted (the import
+  // keeps better copies already there and fills the gaps); anything else (too
+  // big, several seasons, too few seeders, SD, not this show) rules a pack out.
+  // 1080p first, then the best seeded; answers what was sent, or null.
+  const PACK_OK = /not wanted in profile|does not allow upgrades|meets cutoff|is not an upgrade|wasn't requested|does not meet the cutoff/i;
+  async function seasonPack(S: { url: string; key: string }, s: any, season: number, anime: boolean, room: number): Promise<string | null> {
+    const releases = (await arrGet(S.url, S.key, "v3", `release?seriesId=${s.id}&seasonNumber=${season}`, 180000).catch(() => [])) as any[];
+    const res = (r: any) => Number(r.quality?.quality?.resolution) || 0;
+    const ok = releases.filter((r) => r.fullSeason && r.downloadAllowed !== false && (r.seeders ?? 0) >= MIN_SEEDERS && res(r) >= 720
+      && (Number(r.size) || 0) < room
+      && (r.rejections ?? []).every((x: any) => { const why = String(x?.reason ?? x); return PACK_OK.test(why) || (anime && /Non-English/i.test(why)); }))
+      .sort((a, b) => (res(b) >= 1080 ? 1 : 0) - (res(a) >= 1080 ? 1 : 0) || (b.seeders ?? 0) - (a.seeders ?? 0));
+    for (const r of ok.slice(0, 3)) {
+      const sent = await arrSend(S, "POST", "release", { guid: r.guid, indexerId: r.indexerId }).then(() => true, () => false);
+      if (sent) return `${r.title} (${r.quality?.quality?.name}, ${r.seeders} seeders, ${(Number(r.size) / 1024 ** 3).toFixed(1)} GB)`;
+    }
+    return null;
+  }
   const FALLBACK_PROFILE = "SaveState HD (720p or 1080p)";
   // Anime is Japanese audio with English subtitles: the release policy's
   // "Non-English" (-500, against foreign dubs) refused every Baki and Attack
@@ -326,7 +346,8 @@ export function createDownloader(deps: DownloaderDeps) {
           for (const [season, missing] of bySeason) {
             if (budget <= 0 || lastRun.sent.length >= MAX_SENT_PER_RUN) break;
             const key = `tv:${s.id}:${season}`;
-            if (busy.has(`${s.id}:${season}`) || (tried[key] && now - tried[key].at < DAY)) continue;
+            // Seasons left to episode-by-episode searches (before whole-season packs) go again now.
+            if (busy.has(`${s.id}:${season}`) || (tried[key] && now - tried[key].at < DAY && !/one by one/.test(tried[key].result))) continue;
             budget--; lastRun.checked++;
             const title = s.title.replace(/\s*\(\d{4}\)$/, "");
             const one = missing.length === 1 ? missing[0] : null;
@@ -378,11 +399,19 @@ export function createDownloader(deps: DownloaderDeps) {
               }
             }
             if (!result.startsWith("sent") && whys.length) result = `nothing approved (${topReason(whys)})`;
-            // Part of the season is already there, so whole-season packs are refused:
-            // Sonarr's own search goes episode by episode (Modern Family S07-S10).
-            if (!result.startsWith("sent") && !one && whys.some((w) => /meets cutoff|wasn't requested|is not an upgrade/i.test(w))) {
-              await command(S, { name: "EpisodeSearch", episodeIds: missing.map((e: any) => e.id) });
-              result += "; asked Sonarr to search the missing episodes one by one";
+            // Still nothing for a whole season: the full season pack, through
+            // Sonarr's own search, even when Sonarr refuses it only because part
+            // of the season is already there or the pack is 720p. Episode-by-
+            // episode searches left Modern Family S07-S10 at 4, 4, 1 and 4 of 22
+            // (2026-10-27), and nobody seeds 1080p packs of them. Sonarr imports
+            // the missing episodes and keeps the copies it has.
+            if (!result.startsWith("sent") && !one) {
+              const pack = await seasonPack(S, s, season, anime, freeFor(s.path) - KEEP_FREE_BYTES);
+              if (pack) {
+                result = `sent the whole season: ${pack}`;
+                lastRun.sent.push(`${s.title} S${pad(season)} (whole season)`);
+                receipt({ kind: "search", title: `Whole season sent to Sonarr: ${s.title} season ${season}`, detail: `${pack} · ${missing.length} episode(s) were missing` });
+              }
             }
             tried[key] = { at: Date.now(), result, title: `${s.title} season ${season}${one ? ` episode ${one.episodeNumber}` : ""}` };
             deps.log("INFO", `Deep search ${s.title} S${pad(season)} (${missing.length} missing): ${result}`);

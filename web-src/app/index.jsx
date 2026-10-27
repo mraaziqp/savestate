@@ -38,3 +38,4 @@ export { PhonePlay } from "./PhonePlay.jsx";
 export { Where } from "./Where.jsx";
 export { Connections } from "./Connections.jsx";
 export { GameShelf } from "./GameShelf.jsx";
+export { PauseAll } from "./PauseAll.jsx";
