@@ -220,11 +220,18 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     const row = rel ? rows.get(rel) : null;
     if (!row || row.status !== "done" || !row.out_rel) return null;
     const local = localOf(row.out_rel);
+    // Checked in the background: existsSync through Drive here held the whole
+    // server up (1.5 s of a 5-minute profile, 2026-10-27). A finished copy
+    // was checked for its full size on Drive, so it counts as there until a
+    // check says otherwise.
     const hit = seenCopy.get(local);
-    if (hit && Date.now() - hit.at < (hit.ok ? 5 : 1) * 60_000) return hit.ok ? local : null;
-    const ok = existsSync(local);
-    seenCopy.set(local, { at: Date.now(), ok });
-    return ok ? local : null;
+    if (!hit || Date.now() - hit.at > (hit.ok ? 5 : 1) * 60_000) {
+      const entry = hit ?? { at: 0, ok: true };
+      entry.at = Date.now();
+      seenCopy.set(local, entry);
+      void stat(local).then(() => { entry.ok = true; }, () => { entry.ok = false; });
+    }
+    return seenCopy.get(local)!.ok ? local : null;
   }
   function stateOf(abs: string) {
     const rel = driveRel(abs);

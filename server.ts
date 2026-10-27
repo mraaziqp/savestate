@@ -4926,11 +4926,28 @@ async function startServer() {
   // machine. Otherwise fall back to the host-local value (host-state.json,
   // which IS per-machine) so each device uses its own real paths. The shared
   // row is never rewritten from here — that would break the other host.
+  // Whether a configured folder is there, from an asynchronous check made at
+  // most once a minute (10 s limit). These were existsSync on every config
+  // read, and one slow or unreachable folder stopped the whole server for 29
+  // of 300 seconds profiled (2026-10-27). A folder not checked yet counts as
+  // there until its first answer.
+  const folderSeen = new Map<string, { ok: boolean; at: number; checking: boolean }>();
+  function folderUp(p: string): boolean {
+    let s = folderSeen.get(p);
+    if (!s) { s = { ok: true, at: 0, checking: false }; folderSeen.set(p, s); }
+    if (!s.checking && Date.now() - s.at > 60_000) {
+      const entry = s;
+      entry.checking = true;
+      void Promise.race([fsAccess(p).then(() => true, () => false), new Promise<boolean>((r) => setTimeout(() => r(false), 10_000).unref())])
+        .then((ok) => { entry.ok = ok; entry.at = Date.now(); entry.checking = false; });
+    }
+    return s.ok;
+  }
   function preferLocalPath(dbValue: unknown, localValue: unknown): string {
     const dbPath = String(dbValue ?? '').trim();
     const localPath = String(localValue ?? '').trim();
-    if (dbPath && existsSync(dbPath)) return dbPath;
-    if (localPath && existsSync(localPath)) return localPath;
+    if (dbPath && folderUp(dbPath)) return dbPath;
+    if (localPath && folderUp(localPath)) return localPath;
     return dbPath || localPath;
   }
 
@@ -4939,7 +4956,7 @@ async function startServer() {
   // wipe out the client's working roots.
   function mergeExtraScanPaths(dbValue: unknown, localValue: unknown): string {
     const split = (v: unknown) => String(v ?? '').split(/[,\n]+/).map(x => x.trim()).filter(Boolean);
-    const usable = [...split(dbValue), ...split(localValue)].filter(p => existsSync(p));
+    const usable = [...split(dbValue), ...split(localValue)].filter(p => folderUp(p));
     return Array.from(new Set(usable)).join(',');
   }
 
@@ -10951,28 +10968,37 @@ async function startServer() {
   });
 
   // Active download status — polled by Sidebar badge and DiscoverFeed live list
-  app.get('/api/torrent/download-status', async (_req, res) => {
+  // Every open app polls this (the sidebar's badge): one answer is shared for
+  // 5 s instead of each poll signing in to qBittorrent and listing every
+  // torrent (it ran past the app's 4 s limit while the server was busy).
+  let dlStatus: { at: number; body: Promise<any> } | null = null;
+  async function readDownloadStatus() {
+    const none = { ok: true, total: 0, downloads: [] as any[] };
     const cfg = await loadQbtConfig().catch(() => null);
-    if (!cfg) return res.json({ ok: true, total: 0, downloads: [] });
+    if (!cfg) return none;
     const cookie = await qbtLogin(cfg).catch(() => null);
-    if (cookie === null) return res.json({ ok: true, total: 0, downloads: [] });
+    if (cookie === null) return none;
     try {
       const r = await fetch(`${cfg.host}/api/v2/torrents/info`, {
         headers: cookie ? { Cookie: cookie } : {},
         signal: AbortSignal.timeout(6_000),
       });
-      if (!r.ok) return res.json({ ok: true, total: 0, downloads: [] });
+      if (!r.ok) return none;
       const all = await r.json() as any[];
       const active = all.filter((t: any) => ['downloading', 'stalledDL', 'checkingDL', 'metaDL', 'forcedDL'].includes(t.state));
-      return res.json({
+      return {
         ok: true,
         total: active.length,
         downloads: active.map((t: any) => ({
           hash: t.hash, name: t.name, state: t.state,
           progress: t.progress, dlspeed: t.dlspeed, eta: t.eta, size: t.size,
         })),
-      });
-    } catch { return res.json({ ok: true, total: 0, downloads: [] }); }
+      };
+    } catch { return none; }
+  }
+  app.get('/api/torrent/download-status', async (_req, res) => {
+    if (!dlStatus || Date.now() - dlStatus.at > 5_000) dlStatus = { at: Date.now(), body: readDownloadStatus() };
+    return res.json(await dlStatus.body);
   });
 
   // Stream the largest video file from a downloading/completed torrent
@@ -12034,7 +12060,7 @@ async function startServer() {
     sonarrBase?: string,
     sonarrKey?: string
   ): Promise<{ tvdbId: number; sonarrTemplate: any; inLibrary: boolean; seasons: any[] } | null> {
-    const TMDB_KEY = '2dca580c2a14b55200e784d157207b4d';
+    const TMDB_KEY = TMDB_KEY_MEDIA;
     const base = sonarrBase ?? '';
     const hdr: Record<string, string> = { 'X-Api-Key': sonarrKey ?? '' };
 
@@ -13983,13 +14009,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             const torrents = (await infoRes.json()) as
               { hash: string; content_path?: string; save_path?: string; name: string }[];
 
-            const goneHashes = torrents
-              .filter((t) => {
-                const cp = t.content_path ?? "";
-                if (!cp) return false;
-                return !existsSync(cp);   // content genuinely no longer on disk
-              })
-              .map((t) => t.hash);
+            // content genuinely no longer on disk
+            const goneHashes = (await Promise.all(torrents.map(async (t) => (t.content_path && (await pathGone(t.content_path)) ? t.hash : null))))
+              .filter((h): h is string => !!h);
 
             if (goneHashes.length) {
               const body = new URLSearchParams({
@@ -14042,6 +14064,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     };
   }
 
+  // A torrent's files are gone when the path can't be reached. Asked
+  // asynchronously: existsSync per torrent on a sleeping disk stopped the server.
+  const pathGone = (p: string) => fsAccess(p).then(() => false, () => true);
+
   async function aiPurgeInvalidTorrents(): Promise<HostActionResult> {
     const qbt = await qbtAuthed();
     if (!qbt) return { action: "purge_invalid_torrents", ok: false, summary: "qBittorrent is not reachable." };
@@ -14055,9 +14081,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     // is gone (typically archived to cloud and deleted locally). Files are
     // never deleted here — there is nothing left to delete, and a torrent whose
     // content still exists is left strictly alone.
-    const invalid = torrents.filter((t) =>
-      t.state === "error" || t.state === "missingFiles" ||
-      (t.content_path ? !existsSync(t.content_path) : false));
+    const gone = await Promise.all(torrents.map((t) => (t.content_path ? pathGone(t.content_path) : false)));
+    const invalid = torrents.filter((t, i) => t.state === "error" || t.state === "missingFiles" || gone[i]);
 
     if (invalid.length) {
       await fetch(`${qbt.host}/api/v2/torrents/delete`, {
@@ -14628,7 +14653,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   async function enforceSequentialDownloads(): Promise<number> {
     const qbt = await qbtAuthed();
     if (!qbt) return 0;
-    const torrents = await fetch(`${qbt.host}/api/v2/torrents/info?filter=downloading`, {
+    const torrents = await fetch(`${qbt.host}/api/v2/torrents/info`, {
       headers: { Cookie: qbt.cookie }, signal: AbortSignal.timeout(15_000),
     }).then((r) => r.json() as Promise<{ hash: string; seq_dl?: boolean; f_l_piece_prio?: boolean }[]>)
       .catch(() => []);
@@ -14992,7 +15017,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         headers: { Cookie: cookie }, signal: AbortSignal.timeout(15_000),
       });
       const torrents = (await infoRes.json()) as { hash: string; content_path?: string }[];
-      const gone = torrents.filter((t) => t.content_path && !existsSync(t.content_path)).map((t) => t.hash);
+      const goneFlags = await Promise.all(torrents.map((t) => (t.content_path ? pathGone(t.content_path) : false)));
+      const gone = torrents.filter((_t, i) => goneFlags[i]).map((t) => t.hash);
 
       if (gone.length) {
         await fetch(`${host}/api/v2/torrents/delete`, {
@@ -22200,31 +22226,49 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return res.json({ ok: true, name: safeName, size: bytesWritten, relPath: relativeTarget, mediaRoot: root });
   });
 
+  // Every media request (each HLS segment too) resolved its file with up to
+  // five existsSync calls, and the library lives on Drive for Desktop (I:):
+  // each could stop the whole server while Drive answered (55 stalls of
+  // 2-70 s on 2026-10-26/27, "waiting on a disk", no CPU used). Files the
+  // library scan found are taken as they are (a file gone since then fails
+  // when it is opened); other answers are remembered for a few minutes.
+  let _mediaIndex: { src: typeof mem.media; byKey: Map<string, (typeof mem.media)[number]> } | null = null;
+  function mediaIndex() {
+    if (_mediaIndex?.src === mem.media) return _mediaIndex.byKey;
+    const byKey = new Map<string, (typeof mem.media)[number]>();
+    for (const m of mem.media) {
+      for (const k of [m.relPath, m.path, m.id, m.name, m.relPath?.replace(/\\/g, "/"), m.path?.replace(/\\/g, "/")]) if (k && !byKey.has(k)) byKey.set(k, m);
+    }
+    _mediaIndex = { src: mem.media, byKey };
+    return byKey;
+  }
+  const _existsMemo = new Map<string, { ok: boolean; at: number }>();
+  function existsMemo(p: string): boolean {
+    const hit = _existsMemo.get(p);
+    if (hit && Date.now() - hit.at < (hit.ok ? 300_000 : 30_000)) return hit.ok;
+    let ok = false;
+    try { ok = existsSync(p); } catch { /* unreadable: not there */ }
+    if (_existsMemo.size > 5000) _existsMemo.clear();
+    _existsMemo.set(p, { ok, at: Date.now() });
+    return ok;
+  }
+
   function resolveMediaTarget(rel: string): string {
     let raw = String(rel ?? "").trim();
     if (!raw) return "";
     raw = raw.replace(/^[/\\]+([a-zA-Z]:)/, "$1");
 
-    // 1. If it's already an absolute path
-    if (path.isAbsolute(raw) && isAllowedMediaPath(raw)) {
-      if (existsSync(raw)) return raw;
-    }
+    // 1. A file the library knows (by path, relative path, id or name).
+    const memFound = mediaIndex().get(raw) ?? mediaIndex().get(raw.replace(/\\/g, "/"));
+    if (memFound?.path && isAllowedMediaPath(memFound.path)) return memFound.path;
 
-    // 2. Lookup in loaded in-memory media items (try exact, normalized, and basename/rel matches)
-    const rawNorm = raw.replace(/\\/g, "/");
-    const memFound = mem.media.find(m => {
-      const mRel = (m.relPath || "").replace(/\\/g, "/");
-      const mPath = (m.path || "").replace(/\\/g, "/");
-      return mRel === rawNorm || mPath === rawNorm || m.id === raw || m.name === raw || m.relPath === raw || m.path === raw;
-    });
-    if (memFound && memFound.path && existsSync(memFound.path) && isAllowedMediaPath(memFound.path)) {
-      return memFound.path;
-    }
+    // 2. An absolute path to an allowed folder.
+    if (path.isAbsolute(raw) && isAllowedMediaPath(raw) && existsMemo(raw)) return raw;
 
     // 3. Check current mediaRoot
     const defaultRoot = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
     const candidateDefault = path.resolve(defaultRoot, raw);
-    if (isAllowedMediaPath(candidateDefault) && existsSync(candidateDefault)) {
+    if (isAllowedMediaPath(candidateDefault) && existsMemo(candidateDefault)) {
       return candidateDefault;
     }
 
@@ -22237,7 +22281,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         path.resolve(absRoot, 'Movies', raw),
       ];
       for (const cand of candidates) {
-        if (isAllowedMediaPath(cand) && existsSync(cand)) {
+        if (isAllowedMediaPath(cand) && existsMemo(cand)) {
           return cand;
         }
       }
@@ -23872,8 +23916,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/media/recommendations", async (req, res) => {
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
     const root = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
+    // The library already holds this scan; walking the folder (on Drive for
+    // Desktop) again took this route to 7 s. Only before the first scan is in.
     const cachedScan = mediaRecScanCache.get(root);
-    const scanned = (cachedScan && (Date.now() - cachedScan.ts < MEDIA_REC_SCAN_TTL_MS))
+    const scanned = mem.media.length ? mem.media : (cachedScan && (Date.now() - cachedScan.ts < MEDIA_REC_SCAN_TTL_MS))
       ? cachedScan.items
       : await scanMediaDir(root, 10000).then(items => { mediaRecScanCache.set(root, { items, ts: Date.now() }); return items; });
     const allItems = scanned.filter(i => i.kind === "video");
@@ -24176,28 +24222,61 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.json({ ok: true });
   });
 
-  // Proxy TMDB search for poster art (no TMDB key needed — uses free search endpoint)
+  // TMDB search for poster art. Every poster on every visit asked TMDB again
+  // (78 requests at ~2 s each opening Movies & TV, 2026-10-27). Answers are
+  // kept now (30 days when found, a day when not, on disk across restarts),
+  // the same title asked twice at once is one search, browsers keep the answer
+  // for a day, and the type asked for (movie or series) comes first.
+  type PosterHit = { title: string; type?: string; posterUrl: string | null };
+  const POSTER_CACHE_FILE = path.join(PERSIST_DIR, "poster-search-cache.json");
+  let posterCache: Record<string, { at: number; results: PosterHit[] }> = {};
+  let posterDirty = false;
+  void readFile(POSTER_CACHE_FILE, "utf8").then((t) => { posterCache = { ...JSON.parse(t), ...posterCache }; }).catch(() => {});
+  setInterval(() => {
+    if (!posterDirty) return;
+    posterDirty = false;
+    void writeFile(POSTER_CACHE_FILE, JSON.stringify(posterCache)).catch(() => {});
+  }, 60_000).unref?.();
+  const posterSearches = new Map<string, Promise<PosterHit[]>>();
+  async function posterSearch(title: string, type: string): Promise<PosterHit[]> {
+    const search = async (q: string) => {
+      const r = await fetch(`https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(q)}&api_key=${TMDB_KEY_MEDIA}&language=en-US&page=1`, { signal: AbortSignal.timeout(15_000) });
+      if (!r.ok) throw new Error(`TMDB answered ${r.status}`);
+      return ((await r.json()) as { results?: { poster_path?: string; name?: string; title?: string; media_type?: string }[] }).results ?? [];
+    };
+    let found = await search(title);
+    if (!found.length && /\b(19|20)\d{2}\b|\(|\)/.test(title)) {
+      const bare = title.replace(/\s*\(\d{4}\)$/g, "").replace(/\b(19|20)\d{2}\b/g, "").trim();
+      if (bare && bare !== title) found = await search(bare);
+    }
+    const want = type === "series" || type === "tv" ? "tv" : type === "movie" ? "movie" : "";
+    if (want) found = [...found.filter((i) => i.media_type === want), ...found.filter((i) => i.media_type !== want)];
+    return found.slice(0, 5).map((item) => ({
+      title: item.title ?? item.name ?? "",
+      type: item.media_type,
+      posterUrl: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
+    }));
+  }
   app.get("/api/media/poster", async (req, res) => {
     const title = String(req.query.title ?? "").trim();
     if (!title) return res.status(400).json({ error: "title required" });
+    const type = String(req.query.type ?? "").trim().toLowerCase();
+    const key = `${type}|${title.toLowerCase()}`;
+    const hit = posterCache[key];
+    if (hit && Date.now() - hit.at < (hit.results.length ? 30 : 1) * 86400_000) {
+      res.setHeader("Cache-Control", "private, max-age=86400");
+      return res.json({ results: hit.results });
+    }
     try {
-      let searchTitle = title;
-      let encoded = encodeURIComponent(searchTitle);
-      let r = await fetch(`https://api.themoviedb.org/3/search/multi?query=${encoded}&api_key=2dca580c2a14b55200e784d157207b4d&language=en-US&page=1`, { signal: AbortSignal.timeout(15_000) });
-      let data = r.ok ? (await r.json() as { results?: { poster_path?: string; name?: string; title?: string; media_type?: string }[] }) : { results: [] };
-      if ((!data.results || !data.results.length) && /\b(19|20)\d{2}\b|\(|\)/.test(title)) {
-        searchTitle = title.replace(/\s*\(\d{4}\)$/g, "").replace(/\b(19|20)\d{2}\b/g, "").trim();
-        if (searchTitle && searchTitle !== title) {
-          encoded = encodeURIComponent(searchTitle);
-          r = await fetch(`https://api.themoviedb.org/3/search/multi?query=${encoded}&api_key=2dca580c2a14b55200e784d157207b4d&language=en-US&page=1`, { signal: AbortSignal.timeout(15_000) });
-          if (r.ok) data = await r.json();
-        }
+      let search = posterSearches.get(key);
+      if (!search) {
+        search = posterSearch(title, type).finally(() => posterSearches.delete(key));
+        posterSearches.set(key, search);
       }
-      const results = (data.results ?? []).slice(0, 5).map(item => ({
-        title: item.title ?? item.name ?? "",
-        type: item.media_type,
-        posterUrl: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
-      }));
+      const results = await search;
+      posterCache[key] = { at: Date.now(), results };
+      posterDirty = true;
+      res.setHeader("Cache-Control", "private, max-age=86400");
       return res.json({ results });
     } catch (e) {
       return res.status(502).json({ error: String(e) });
@@ -24551,7 +24630,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // ── Content Discovery (TMDB trending / new releases) ─────────────────────────
-  const TMDB_KEY_DISC = '2dca580c2a14b55200e784d157207b4d';
+  const TMDB_KEY_DISC = TMDB_KEY_MEDIA;
   const TMDB_BASE_DISC = 'https://api.themoviedb.org/3';
   async function tmdbGet(path: string): Promise<any> {
     const sep = path.includes('?') ? '&' : '?';
