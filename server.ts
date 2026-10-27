@@ -6168,6 +6168,7 @@ async function startServer() {
     isAdmin: async (req) => (await access.callerOf(req)).admin,
     qbt: () => qbtAuthed(),
     ollamaUrl: process.env.OLLAMA_URL?.trim() || "http://127.0.0.1:11434",
+    agentBuilderDir,
     changed: () => { try { drives.nudge(); } catch { /* not started yet: its own timer catches up */ } },
     log: (level, msg) => log(level, msg, "system"),
   });
@@ -6419,7 +6420,34 @@ async function startServer() {
   // films a browser can't play into H.264 MP4 copies on Drive; every host
   // (the NAS too) plays the copy when there is one.
   const VIDEO_PREP_CONVERTER = process.env.NEXUS_VIDEO_PREP ? process.env.NEXUS_VIDEO_PREP === "1" : process.platform === "win32" && !LOW_MEMORY;
+  // While a film comes down from Drive for video prep, torrents are held to
+  // 8 MB/s: at 19 MB/s they had the line and a 1 GB episode took 90 minutes
+  // to arrive (2026-10-27). The limit they had is put back afterwards, and
+  // kept on disk so a restart in between cannot leave them capped.
+  const TORRENT_YIELD_FILE = path.join(PERSIST_DIR, "torrent-yield.json");
+  const TORRENT_YIELD_BPS = Number(process.env.NEXUS_TORRENT_YIELD_BPS ?? 8 * 1024 ** 2) || 8 * 1024 ** 2;
+  async function torrentsYield(on: boolean) {
+    const q = await qbtAuthed();
+    if (!q) return;
+    const headers = { Cookie: q.cookie, Referer: q.host, "Content-Type": "application/x-www-form-urlencoded" };
+    const setLimit = (limit: number) => fetch(`${q.host}/api/v2/transfer/setDownloadLimit`, { method: "POST", headers, body: new URLSearchParams({ limit: String(limit) }), signal: AbortSignal.timeout(5000) });
+    const saved = await readFile(TORRENT_YIELD_FILE, "utf8").then((t) => JSON.parse(t) as { before: number }).catch(() => null);
+    if (on) {
+      if (saved) return; // already holding them back
+      const before = Number(await fetch(`${q.host}/api/v2/transfer/downloadLimit`, { headers, signal: AbortSignal.timeout(5000) }).then((r) => r.text()).catch(() => "")) || 0;
+      if (before > 0 && before <= TORRENT_YIELD_BPS) return; // slower than that already
+      await writeFile(TORRENT_YIELD_FILE, JSON.stringify({ before }));
+      await setLimit(TORRENT_YIELD_BPS);
+    } else if (saved) {
+      await setLimit(saved.before);
+      await unlink(TORRENT_YIELD_FILE).catch(() => {});
+    }
+  }
+  // Left from before a restart: put the torrents back.
+  setTimeout(() => { void torrentsYield(false).catch(() => {}); }, 60_000).unref?.();
+
   const videoPrep = createVideoPrep({
+    fetching: (on) => torrentsYield(on),
     pool: () => (dbConnected && pool ? pool : null),
     log: (level, msg) => log(level, msg, "media"),
     mediaRoot: () => mediaRoot,
@@ -24572,26 +24600,84 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return res.status(400).end();
 
-    const host = parsed.hostname.toLowerCase();
-    const blockedLocal =
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "::1" ||
-      host.startsWith("10.") ||
-      host.startsWith("192.168.") ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
-    if (blockedLocal) return res.status(400).end();
+    // A public route, so anyone could ask it to fetch anything: the old check
+    // read the host name only ("0.0.0.0", 169.254.x, IPv6 forms and names that
+    // point here got through). Every address the name resolves to must be a
+    // public one, the answer must be an image, and at most 15 MB.
+    if (!(await publicHost(parsed.hostname))) return res.status(400).end();
 
+    // Kept on disk (TMDB posters: ~1 s each through here, on every visit).
+    const key = crypto.createHash("sha1").update(url).digest("hex");
+    const file = path.join(IMG_CACHE_DIR, `${key}.img`);
+    const hit = await readFile(file).catch(() => null);
+    if (hit && hit.length > 8) {
+      const typeLen = hit.readUInt8(0);
+      res.set("Content-Type", hit.subarray(1, 1 + typeLen).toString("utf8"));
+      res.set("Cache-Control", "public, max-age=604800");
+      return res.end(hit.subarray(1 + typeLen));
+    }
     try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (!r.ok) return res.status(r.status).end();
-      res.set("Content-Type", r.headers.get("content-type") ?? "image/jpeg");
-      res.set("Cache-Control", "public, max-age=86400");
-      res.end(Buffer.from(await r.arrayBuffer()));
+      // Redirects are followed by hand, each new host checked like the first.
+      let at = url, r = await fetch(at, { signal: AbortSignal.timeout(10000), redirect: "manual" });
+      for (let hops = 0; r.status >= 300 && r.status < 400 && r.headers.get("location") && hops < 3; hops++) {
+        const next = new URL(r.headers.get("location")!, at);
+        if (!/^https?:$/.test(next.protocol) || !(await publicHost(next.hostname))) return res.status(400).end();
+        at = next.toString();
+        r = await fetch(at, { signal: AbortSignal.timeout(10000), redirect: "manual" });
+      }
+      if (!r.ok) return res.status(r.status >= 300 && r.status < 400 ? 502 : r.status).end();
+      const type = (r.headers.get("content-type") ?? "image/jpeg").split(";")[0].trim().toLowerCase();
+      if (!/^image\/[\w.+-]+$/.test(type) || type === "image/svg+xml") return res.status(415).end();
+      if (Number(r.headers.get("content-length") ?? 0) > 15 * 1024 ** 2) return res.status(413).end();
+      const body = Buffer.from(await r.arrayBuffer());
+      if (body.length > 15 * 1024 ** 2) return res.status(413).end();
+      res.set("Content-Type", type);
+      res.set("Cache-Control", "public, max-age=604800");
+      res.end(body);
+      const head = Buffer.from(type, "utf8");
+      void mkdir(IMG_CACHE_DIR, { recursive: true })
+        .then(() => writeFile(file, Buffer.concat([Buffer.from([head.length]), head, body])))
+        .then(() => pruneImgCache()).catch(() => {});
     } catch {
       res.status(504).end();
     }
   });
+  const IMG_CACHE_DIR = path.join(PERSIST_DIR, "img-cache");
+  // At most ~1 GB: the oldest go first, checked at most every 10 minutes.
+  let imgPrunedAt = 0;
+  async function pruneImgCache() {
+    if (Date.now() - imgPrunedAt < 10 * 60_000) return;
+    imgPrunedAt = Date.now();
+    const names = await readdir(IMG_CACHE_DIR).catch(() => [] as string[]);
+    const files = (await Promise.all(names.map((n) => stat(path.join(IMG_CACHE_DIR, n)).then((s) => ({ n, size: s.size, at: s.mtimeMs }), () => null))))
+      .filter((x): x is { n: string; size: number; at: number } => !!x).sort((a, b) => b.at - a.at);
+    let total = 0;
+    for (const f of files) { total += f.size; if (total > 1024 ** 3) await unlink(path.join(IMG_CACHE_DIR, f.n)).catch(() => {}); }
+  }
+  // Every address a name resolves to is public (not this PC, the LAN,
+  // link-local or unspecified). Answers kept 10 minutes.
+  const hostVerdicts = new Map<string, { ok: boolean; at: number }>();
+  async function publicHost(hostname: string): Promise<boolean> {
+    const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    const seen = hostVerdicts.get(h);
+    if (seen && Date.now() - seen.at < 600_000) return seen.ok;
+    const priv = (ip: string) => {
+      const v4 = ip.replace(/^::ffff:/i, "");
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(v4)) {
+        const [a, b] = v4.split(".").map(Number);
+        return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+      }
+      return v4 === "::" || v4 === "::1" || /^f[cd]/i.test(v4) || /^fe[89ab]/i.test(v4);
+    };
+    let ok = false;
+    try {
+      const addrs = await dns.promises.lookup(h, { all: true });
+      ok = addrs.length > 0 && addrs.every((x) => !priv(x.address));
+    } catch { ok = false; }
+    if (hostVerdicts.size > 2000) hostVerdicts.clear();
+    hostVerdicts.set(h, { ok, at: Date.now() });
+    return ok;
+  }
 
   // ── FitGirl Repacks PC Game Search ───────────────────────────
   // Uses FlareSolverr (localhost:8191) to bypass Cloudflare, then parses results
@@ -27271,7 +27357,20 @@ Loop
     stream.pipe(res);
   });
 
+  // Kept on disk too: every restart lost them all and each cover cost a Deezer
+  // search again (~0.9 s each, 27 on one Music page).
   const deezerCoverCache = new Map<string, { url: string | null; expires: number }>();
+  const COVER_CACHE_FILE = path.join(PERSIST_DIR, "music-cover-cache.json");
+  let coverCacheDirty = false;
+  void readFile(COVER_CACHE_FILE, "utf8").then((t) => {
+    const now = Date.now();
+    for (const [k, v] of Object.entries(JSON.parse(t) as Record<string, { url: string | null; expires: number }>)) if (v.expires > now && !deezerCoverCache.has(k)) deezerCoverCache.set(k, v);
+  }).catch(() => {});
+  setInterval(() => {
+    if (!coverCacheDirty) return;
+    coverCacheDirty = false;
+    void writeFile(COVER_CACHE_FILE, JSON.stringify(Object.fromEntries(deezerCoverCache))).catch(() => {});
+  }, 60_000).unref?.();
   const MUSIC_FALLBACK_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300" width="300" height="300">
     <defs>
       <radialGradient id="disc" cx="50%" cy="50%" r="50%">
@@ -27361,8 +27460,9 @@ Loop
 
     deezerCoverCache.set(cacheKey, {
       url: coverUrl,
-      expires: now + (coverUrl ? 7 * 86400_000 : 86400_000)
+      expires: now + (coverUrl ? 30 * 86400_000 : 86400_000)
     });
+    coverCacheDirty = true;
     if (deezerCoverCache.size > 10_000) {
       const firstKey = deezerCoverCache.keys().next().value;
       if (firstKey) deezerCoverCache.delete(firstKey);

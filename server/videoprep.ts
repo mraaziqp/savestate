@@ -53,6 +53,8 @@ export type VideoPrepDeps = {
   /** rclone remote-control call (server/drives.ts). */
   rc: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<any>;
   gameModeActive: () => boolean;
+  /** A film is coming down from Drive (true) or done (false): torrents make room meanwhile. */
+  fetching?: (on: boolean) => Promise<void>;
   /** This host converts (has a hardware encoder and the Drive account). */
   converter: boolean;
   /** rclone remote and folder that the media root mirrors ("gdrive", "NexusArchive"). */
@@ -381,7 +383,8 @@ export function createVideoPrep(deps: VideoPrepDeps) {
       // A local copy first: reading over Drive for Desktop would fill its cache
       // (and checks on Drive for Desktop paths have frozen the server).
       const src = path.join(work, srcName);
-      {
+      await deps.fetching?.(true).catch(() => {});
+      try {
         await rcJob("operations/copyfile", { srcFs: `${deps.remote}:`, srcRemote: `${deps.driveFolder}/${rel}`, dstFs: work, dstRemote: srcName },
           (b) => {
             if (current) {
@@ -394,7 +397,7 @@ export function createVideoPrep(deps: VideoPrepDeps) {
             }
           });
         if (!existsSync(src)) throw new Error("the film didn't come down from Drive");
-      }
+      } finally { await deps.fetching?.(false).catch(() => {}); }
 
       current!.phase = row.kind === "remux" ? "Repacking" : "Converting";
       const enc = await pickEncoder();
