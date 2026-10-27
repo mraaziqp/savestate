@@ -265,6 +265,44 @@ export function createDownloader(deps: DownloaderDeps) {
   // or size moves to this profile: 720p or 1080p, upgraded to 1080p later.
   const command = (app: { url: string; key: string }, body: Record<string, unknown>) => arrSend(app, "POST", "command", body).catch(() => null);
 
+  // Finished downloads Sonarr can't import, left in its queue holding disk
+  // (F: was down to 64 GB with ~30 GB of them, 2026-10-27):
+  //   - a pack whose every episode is already in the library ("already
+  //     imported", "not an upgrade"): removed with its torrent; the library
+  //     keeps its own copies;
+  //   - one file holding a whole season ("Single episode file contains all
+  //     episodes"): unusable, removed and blocklisted so another is chosen.
+  // Anything else blocked is left for a person to look at. It removes
+  // downloaded data, so it runs only when the owner has switched it on
+  // (NEXUS_ARR_TIDY=1).
+  async function tidyQueue(S: { url: string; key: string }): Promise<string[]> {
+    if (process.env.NEXUS_ARR_TIDY !== "1") return [];
+    const q = (await arrGet(S.url, S.key, "v3", "queue?pageSize=1000&includeEpisode=true", 30000).catch(() => ({ records: [] }))) as any;
+    const groups = new Map<string, any[]>();
+    for (const r of q.records ?? []) if (r.trackedDownloadState === "importBlocked" && r.downloadId) groups.set(r.downloadId, [...(groups.get(r.downloadId) ?? []), r]);
+    const done: string[] = [];
+    for (const recs of groups.values()) {
+      const msgs = recs.flatMap((r) => (r.statusMessages ?? []).flatMap((m: any) => m.messages ?? []));
+      const merged = msgs.some((m: string) => /Single episode file contains all episodes/i.test(m));
+      // The episode inside a queue record is from when it was grabbed: ask now.
+      const eps = (await arrGet(S.url, S.key, "v3", `episode?seriesId=${recs[0].seriesId}`, 30000).catch(() => [])) as any[];
+      const have = new Set(eps.filter((e) => e.hasFile).map((e) => e.id));
+      const redundant = msgs.length > 0 && msgs.every((m: string) => /already imported|not an upgrade|not a quality revision upgrade/i.test(m))
+        && recs.every((r) => have.has(r.episodeId));
+      if (!merged && !redundant) continue;
+      const ok = await fetch(`${S.url.replace(/\/$/, "")}/api/v3/queue/bulk?removeFromClient=true&blocklist=${merged}`, {
+        method: "DELETE", headers: { "X-Api-Key": S.key, "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: recs.map((r) => r.id) }), signal: AbortSignal.timeout(30000),
+      }).then((r) => r.ok, () => false);
+      if (ok) {
+        const what = `${recs[0].title} (${(Number(recs[0].size || 0) / 1024 ** 3).toFixed(1)} GB, ${merged ? "one file for the whole season: blocklisted" : "already in the library"})`;
+        done.push(what);
+        deps.log("INFO", `Sonarr queue tidied: ${what}`);
+      }
+    }
+    return done;
+  }
+
   // One whole season through Sonarr's own search and grab. Its refusals that
   // only say "you have some of these" or "not 1080p" are accepted (the import
   // keeps better copies already there and fills the gaps); anything else (too
@@ -323,6 +361,7 @@ export function createDownloader(deps: DownloaderDeps) {
       // ── TV: seasons (or single episodes) still missing ──
       if (arr.sonarrUrl && arr.sonarrApiKey) {
         const S = { url: arr.sonarrUrl, key: arr.sonarrApiKey };
+        await tidyQueue(S).catch(() => []);
         const [series, queue] = await Promise.all([
           arrGet(S.url, S.key, "v3", "series", 30000).catch(() => []),
           arrGet(S.url, S.key, "v3", "queue?pageSize=500", 30000).catch(() => ({ records: [] })),
