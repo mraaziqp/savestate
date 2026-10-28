@@ -179,6 +179,13 @@ export function AuthForm({ onLogin, onSuccess, defaultMode = "login", variant = 
 
         {mode === "register" && (
           <>
+            {config.freeStorage?.left != null && (
+              <p className="nxa-sub" style={{ margin: "0 0 10px", fontSize: 13 }}>
+                {config.freeStorage.left > 0
+                  ? `The first ${config.freeStorage.places} people to sign up get ${config.freeStorage.gb} GB of online storage free: ${config.freeStorage.left} place${config.freeStorage.left === 1 ? "" : "s"} left.`
+                  : "Online storage comes with plans that include it (the free places have all gone)."}
+              </p>
+            )}
             <div className="nxa-field">
               <label htmlFor="nxa-user">Username</label>
               <input id="nxa-user" className={`nxa-input ${bad("username") || nameCheck?.state === "taken" || nameCheck?.state === "bad" ? "bad" : ""}`} type="text" value={username}

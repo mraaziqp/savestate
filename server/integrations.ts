@@ -43,8 +43,14 @@ export function createIntegrations(deps: {
       url: process.env.AGENT_BUILDER_URL ?? "http://127.0.0.1:4000", health: "/api/health",
       parse: (b, status) => {
         if (status !== 200) return { state: "down", detail: `answered ${status}` };
-        const bad = Object.entries(b?.components ?? {}).filter(([, c]: [string, any]) => c?.status && c.status !== "ok").map(([k, c]: [string, any]) => `${k}: ${c.status}`);
-        return { state: b?.status === "ok" ? "up" : "degraded", detail: bad.length ? bad.join(", ") : String(b?.status ?? "ok") };
+        // A part switched off in its settings (vector memory without
+        // PGVECTOR_URL reports "degraded", enabled: false) isn't a fault.
+        const comps = Object.entries(b?.components ?? {}) as Array<[string, any]>;
+        const off = comps.filter(([, c]) => c?.status === "degraded" && c?.details?.enabled === false).map(([k]) => k);
+        const bad = comps.filter(([k, c]) => c?.status && c.status !== "ok" && !off.includes(k)).map(([k, c]) => `${k}: ${c.status}`);
+        const offNote = off.length ? `${off.join(", ")} not set up (optional)` : "";
+        if (!bad.length) return { state: "up", detail: offNote || "running" };
+        return { state: "degraded", detail: [bad.join(", "), offNote].filter(Boolean).join("; ") };
       },
     },
     {

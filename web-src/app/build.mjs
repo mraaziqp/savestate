@@ -612,6 +612,16 @@ if (shell !== before) writeFileSync(path.join(assets, shellFile), shell);
   if (next !== music) writeFileSync(file, next);
 }
 
+// 3b. Storage isn't given to every account (2026-10-28: 50 GB free for the
+//     first 100 sign-ups only, else what a plan includes): the Storage page's
+//     "Free Plan · 56 GB" badge promised it to everyone.
+{
+  const file = path.join(assets, find("StorageHub-"));
+  const hub = readFileSync(file, "utf8");
+  const next = patch(hub, "storage badge", `children:"Free Plan"}`, `children:"Free Plan · 56 GB"}`, `children:"Free Plan"}`);
+  if (next !== hub) writeFileSync(file, next);
+}
+
 // 3a. Films and covers are signed in the same way: the session cookie covers
 //     the browser, the token in the URL covers clients it does not reach.
 for (const chunk of ["MediaHub-", "WatchParty-"]) {

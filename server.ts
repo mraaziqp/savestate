@@ -3414,6 +3414,13 @@ const DB_SCHEMA = `
   ALTER TABLE users ADD COLUMN IF NOT EXISTS can_upload_media BOOLEAN NOT NULL DEFAULT FALSE;
   UPDATE users SET can_upload_media=TRUE WHERE role IN ('admin','superadmin','ultra_admin') AND can_upload_media=FALSE;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS user_tier TEXT NOT NULL DEFAULT 'free';
+  -- Free online storage (50 GB) goes to the first 100 people who sign up
+  -- (owner's rule, 2026-10-28). A grant stays recorded when its account goes,
+  -- so a deleted account never opens a place for a later sign-up.
+  CREATE TABLE IF NOT EXISTS free_storage_grants (user_id TEXT PRIMARY KEY, granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+  INSERT INTO free_storage_grants (user_id, granted_at)
+    SELECT id::text, created_at FROM users WHERE role NOT IN ('admin','superadmin','ultra_admin') ORDER BY created_at ASC, id LIMIT 100
+    ON CONFLICT DO NOTHING;
   -- Read on every request by server/access.ts, so they exist before the first one.
   ALTER TABLE users ADD COLUMN IF NOT EXISTS tier_expires_at TIMESTAMPTZ;
   ALTER TABLE users ADD COLUMN IF NOT EXISTS games_access BOOLEAN;
@@ -16354,8 +16361,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
   const resendKey = () => process.env.RESEND_API_KEY ?? "";
 
-  app.get("/api/auth/config", (_req, res) => {
-    res.json({ emailReset: !!resendKey(), minPassword: MIN_PASSWORD, signUpOpen: process.env.NEXUS_SIGNUP !== "closed" });
+  // How many of the 100 free-storage places are left (the sign-up form says so).
+  let freePlacesLeft: { at: number; n: number | null } = { at: 0, n: null };
+  app.get("/api/auth/config", async (_req, res) => {
+    if (pool && dbConnected && Date.now() - freePlacesLeft.at > 60_000) {
+      const r = await pool.query("SELECT count(*)::int AS n FROM free_storage_grants").catch(() => null);
+      if (r) freePlacesLeft = { at: Date.now(), n: Math.max(0, 100 - Number(r.rows[0]?.n ?? 0)) };
+    }
+    res.json({ emailReset: !!resendKey(), minPassword: MIN_PASSWORD, signUpOpen: process.env.NEXUS_SIGNUP !== "closed", freeStorage: { gb: 50, places: 100, left: freePlacesLeft.n } });
   });
 
   const lookupLimiter = rateLimit({
@@ -16411,6 +16424,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         [username, displayName, await hashPasswordAsync(password), email]
       );
       const u = r.rows[0];
+      // One of the first 100 sign-ups: 50 GB of free online storage.
+      if (await grantFreeStorage(String(u.id))) log("INFO", `${u.username} gets the free 50 GB of online storage (one of the first ${FREE_STORAGE_PLACES} sign-ups)`, "auth");
       // A brand-new host (installed with install.sh): the very first account
       // is the person who set it up, so it owns the host.
       const only = await pool.query("SELECT count(*)::int AS n FROM users").then((x) => x.rows[0]?.n).catch(() => null);
@@ -27364,9 +27379,15 @@ Loop
         const pl = await pool.query("SELECT track_ids FROM music_playlists").catch(() => ({ rows: [] as any[] }));
         for (const r of pl.rows) for (const id of r.track_ids || []) inPlaylists.add(String(id));
       }
+      // Built at run time: the NAS's Node (Entware, no ICU) can't parse a
+      // \p{L} regex literal, and one in this file stopped its server.
+      const SONG_SEPARATORS = (() => {
+        try { return new RegExp("[^\\p{L}\\p{N}]+", "gu"); }
+        catch { return /[^a-z0-9À-ɏͰ-ϿЀ-ӿ֐-׿؀-ۿ぀-ヿ一-鿿]+/g; }
+      })();
       const songKey = (t: any) => String(t.title || path.basename(String(t.absPath || ""))).toLowerCase()
         .replace(/\((official|lyric|lyrics|audio|video|music|visualizer|hd|hq)[^)]*\)|\[[^\]]*\]|\(mp3_\d+k\)|_\d+$/g, "")
-        .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+        .replace(SONG_SEPARATORS, " ").trim();
       const kept = new Map<string, any[]>();
       for (const t of localTracks) {
         const k = songKey(t);
@@ -28139,15 +28160,38 @@ Loop
   // storage" -- an upgrade that bought them nothing, because nothing read the
   // tier. Tiers are the same three the admin API already accepts
   // (free/pro/unlimited, see the user_tier update route).
+  // Online storage (2026-10-28, the owner's rule): it isn't given to every
+  // account. A plan's own storage (Plans page) comes first; the old pro and
+  // unlimited tiers keep theirs; on the free plan only the first 100 people
+  // who signed up have 50 GB (free_storage_grants), everyone else none.
+  const FREE_STORAGE_GB = 50;
+  const FREE_STORAGE_PLACES = 100;
   const STORAGE_QUOTA_BY_TIER: Record<string, number> = {
-    free:      56  * 1024 ** 3,
+    free:      0,
     pro:       512 * 1024 ** 3,
     unlimited: 4   * 1024 ** 4,
   };
+  /** Gives a new account one of the 100 free-storage places while any are left. */
+  async function grantFreeStorage(userId: string): Promise<boolean> {
+    if (!pool || !dbConnected) return false;
+    const c = await pool.connect().catch(() => null);
+    if (!c) return false;
+    try {
+      await c.query("BEGIN");
+      // One sign-up at a time, so two at once can't both take place 100.
+      await c.query("SELECT pg_advisory_xact_lock(4207501)");
+      const r = await c.query(
+        "INSERT INTO free_storage_grants (user_id) SELECT $1 WHERE (SELECT count(*) FROM free_storage_grants) < $2 ON CONFLICT DO NOTHING RETURNING user_id",
+        [userId, FREE_STORAGE_PLACES]);
+      await c.query("COMMIT");
+      _tierCache.delete(userId);
+      return (r.rowCount ?? 0) > 0;
+    } catch { await c.query("ROLLBACK").catch(() => {}); return false; } finally { c.release(); }
+  }
 
   // Small cache: the quota is consulted on every upload and every quota poll,
   // and a per-request SELECT for a value that changes rarely is wasteful.
-  const _tierCache = new Map<string, { tier: string; ts: number }>();
+  const _tierCache = new Map<string, { tier: string; ts: number; free?: boolean }>();
   const TIER_CACHE_TTL_MS = 60_000;
   // Entries expire logically but were never removed, so the map grew by one
   // entry per distinct user for the life of the process. Small per entry, but
@@ -28171,16 +28215,19 @@ Loop
     if (userId === "host") return STORAGE_QUOTA_BY_TIER.unlimited;
 
     let tier = "free";
+    let free = false;
     const cached = _tierCache.get(userId);
     if (cached && Date.now() - cached.ts < TIER_CACHE_TTL_MS) {
       tier = cached.tier;
+      free = !!cached.free;
     } else if (pool && dbConnected) {
-      const r = await pool.query("SELECT user_tier, role FROM users WHERE id=$1", [userId]).catch(() => null);
+      const r = await pool.query("SELECT u.user_tier, u.role, EXISTS (SELECT 1 FROM free_storage_grants g WHERE g.user_id = u.id::text) AS free FROM users u WHERE u.id=$1", [userId]).catch(() => null);
       const row = r?.rows?.[0];
       if (row) {
         tier = ['admin', 'superadmin', 'ultra_admin'].includes(row.role ?? '')
           ? "unlimited"
           : String(row.user_tier ?? "free");
+        free = !!row.free;
       }
       // Hard cap as a backstop between sweeps: drop the oldest insertion,
       // which Map iteration order gives us for free.
@@ -28188,11 +28235,15 @@ Loop
         const oldest = _tierCache.keys().next().value;
         if (oldest !== undefined) _tierCache.delete(oldest);
       }
-      _tierCache.set(userId, { tier, ts: Date.now() });
+      _tierCache.set(userId, { tier, ts: Date.now(), free });
     }
     // Note: with no DB the tier is unknown, so this deliberately falls back to
     // the free-tier quota rather than assuming a paid one.
-    return STORAGE_QUOTA_BY_TIER[tier] ?? STORAGE_QUOTA_BY_TIER.free;
+    if (tier === "unlimited") return STORAGE_QUOTA_BY_TIER.unlimited;
+    const plan = tiers.tierById(tier);
+    if (plan?.storageLimitGb != null) return plan.storageLimitGb * 1024 ** 3;
+    if (STORAGE_QUOTA_BY_TIER[tier]) return STORAGE_QUOTA_BY_TIER[tier];
+    return free ? FREE_STORAGE_GB * 1024 ** 3 : 0;
   }
 
   async function getUserStorageUsed(userId: string): Promise<number> {
@@ -28216,7 +28267,8 @@ Loop
     if (!auth) return;
     const used = await getUserStorageUsed(auth.userId);
     const quota = await getUserStorageQuota(auth.userId);
-    res.json({ ok: true, used, quota, usedMB: Math.round(used / 1e6), quotaGB: Math.round(quota / 1e9), pct: Math.round((used / quota) * 100) });
+    res.json({ ok: true, used, quota, usedMB: Math.round(used / 1e6), quotaGB: Math.round(quota / 1024 ** 3), pct: quota > 0 ? Math.round((used / quota) * 100) : 0,
+      note: quota > 0 ? null : `Online storage isn't included with this account. The first ${FREE_STORAGE_PLACES} sign-ups have ${FREE_STORAGE_GB} GB free; a plan with storage adds it.` });
   });
 
   // Quota alias — used by StorageHub component
@@ -28334,7 +28386,9 @@ Loop
       // Name the actual limit rather than hardcoding "56 GB free tier" — that
       // message was shown to paid users too, who had already paid for more.
       return res.status(413).json({
-        error: `Storage quota exceeded (${Math.round(quota / 1e9)} GB). Upgrade your plan for more storage.`,
+        error: quota > 0
+          ? `Storage quota exceeded (${Math.round(quota / 1024 ** 3)} GB). Upgrade your plan for more storage.`
+          : `Online storage isn't included with this account (the free ${FREE_STORAGE_GB} GB went to the first ${FREE_STORAGE_PLACES} people who signed up). A plan with storage adds it.`,
         usedBytes: used, quotaBytes: quota,
       });
     }
@@ -29027,7 +29081,7 @@ Loop
   app.get("/api/user/config", async (req, res) => {
     const auth = getOptionalAuthUser(req);
     let userTier = 'free';
-    let storageLimitBytes = 10 * 1024 * 1024 * 1024; // 10 GB
+    let storageLimitBytes = 0;
     let username = 'guest';
 
     if (auth && dbConnected && pool) {
@@ -29039,16 +29093,12 @@ Loop
         if (uRes.rows.length > 0) {
           const u = uRes.rows[0];
           userTier = u.storage_tier || 'free';
-          storageLimitBytes = Number(u.storage_limit_bytes || storageLimitBytes);
+          storageLimitBytes = await getUserStorageQuota(String(u.id));
           username = u.username;
         }
       } catch {}
     } else if (auth?.username) {
       username = auth.username;
-    }
-
-    if (req.headers['x-mock-tier']) {
-      userTier = String(req.headers['x-mock-tier']);
     }
 
     const isFreeTier = userTier === 'free';
@@ -29104,8 +29154,10 @@ Loop
       let avatarUrl = "";
       let role = "user";
       let userTier = "free";
-      let storageLimitBytes = 50 * 1024 * 1024 * 1024; // 50 GB default quota
-      let storageUsedBytes = 45 * 1024 * 1024 * 1024; // 45 GB used default
+      // Real figures only: the allowance from getUserStorageQuota (plans, and
+      // 50 GB for the first 100 sign-ups), use from finished uploads.
+      let storageLimitBytes = 0;
+      let storageUsedBytes = 0;
 
       if (auth && dbConnected && pool) {
         try {
@@ -29123,7 +29175,7 @@ Loop
             avatarUrl = u.avatar_url || "";
             role = u.role || "user";
             userTier = u.storage_tier || "free";
-            if (u.storage_limit_bytes) storageLimitBytes = Number(u.storage_limit_bytes);
+            storageLimitBytes = await getUserStorageQuota(userId);
           }
 
           // Compute actual storage usage from uploads
@@ -29137,10 +29189,6 @@ Loop
             storageUsedBytes = Number(sRes.rows[0].used);
           }
         } catch {}
-      }
-
-      if (req.headers["x-mock-tier"]) {
-        userTier = String(req.headers["x-mock-tier"]);
       }
 
       // Percentage calculation clamped to 0-100%
