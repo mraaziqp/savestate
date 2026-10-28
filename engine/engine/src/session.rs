@@ -217,6 +217,12 @@ impl Session {
             },
         );
 
+        // System files from the host before the core starts: some cores look
+        // for them only at start-up (LRPS2 lists its BIOS files during
+        // set_environment/init, so a BIOS fetched at load came too late and the
+        // first game on a new PC said "Could not find any valid PS2 BIOS",
+        // 2026-10-28). load_content checks again with the game's folder.
+        let early_bios = bios::ensure(&info.library_name, &cfg.system_dir, None, cfg.host.as_ref());
         unsafe {
             (core.set_environment)(crate::env::environment);
             (core.set_video_refresh)(host::video_refresh);
@@ -226,7 +232,7 @@ impl Session {
             (core.set_input_state)(host::input_state);
             (core.init)();
         }
-        let mut session = Session { core, info, content_path: None, streamed: false, bios: bios::Report::default(), _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new(), sync: cfg.sync.clone(), sram_pull: None, content_cpath: None, secondary: None, keep_loaded: false };
+        let mut session = Session { core, info, content_path: None, streamed: false, bios: early_bios, _data: None, sram_path: None, frames: 0, last_frame_at: None, deinit_done: false, gpu_pixels: Vec::new(), sync: cfg.sync.clone(), sram_pull: None, content_cpath: None, secondary: None, keep_loaded: false };
         if let Err(e) = session.load_content(&cfg) {
             // Dropping `session` runs retro_deinit and unloads the core.
             return Err(e);

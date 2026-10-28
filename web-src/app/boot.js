@@ -493,12 +493,28 @@ import "./savesync.js";
     const along = dir === "right" ? r2.left - r1.right : dir === "left" ? r1.left - r2.right : dir === "down" ? r2.top - r1.bottom : r1.top - r2.bottom;
     const side = h ? Math.max(0, Math.max(r1.top, r2.top) - Math.min(r1.bottom, r2.bottom)) : Math.max(0, Math.max(r1.left, r2.left) - Math.min(r1.right, r2.right));
     const off = h ? Math.abs((r1.top + r1.bottom) / 2 - (r2.top + r2.bottom) / 2) : Math.abs((r1.left + r1.right) / 2 - (r2.left + r2.right) / 2);
-    return Math.max(0, along) + side * 2 + off * 0.15;
+    // Something on screen beats something past the edge in the same
+    // direction: a press down from the top of Connections skipped the visible
+    // buttons for one a screen further down (2026-10-28).
+    const offscreen = r2.bottom < 0 || r2.top > innerHeight ? innerHeight * 0.6 : 0;
+    return Math.max(0, along) + side * 2 + off * 0.15 + offscreen;
   }
+  // Two zones: the side menu and the page. Up and down stay in the zone they
+  // start in (a press down in the page used to land on "Friends" in the menu
+  // whenever the next card was further away than a menu item, 2026-10-28);
+  // left and right cross over only when nothing is left in that direction.
+  const zoneOf = (el) => (el && el.closest("aside, nav") ? "menu" : "page");
   function nearest(fromRect, list, dir, skip) {
-    const ranked = list.filter((s) => s.el !== skip && inDirection(fromRect, s.r, dir)).map((s) => ({ el: s.el, d: score(fromRect, s.r, dir) })).sort((a, b) => a.d - b.d);
-    for (const c of ranked.slice(0, 40)) if (navShown(c.el)) return c.el;
-    return null;
+    const pick = (cands) => {
+      const ranked = cands.filter((s) => s.el !== skip && inDirection(fromRect, s.r, dir)).map((s) => ({ el: s.el, d: score(fromRect, s.r, dir) })).sort((a, b) => a.d - b.d);
+      for (const c of ranked.slice(0, 40)) if (navShown(c.el)) return c.el;
+      return null;
+    };
+    const zone = skip ? zoneOf(skip) : null;
+    if (!zone) return pick(list);
+    const same = pick(list.filter((s) => zoneOf(s.el) === zone));
+    if (same || dir === "up" || dir === "down") return same;
+    return pick(list.filter((s) => zoneOf(s.el) !== zone));
   }
   // Where to start: the item nearest the last spot (after a re-render), else
   // the first thing in the page's content, top left.

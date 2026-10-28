@@ -252,6 +252,8 @@ const CORE_EXT = IS_WIN ? '.dll' : IS_MAC ? '.dylib' : '.so';
 // dead end it would be for the others. Standalone Dolphin still wins when
 // installed — getEmulatorPath() checks it before reaching this fallback.
 const STANDALONE_ONLY_PLATFORMS = new Set(['ps2', 'wiiu', 'psp', 'ps3', 'switch', 'xbox', 'xbox360', 'x360']);
+// Consoles with a standalone emulator AND a libretro core: the core (in SaveState's engine) wins when present.
+const ENGINE_FIRST = new Set(['gamecube', 'wii', 'ps2', 'psp']);
 
 // Recognized ROM/disc-image extensions for the multi-drive scan — same list
 // shape as quickstart-zorin-host.sh's host-side ROM_EXT_REGEX, so a file this
@@ -744,6 +746,14 @@ function getEmulatorPath(platform) {
     cfg.emulators?.xenia,
   ]);
 
+  // SaveState's own engine first (2026-10-28, the owner: no outside emulators):
+  // GameCube, Wii, PS2 and PSP run in the engine on RetroArch's core when this
+  // PC has it; the standalone programs are only the fallback. Before this, an
+  // installed PCSX2 or Dolphin always won, so those games opened outside the app.
+  if (retro && !NO_RETROARCH && ENGINE_FIRST.has(p)) {
+    const core = PLATFORM_CORES[p];
+    if (core && fs.existsSync(path.join(path.dirname(retro), 'cores', `${core}_libretro${CORE_EXT}`))) return retro;
+  }
   if ((p === 'gamecube' || p === 'wii') && dolphin) return dolphin;
   if (p === 'wiiu' && cemu) return cemu;
   if (p === 'ps2' && pcsx2) return pcsx2;

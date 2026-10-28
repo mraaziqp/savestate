@@ -67,6 +67,8 @@ type OffloadJob = {
   attempts?: number;
   retryAt?: number | null;
   lastProgressAt?: number | null;
+  /** "Up next" (owner's choice): when it was asked for; the latest goes first. */
+  upNextAt?: number | null;
   /** Time spent actually copying (not queued or paused), for "took" in the Activity log. */
   activeMs?: number;
   tickAt?: number;
@@ -291,7 +293,8 @@ export function createDrives(deps: DrivesDeps) {
     // folders waiting days behind it (2026-10-27). A daily re-sync (nothing
     // counted yet) is a quick check, so it goes first too.
     const left = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
-    const next = jobs.filter((j) => j.status === "queued").sort((a, b) => left(a) - left(b))[0];
+    // One the owner moved up ("Up next") goes before the rest.
+    const next = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || left(a) - left(b))[0];
     if (next) void runCopy(next);
   }
   const restarting = new Set<string>();
@@ -774,7 +777,8 @@ export function createDrives(deps: DrivesDeps) {
   addLiveSource(() => {
    // Waiting uploads in the order they'll start, and what's running now, so
    // a waiting one can say where it is in line.
-   const order = jobs.filter((j) => j.status === "queued");
+   const left = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
+   const order = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || left(a) - left(b));
    const runningNow = jobs.find((j) => j.status === "copying" || j.status === "verifying");
    return jobs.filter((j) => ["copying", "verifying", "deleting", "queued", "paused"].includes(j.status)).map((j) => ({
     kind: "upload", title: j.label, status: j.status, jobId: j.id,
@@ -785,7 +789,7 @@ export function createDrives(deps: DrivesDeps) {
     files: j.status === "copying" ? j.stats.current : undefined,
     queuePos: j.status === "queued" ? order.indexOf(j) + 1 : null,
     queueAfter: j.status === "queued" ? (order.indexOf(j) === 0 ? runningNow?.label ?? null : order[order.indexOf(j) - 1]?.label ?? null) : null,
-    actions: j.status === "paused" ? ["resume"] : j.status === "deleting" ? [] : ["pause"],
+    actions: j.status === "paused" ? ["resume", "next"] : j.status === "deleting" ? [] : j.status === "queued" ? ["pause", "next"] : ["pause"],
     progress: j.status === "copying" && j.stats.totalBytes ? doneOf(j) / totalOf(j) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
     detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(doneOf(j))} of ${gbs(totalOf(j))}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
       : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : j.status === "paused" ? "Paused. Press Continue to carry on where it stopped."
@@ -1229,6 +1233,9 @@ export function createDrives(deps: DrivesDeps) {
           job.status = "paused";
           running.get(job.id)?.kill();
         }
+      } else if (act === "next") {
+        if (!["queued", "paused", "failed", "incomplete"].includes(job.status)) return res.status(400).json({ error: "Only a waiting upload can be moved up." });
+        job.status = "queued"; job.lastError = null; job.upNextAt = Date.now();
       } else if (act === "resume" || act === "retry") {
         if (["paused", "failed", "incomplete"].includes(job.status)) { job.status = "queued"; job.lastError = null; }
       } else if (act === "verify") {

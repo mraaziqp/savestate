@@ -40,6 +40,8 @@ import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
 import { createIntegrations } from "./server/integrations.ts";
 import { createPerf } from "./server/perf.ts";
+import { installDnsCache } from "./server/dns-cache.ts";
+import { createServing } from "./server/serving.ts";
 import { createPauseAll } from "./server/pause-all.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
@@ -468,6 +470,9 @@ const PERSIST_DIR = (NEXUS_DATA_DIR_ENV && isPathValidForThisPlatform(NEXUS_DATA
   ? NEXUS_DATA_DIR_ENV
   : path.join(process.env.APPDATA ?? path.join(os.homedir(), "AppData", "Roaming"), "NexusEmuHost");
 const PERSIST_FILE = path.join(PERSIST_DIR, "host-state.json");
+// Before anything connects: name lookups fall back to the last known address
+// while DNS is briefly away (server/dns-cache.ts).
+installDnsCache(path.join(PERSIST_DIR, "dns-cache.json"), (level, msg) => console.log(`[${level}][dns] ${msg}`));
 /** Files library (uploads in category folders). Set NEXUS_FILES_ROOT to put it on a bigger disk. */
 const FILES_ROOT = (process.env.NEXUS_FILES_ROOT?.trim() && isPathValidForThisPlatform(process.env.NEXUS_FILES_ROOT))
   ? process.env.NEXUS_FILES_ROOT.trim()
@@ -4033,6 +4038,11 @@ const YUZU_FORK_CANDIDATES: string[] = [
 // ─── Main Server ─────────────────────────────────────────────────────────────
 async function startServer() {
   const app = express();
+  // NAS mode (server/serving.ts): public visitors that still reach this PC go
+  // on to the NAS, before anything here reads the request. Set once the
+  // switch is ready, further down.
+  let publicToNas: express.RequestHandler | null = null;
+  app.use((req, res, next) => (publicToNas ? publicToNas(req, res, next) : next()));
   // Express 4 does not notice an async handler that throws: the promise
   // rejects, nothing is sent, and the request hangs until the client gives
   // up (GET /api/host-groups did this for every host session, because "host"
@@ -4789,6 +4799,7 @@ async function startServer() {
   // Guard against concurrent background scans — share in-flight promise
   let _mediaScanPromise: Promise<MediaItem[]> | null = null;
   let _lastMediaScanAt = 0;
+  let _lastScannedRoot = "";
   let _hasCompletedFirstMediaScan = false;
   const MEDIA_SCAN_MIN_INTERVAL_MS = 60_000; // never rescan more often than once per minute (background only)
 
@@ -4810,6 +4821,15 @@ async function startServer() {
     if (!forceScan && mem.media.length > 0 && Date.now() - _lastMediaScanAt < MEDIA_SCAN_MIN_INTERVAL_MS) {
       return mem.media;
     }
+    // Every automatic caller (the folder-back check each minute, finished
+    // torrents, uploads) asked for a full walk of the library over Drive: the
+    // NAS did 18 in a short log, most of its load (2026-10-28). Only a rescan
+    // someone asks for (true) or a new media folder skips this gap.
+    const rootChanged = typeof rootCandidateOrForce === "string" && path.resolve(rootCandidateOrForce.trim() || ".") !== _lastScannedRoot;
+    if (rootCandidateOrForce !== true && !rootChanged && mem.media.length > 0 && Date.now() - _lastMediaScanAt < (LOW_MEMORY ? 10 : 2) * 60_000) {
+      return mem.media;
+    }
+    _lastScannedRoot = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
 
     _mediaScanPromise = (async () => {
       const previousRelPaths = new Set(mem.media.map(m => m.relPath));
@@ -5930,6 +5950,19 @@ async function startServer() {
   });
   app.use(perf.middleware());
   perf.register(app);
+  // Which machine serves savestate.co.za, and the switch (Connections page).
+  const serving = createServing({
+    isAdmin: async (req) => (await access.callerOf(req)).admin,
+    log: (level, msg) => log(level, msg, "hosting"),
+    dataDir: PERSIST_DIR,
+    nasUrl: process.env.NEXUS_NAS_URL ?? "http://192.168.31.201:3000",
+    pcUrl: process.env.NEXUS_PC_URL ?? "http://192.168.31.217:3000",
+  });
+  serving.register(app);
+  {
+    const toNas = serving.publicProxy(), toPc = serving.pcWorkProxy();
+    publicToNas = (req, res, next) => toNas(req, res, () => toPc(req, res, next));
+  }
 
   const PUBLIC_API_PREFIXES = [
     "/api/health",              // includes /api/health/full
@@ -6199,6 +6232,9 @@ async function startServer() {
     agentBuilderDir,
     changed: () => { try { drives.nudge(); } catch { /* not started yet: its own timer catches up */ } },
     log: (level, msg) => log(level, msg, "system"),
+    // While paused, the NAS serves the site (when it's up), so this PC does no work for visitors.
+    moveSite: serving.role === "pc" ? (to, auth) => serving.switchTo(to, auth) : null,
+    nasUp: () => fetch(`${process.env.NEXUS_NAS_URL ?? "http://192.168.31.201:3000"}/api/health`, { signal: AbortSignal.timeout(4000) }).then((r) => r.ok, () => false),
   });
   pauseAll.register(app);
   function holdBackground() { return gameMode.active() || pauseAll.active(); }
@@ -6292,6 +6328,7 @@ async function startServer() {
 
   // Detection for sparse torrent files still downloading in ROM folders (server/incomplete.ts)
   const incompleteFiles = createIncompleteFiles({
+    hold: () => holdBackground(),
     roots: async () => {
       const vc = await getVaultConfig().catch(() => null);
       const jobSources: string[] = [];
@@ -31604,14 +31641,23 @@ Format as JSON:
   // uncaughtException handler above would keep it that way: the watchdog then
   // sees a running process and never restarts it. On Windows this happens when
   // a restart races the old process releasing :3000. Exit so it retries.
+  // Both IPv4 and IPv6 (2026-10-28): listening on 0.0.0.0 left [::]:3000 free,
+  // Sonarr took it, and visitors reaching the IPv6 side got Sonarr's login.
+  // A machine without IPv6 falls back to IPv4 only.
+  let listenHost = process.env.NEXUS_LISTEN_HOST?.trim() || "::";
   httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (listenHost === "::" && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL" || err.code === "EINVAL")) {
+      listenHost = "0.0.0.0";
+      httpServer.listen(PORT, listenHost);
+      return;
+    }
     if (err.code === "EADDRINUSE" || err.code === "EACCES") {
       console.error(`[NEXUS] Cannot listen on :${PORT} (${err.code}) — exiting so the supervisor retries`);
       process.exit(1);
     }
   });
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, listenHost, () => {
     log("INFO", `Nexus Server online — http://localhost:${PORT}`, "kernel");
     log("INFO", `Database: ${dbConnected ? "Neon PostgreSQL connected" : "Memory-only mode"}`, "kernel");
     log("INFO", `AI Core: ${ai ? "Gemini online" : "No API key — AI disabled"}`, "kernel");

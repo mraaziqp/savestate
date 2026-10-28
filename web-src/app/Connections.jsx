@@ -4,6 +4,7 @@
 import React, { useState, useEffect } from "react";
 import { useStyles, api, Icon, Note } from "./lib.jsx";
 import { Perf } from "./Perf.jsx";
+import { Hosting } from "./Hosting.jsx";
 
 const COLOR = { up: "#34d399", degraded: "#fbbf24", down: "#f87171" };
 const WORD = { up: "Live", degraded: "Live, with a problem", down: "Not reachable" };
@@ -26,6 +27,7 @@ export function Connections() {
   return (
     <div className="nxa nxa-page">
       {error && <Note kind="bad">{error}</Note>}
+      <Hosting />
       <Perf />
       <div className="nxa-card">
         <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="link" /> Connections</h3>

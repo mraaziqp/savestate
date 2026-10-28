@@ -66,7 +66,10 @@ function Live() {
     setBusy(ids.join(",") + action); setError("");
     try {
       // "video-prep" is the films being prepared for every device (server/videoprep.ts).
-      for (const id of ids) await api(id === "video-prep" ? `/api/admin/video-prep/${action}` : `/api/admin/offload/${encodeURIComponent(id)}/${action}`, { method: "POST", body: {} });
+      for (const id of ids) {
+        if (id === "pause-all") { await api("/api/admin/pause-all", { method: "POST", body: { paused: action !== "resume" } }); continue; }
+        await api(id === "video-prep" ? `/api/admin/video-prep/${action}` : `/api/admin/offload/${encodeURIComponent(id)}/${action}`, { method: "POST", body: {} });
+      }
       setItems((await api("/api/activity/live")).items);
     } catch (e) { setError(e.message); } finally { setBusy(""); }
   }
@@ -94,6 +97,7 @@ function Live() {
                 <span className="nxa-faint" style={{ fontSize: 12 }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed > 0 && m.tone === "move" ? ` · ${size(i.speed)}/s` : ""}{eta(i.eta) && m.tone === "move" && i.speed > 20 * 1024 ? ` · about ${eta(i.eta)} left` : m.tone === "move" && i.speed != null && i.speed <= 20 * 1024 ? " · measuring speed" : ""}</span>
                 {i.jobId && i.actions?.includes("pause") && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act([i.jobId], "pause")}>Pause</button>}
                 {i.jobId && i.actions?.includes("resume") && <button className="nxa-btn sm primary" disabled={!!busy} onClick={() => act([i.jobId], "resume")}>Continue</button>}
+                {i.jobId && i.actions?.includes("next") && i.queuePos !== 1 && <button className="nxa-btn sm" disabled={!!busy} title="Start this one as soon as the current upload finishes" onClick={() => act([i.jobId], "next")}>Up next</button>}
               </span>
             </div>
             <div style={{ margin: "6px 0 2px" }}><span className={`nxa-state ${m.tone}`} role="status"><i />{m.label}</span></div>

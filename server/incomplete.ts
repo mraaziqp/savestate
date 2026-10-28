@@ -28,7 +28,7 @@ foreach ($root in $env:NX_ROOTS.Split([char]10)) {
   }
 }`;
 
-export function createIncompleteFiles(deps: { roots: () => Promise<string[]>; log: (level: string, msg: string) => void }) {
+export function createIncompleteFiles(deps: { roots: () => Promise<string[]>; log: (level: string, msg: string) => void; hold?: () => boolean }) {
   let byPath = new Map<string, Incomplete>();
   let scannedAt = 0;
   let running: Promise<void> | null = null;
@@ -58,7 +58,9 @@ export function createIncompleteFiles(deps: { roots: () => Promise<string[]>; lo
     })().finally(() => { running = null; });
     return running;
   }
-  const timer = setInterval(() => { void scan(); }, 3 * 60_000);
+  // Not while Pause all or a game holds the background (a pass over every
+  // ROM folder took ~10% of the CPU, 2026-10-28).
+  const timer = setInterval(() => { if (!deps.hold?.()) void scan(); }, 3 * 60_000);
   timer.unref?.();
   setTimeout(() => { void scan(); }, 500).unref?.();
   void scan();
