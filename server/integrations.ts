@@ -49,7 +49,7 @@ export function createIntegrations(deps: {
     },
     {
       id: "nas", name: "NAS host", what: "The QNAP's copy of SaveState: serves the site when this PC is off (failover).",
-      url: process.env.NEXUS_NAS_URL ?? "http://192.168.31.206:3000", health: "/api/health",
+      url: process.env.NEXUS_NAS_URL ?? "http://192.168.31.201:3000", health: "/api/health",
       parse: (_b, status) => (status === 200 ? { state: "up", detail: "standing by" } : { state: "down", detail: `answered ${status}` }),
     },
   ];
