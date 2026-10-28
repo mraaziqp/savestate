@@ -81,6 +81,69 @@ public class NxAndroidPlugin extends Plugin {
         return new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), sub + "/" + fileName);
     }
 
+    /*
+     * Games in Downloads/SaveState belong to the install that downloaded them.
+     * Android lets only that install read them, and its download manager lists
+     * only that install's downloads. After the app was installed afresh
+     * (2026-10-28, 1.0.74), Crazy Taxi was downloaded again and the old copy
+     * "isn't readable on this phone". With "All files access" (Android 11+) or
+     * storage read (older) every copy there can be read whoever saved it, and
+     * a game is found by its file, not by the download manager's records.
+     */
+    static boolean canReadAll(Context ctx) {
+        if (Build.VERSION.SDK_INT >= 30) return Environment.isExternalStorageManager();
+        return ctx.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Opens Android's page (or prompt) for reading the games folder. */
+    static void askReadAll(android.app.Activity a) {
+        if (a == null) return;
+        a.runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    a.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:" + a.getPackageName())));
+                } catch (ActivityNotFoundException e) {
+                    try { a.startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); } catch (ActivityNotFoundException ignored) { /* no such page */ }
+                }
+            } else {
+                a.requestPermissions(new String[] { android.Manifest.permission.READ_EXTERNAL_STORAGE }, 7301);
+            }
+        });
+    }
+
+    /**
+     * The copy of a game to use: <fileName> when it can be read, else a
+     * readable "<name>-N.<ext>" the download manager made beside it (it never
+     * overwrites a file another install saved), newest first; else <fileName>.
+     */
+    static File readableCopy(File target) {
+        if (target.isFile() && target.length() > 0 && target.canRead()) return target;
+        File dir = target.getParentFile();
+        File[] all = dir == null ? null : dir.listFiles();
+        if (all != null) {
+            String n = target.getName();
+            int dot = n.lastIndexOf('.');
+            String base = dot > 0 ? n.substring(0, dot) : n, ext = dot > 0 ? n.substring(dot) : "";
+            java.util.regex.Pattern twin = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(base) + "-\\d+" + java.util.regex.Pattern.quote(ext));
+            File best = null;
+            for (File f : all) {
+                if (f.isFile() && f.length() > 0 && f.canRead() && twin.matcher(f.getName()).matches() && (best == null || f.lastModified() > best.lastModified())) best = f;
+            }
+            if (best != null) return best;
+        }
+        return target;
+    }
+
+    /** { granted } and, with ask: true, opens the page to allow it. */
+    @PluginMethod
+    public void storageAccess(PluginCall call) {
+        boolean granted = canReadAll(getContext());
+        if (!granted && call.getBoolean("ask", false)) askReadAll(getActivity());
+        JSObject r = new JSObject();
+        r.put("granted", granted);
+        call.resolve(r);
+    }
+
     private static String safe(String s, String fallback) {
         String out = s == null ? "" : s.replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_").trim();
         return out.isEmpty() ? fallback : out;
@@ -179,8 +242,14 @@ public class NxAndroidPlugin extends Plugin {
         if (!NxEngine.available()) { call.reject(NxEngine.unavailableReason()); return; }
         String folder = safe(call.getString("folder", ""), "");
         String fileName = safe(call.getString("fileName", ""), "");
-        File game = targetOf(folder, fileName);
+        File game = readableCopy(targetOf(folder, fileName));
         if (fileName.isEmpty() || !game.exists()) { call.reject("The game isn't on this phone yet. Press Play to download it."); return; }
+        if (!game.canRead()) {
+            // Saved by an earlier install of SaveState: readable once allowed.
+            askReadAll(getActivity());
+            call.reject("This game was saved by an earlier install of SaveState. Turn on \"Allow access to manage all files\" for SaveState on the page that opened, then press Play again.");
+            return;
+        }
         android.app.Activity a = getActivity();
         if (a == null) { call.reject("SaveState isn't open."); return; }
         Intent i = new Intent(a, GameActivity.class);
@@ -239,6 +308,13 @@ public class NxAndroidPlugin extends Plugin {
         String fileName = safe(call.getString("fileName", URLUtil.guessFileName(url, null, null)), "download");
         String sub = "SaveState" + (folder.isEmpty() ? "" : "/" + folder);
         File target = targetOf(folder, fileName);
+        // On the phone already but saved by an earlier install: ask to read it
+        // rather than downloading gigabytes again beside it.
+        if (target.isFile() && target.length() > 0 && !readableCopy(target).canRead() && !canReadAll(getContext())) {
+            askReadAll(getActivity());
+            call.reject("This game is already on your phone, saved by an earlier install of SaveState. Turn on \"Allow access to manage all files\" for SaveState on the page that opened, then press Play again.");
+            return;
+        }
         // Already here from an earlier Play: use that copy.
         long done = findDone(target);
         if (done >= 0) {
@@ -306,8 +382,19 @@ public class NxAndroidPlugin extends Plugin {
         call.resolve(r);
     }
 
-    /** A finished download of this exact file whose file is still there, or -1. */
+    /**
+     * A finished download of this file whose file is still there, or -1; 0
+     * when the file is there and readable but this install didn't download
+     * it (the download manager has no record of it).
+     */
     private long findDone(File target) {
+        long id = findRecord(target);
+        if (id >= 0) return id;
+        File copy = readableCopy(target);
+        return copy.isFile() && copy.length() > 0 && copy.canRead() ? 0 : -1;
+    }
+
+    private long findRecord(File target) {
         DownloadManager.Query q = new DownloadManager.Query().setFilterByStatus(DownloadManager.STATUS_SUCCESSFUL);
         try (Cursor c = dm().query(q)) {
             if (c == null) return -1;

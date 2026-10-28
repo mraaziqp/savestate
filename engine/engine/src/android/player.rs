@@ -123,7 +123,17 @@ fn set_status(st: &Mutex<Status>, f: impl FnOnce(&mut Status)) {
     f(&mut st.lock().unwrap_or_else(|e| e.into_inner()));
 }
 
+extern "C" {
+    fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+}
+
 fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
+    // Display priority for the emulation thread (Android's URGENT_DISPLAY,
+    // -8; on Linux who = 0 is the calling thread): fewer late frames when the
+    // phone is busy. Allowed for an app's own threads; ignored if refused.
+    if unsafe { setpriority(0, 0, -8) } != 0 {
+        crate::warn!("android: emulation thread priority not raised");
+    }
     // The context first: a GPU core asks for it while the game loads.
     let mut screen = Screen::new()?;
     let gpu = screen.description();
@@ -171,6 +181,7 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
     let mut paused = false;
     let mut next = Instant::now();
     let mut audio = Vec::new();
+    let mut picture: Vec<u8> = Vec::new();
     let mut last_serial = u64::MAX;
     let (mut frames, mut fps_since) = (0u32, Instant::now());
     let mut last_save = Instant::now();
@@ -247,10 +258,12 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
                     crate::video::PixelFormat::Rgba8 => 2,
                 };
                 let (w, hh) = (f.width, f.height);
-                // Copy out so the core isn't held while the GPU uploads.
-                let data = f.data.clone();
+                // Copy out so the core isn't held while the GPU uploads (into
+                // the same buffer each frame: no allocation per frame).
+                picture.clear();
+                picture.extend_from_slice(&f.data);
                 drop(h);
-                screen.present_pixels(&data, w, hh, format, aspect);
+                screen.present_pixels(&picture, w, hh, format, aspect);
                 set_status(st, |g| { g.width = w; g.height = hh; });
             }
         }

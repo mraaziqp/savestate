@@ -109,7 +109,13 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     private void prepare() {
         try {
             String core = extra("core");
-            if (!new File(extra("game")).canRead()) throw new Exception("The game file isn't readable on this phone: " + extra("game"));
+            if (!new File(extra("game")).canRead()) {
+                if (!NxAndroidPlugin.canReadAll(this)) {
+                    NxAndroidPlugin.askReadAll(this);
+                    throw new Exception("An earlier install of SaveState saved this game. Turn on \"Allow access to manage all files\" for SaveState, then press Play again.");
+                }
+                throw new Exception("The game file isn't readable on this phone: " + extra("game"));
+            }
             JSONObject m = new JSONObject(new String(get("/api/engine/android/cores"), "UTF-8"));
             JSONObject c = m.getJSONObject("cores").optJSONObject(core);
             if (c == null) throw new Exception("The host has no " + core + " core for phones yet.");
@@ -291,6 +297,11 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
 
     @Override public void surfaceChanged(SurfaceHolder h, int format, int w, int hgt) {
         surfaceReady = true;
+        // Games make 60 pictures a second: on a 90 or 120 Hz screen ask for a
+        // mode that 60 divides into, or every third frame shows twice (judder).
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            try { h.getSurface().setFrameRate(60f, android.view.Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE); } catch (Exception ignored) { /* the phone decides */ }
+        }
         if (started) NxEngine.nativeSurface(h.getSurface()); else maybeStart();
     }
 
