@@ -22,6 +22,21 @@ $cores = @{
   snes9x   = @{ repo = 'https://github.com/libretro/snes9x.git';           kind = 'ndk'; jni = 'libretro\jni';               lib = 'libretro\libs\arm64-v8a\libretro.so' }
   fceumm   = @{ repo = 'https://github.com/libretro/libretro-fceumm.git';  kind = 'ndk'; jni = 'jni';                        lib = 'libs\arm64-v8a\libretro.so' }
   ppsspp   = @{ repo = 'https://github.com/hrydgard/ppsspp.git';           kind = 'cmake'; target = 'ppsspp_libretro'; lib = 'build-android\lib\ppsspp_libretro.so' }
+  # 2026-10-28: the rest of the library's consoles, so the phone needs no other emulator app.
+  genesis_plus_gx = @{ repo = 'https://github.com/libretro/Genesis-Plus-GX.git'; kind = 'ndk'; jni = 'libretro\jni'; lib = 'libretro\libs\arm64-v8a\libretro.so' }
+  picodrive       = @{ repo = 'https://github.com/libretro/picodrive.git';       kind = 'ndk'; jni = 'jni';          lib = 'libs\arm64-v8a\libretro.so' }
+  pcsx_rearmed    = @{ repo = 'https://github.com/libretro/pcsx_rearmed.git';    kind = 'ndk'; jni = 'jni';          lib = 'libs\arm64-v8a\libretro.so' }
+  parallel_n64    = @{ repo = 'https://github.com/libretro/parallel-n64.git';    kind = 'ndk'; jni = 'jni';          lib = 'libs\arm64-v8a\libretro.so' }
+  fbneo           = @{ repo = 'https://github.com/libretro/FBNeo.git';           kind = 'ndk'; jni = 'src\burner\libretro\jni'; lib = 'src\burner\libretro\libs\arm64-v8a\libretro.so' }
+  mame2003_plus   = @{ repo = 'https://github.com/libretro/mame2003-plus-libretro.git'; kind = 'ndk'; jni = 'jni'; lib = 'libs\arm64-v8a\libretro.so' }
+  stella2014      = @{ repo = 'https://github.com/libretro/stella2014-libretro.git'; kind = 'ndk'; jni = 'jni';      lib = 'libs\arm64-v8a\libretro.so' }
+  melonds         = @{ repo = 'https://github.com/libretro/melonDS.git';         kind = 'ndk'; jni = 'jni';          lib = 'libs\arm64-v8a\libretro.so' }
+  # OpenGL ES only: the phone engine gives cores a GLES 3 context (hw_egl.rs), not Vulkan.
+  flycast         = @{ repo = 'https://github.com/flyinghead/flycast.git'; kind = 'cmake'; target = 'flycast_libretro'; lib = 'build-android\flycast_libretro_android.so'
+                       flags = @('-DLIBRETRO=ON', '-DUSE_GLES=ON', '-DUSE_VULKAN=OFF', '-DUSE_OPENMP=OFF', '-DUSE_HOST_LIBZIP=OFF', '-DUSE_LUA=OFF', '-DUSE_BREAKPAD=OFF', '-DUSE_ALSA=OFF', '-DUSE_PULSEAUDIO=OFF', '-DUSE_LIBAO=OFF') }
+  # GameCube and Wii, as Dolphin's own CI builds its Android core (-DLIBRETRO=ON).
+  dolphin         = @{ repo = 'https://github.com/libretro/dolphin.git'; kind = 'cmake'; target = 'dolphin_libretro'; lib = 'build-android\Binaries\dolphin_libretro.so'
+                       flags = @('-DLIBRETRO=ON', '-DENABLE_LTO=OFF') }
 }
 $c = $cores[$Core]
 if (-not $c) { throw "Unknown core '$Core'. Known: $($cores.Keys -join ', ')" }

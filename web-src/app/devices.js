@@ -55,13 +55,29 @@ export const PHONE_APPS = {
 };
 // Folder names under Downloads/SaveState on the phone.
 export const PHONE_FOLDER = { psp: "PSP", ps2: "PS2", gamecube: "GameCube", wii: "Wii", "3ds": "3DS", dreamcast: "Dreamcast", saturn: "Saturn",
-  gb: "Game Boy", gbc: "Game Boy", gba: "GBA", snes: "SNES", nes: "NES" };
+  gb: "Game Boy", gbc: "Game Boy", gba: "GBA", snes: "SNES", nes: "NES",
+  genesis: "Genesis", mastersystem: "Master System", segacd: "Sega CD", "32x": "32X", ps1: "PS1", n64: "N64",
+  neogeo: "Neo Geo", mame: "Arcade", atari: "Atari", nds: "DS" };
 
 // Consoles SaveState's Android app plays itself (Phase 7: our own builds of
-// these cores, engine/cores/build-core.ps1), no other app needed.
-export const NATIVE_CORES = { gb: "gambatte", gbc: "gambatte", gba: "mgba", snes: "snes9x", nes: "fceumm", psp: "ppsspp" };
+// these cores, engine/cores/build-core.ps1), no other app needed. A console
+// counts only once the host has published its core (window.__nxAndroidCores,
+// from /api/engine/android/cores), so a core still being built never sends
+// a game to a player that can't start it.
+export const NATIVE_CORES = {
+  gb: "gambatte", gbc: "gambatte", gba: "mgba", snes: "snes9x", nes: "fceumm", psp: "ppsspp",
+  genesis: "genesis_plus_gx", mastersystem: "genesis_plus_gx", segacd: "genesis_plus_gx", sg1000: "genesis_plus_gx",
+  "32x": "picodrive", sega32x: "picodrive",
+  ps1: "pcsx_rearmed", n64: "parallel_n64", neogeo: "fbneo", mame: "mame2003_plus", atari: "stella2014",
+  dreamcast: "flycast", gamecube: "dolphin", wii: "dolphin",
+  // DS (melonds) waits for touch-screen input in the phone engine: most DS games need the lower screen.
+};
 /** The core the app plays this console with, when the app's engine works on this phone. */
-export const nativeCore = (platform) => (inAndroidApp() && typeof window !== "undefined" && window.__nxEngineOK ? NATIVE_CORES[norm(platform)] ?? null : null);
+export const nativeCore = (platform) => {
+  if (!inAndroidApp() || typeof window === "undefined" || !window.__nxEngineOK) return null;
+  const core = NATIVE_CORES[norm(platform)] ?? null;
+  return core && (!window.__nxAndroidCores || window.__nxAndroidCores.has(core)) ? core : null;
+};
 
 const ua = () => (typeof navigator === "undefined" ? "" : navigator.userAgent);
 export const isAndroid = () => /Android/i.test(ua());

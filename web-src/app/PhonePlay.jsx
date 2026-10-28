@@ -22,6 +22,9 @@ const FIXED_IN = 4;
 // SaveState's engine). Known once, at load, so Play can choose at once.
 if (typeof window !== "undefined" && inAndroidApp()) {
   nativeVersion().then((v) => (v >= 5 ? native("engine") : null)).then((r) => { if (r) window.__nxEngineOK = !!r.available; }).catch(() => {});
+  // Which consoles' cores the host has published for phones.
+  fetch("/api/engine/android/cores", { headers: { Authorization: `Bearer ${localStorage.getItem("nexus_token") ?? ""}` } })
+    .then((r) => (r.ok ? r.json() : null)).then((m) => { if (m?.cores) window.__nxAndroidCores = new Set(Object.keys(m.cores)); }).catch(() => {});
 }
 // Where each emulator adds a folder to its game list.
 const FOLDER_HELP = {

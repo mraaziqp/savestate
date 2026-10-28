@@ -134,6 +134,21 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                     marker.createNewFile();
                 }
             }
+            // The console's BIOS, on the host owner's own devices (the host lists
+            // it only for them): fetched once, and again when the files change.
+            JSONObject bios = m.optJSONObject("bios");
+            if (bios != null && bios.optJSONObject(core) != null) {
+                String stamp = bios.getJSONObject(core).getString("stamp");
+                File marker = new File(systemDir(), "." + core + "-bios-" + stamp);
+                if (!marker.exists()) {
+                    status("Getting the console's BIOS from your PC (once)…");
+                    File zip = new File(getCacheDir(), core + "-bios.zip");
+                    download("/api/engine/android/bios/" + core, zip, 0, null);
+                    unzip(zip, systemDir());
+                    zip.delete();
+                    marker.createNewFile();
+                }
+            }
             ui.post(() -> { prepared = true; bar.setVisibility(View.GONE); maybeStart(); });
         } catch (Exception e) {
             ui.post(() -> fail(e.getMessage() == null ? e.toString() : e.getMessage()));
@@ -178,7 +193,8 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
                 if (size > 0) ui.post(() -> bar.setProgress((int) (g * 1000 / size)));
             }
         }
-        if (!sha.equalsIgnoreCase(hex(md.digest()))) { part.delete(); throw new Exception("The download didn't match its checksum. Try again."); }
+        // A BIOS set is packed per request, so it has no checksum to match (sha null).
+        if (sha != null && !sha.equalsIgnoreCase(hex(md.digest()))) { part.delete(); throw new Exception("The download didn't match its checksum. Try again."); }
         if (to.exists()) to.delete();
         if (!part.renameTo(to)) throw new Exception("Couldn't keep the downloaded file.");
     }

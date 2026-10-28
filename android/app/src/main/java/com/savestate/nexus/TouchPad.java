@@ -40,24 +40,41 @@ public class TouchPad extends View {
     private Listener listener;
     private boolean visible = true;
 
+    static final int L2 = 12, R2 = 13;
+
     public TouchPad(Context c, String platform) {
         super(c);
         String p = platform == null ? "" : platform.toLowerCase();
-        boolean handheldGb = p.equals("gb") || p.equals("gbc") || p.equals("nes");
-        stick = p.equals("psp") || p.equals("ps1") || p.equals("n64");
-        if (handheldGb) {
-            buttons.add(new Btn(A, "A", false));
-            buttons.add(new Btn(B, "B", false));
-        } else {
-            boolean ps = p.equals("psp") || p.equals("ps1") || p.equals("ps2");
-            buttons.add(new Btn(X, ps ? "△" : "X", false));
-            buttons.add(new Btn(A, ps ? "○" : "A", false));
-            buttons.add(new Btn(B, ps ? "✕" : "B", false));
-            buttons.add(new Btn(Y, ps ? "□" : "Y", false));
-            buttons.add(new Btn(L, "L", true));
-            buttons.add(new Btn(R, "R", true));
+        // Each console's own buttons, on the RetroPad bits its core reads them
+        // from (Genesis Plus GX: A/B/C on Y/B/A; FinalBurn Neo: A-D on B/A/Y/X;
+        // ParaLLEl N64: A/B on B/Y, Z on L2).
+        String select = "SELECT";
+        switch (p) {
+            case "gb": case "gbc": case "nes":
+                face(A, "A"); face(B, "B"); break;
+            case "mastersystem": case "gamegear":
+                face(A, "2"); face(B, "1"); select = null; break;
+            case "atari": case "atari2600":
+                face(B, "FIRE"); select = "RESET"; break;
+            case "genesis": case "megadrive": case "segacd": case "32x": case "sega32x":
+                face(A, "C"); face(B, "B"); face(Y, "A"); select = "MODE"; break;
+            case "neogeo": case "mame": case "arcade": case "fbneo":
+                face(X, "D"); face(A, "B"); face(B, "A"); face(Y, "C"); select = "COIN"; break;
+            case "n64":
+                face(B, "A"); face(Y, "B"); pill(L, "L"); pill(R, "R"); pill(L2, "Z"); select = null; break;
+            case "ps1": case "psx": case "ps2":
+                face(X, "△"); face(A, "○"); face(B, "✕"); face(Y, "□"); pill(L, "L1"); pill(R, "R1"); pill(L2, "L2"); pill(R2, "R2"); break;
+            case "psp":
+                face(X, "△"); face(A, "○"); face(B, "✕"); face(Y, "□"); pill(L, "L"); pill(R, "R"); break;
+            case "dreamcast":
+                face(X, "Y"); face(A, "B"); face(B, "A"); face(Y, "X"); pill(L2, "L"); pill(R2, "R"); select = null; break;
+            case "gamecube": case "wii":
+                face(X, "Y"); face(A, "X"); face(B, "A"); face(Y, "B"); pill(L, "L"); pill(R, "R"); pill(R2, "Z"); select = null; break;
+            default:
+                face(X, "X"); face(A, "A"); face(B, "B"); face(Y, "Y"); pill(L, "L"); pill(R, "R");
         }
-        buttons.add(new Btn(SELECT, "SELECT", true));
+        stick = p.equals("psp") || p.equals("ps1") || p.equals("psx") || p.equals("n64") || p.equals("dreamcast") || p.equals("gamecube") || p.equals("wii");
+        if (select != null) buttons.add(new Btn(SELECT, select, true));
         buttons.add(new Btn(START, "START", true));
         fill.setColor(Color.argb(70, 255, 255, 255));
         stroke.setStyle(Paint.Style.STROKE);
@@ -67,6 +84,10 @@ public class TouchPad extends View {
         text.setTextAlign(Paint.Align.CENTER);
         text.setFakeBoldText(true);
     }
+
+    private void face(int bit, String label) { buttons.add(new Btn(bit, label, false)); }
+    private void pill(int bit, String label) { buttons.add(new Btn(bit, label, true)); }
+    private int faceCount() { int n = 0; for (Btn b : buttons) if (!b.pill) n++; return n; }
 
     public void setListener(Listener l) { listener = l; }
 
@@ -83,21 +104,31 @@ public class TouchPad extends View {
         stickX = u * 4.8f;
         stickY = h - u * 1.4f;
         float fx = w - u * 2.4f, fy = h - u * 2.9f, gap = u * 1.15f, br = u * 0.72f;
+        int faces = faceCount();
+        boolean hasSelect = false;
+        for (Btn b : buttons) if (b.bit == SELECT) hasSelect = true;
         for (Btn b : buttons) {
             switch (b.bit) {
                 case X: b.cx = fx; b.cy = fy - gap; b.r = br; break;
                 case A: b.cx = fx + gap; b.cy = fy; b.r = br; break;
                 case B:
-                    if (buttons.size() <= 4) { b.cx = fx - gap * 0.6f; b.cy = fy + gap * 0.5f; } else { b.cx = fx; b.cy = fy + gap; }
+                    if (faces <= 2) { b.cx = fx - gap * 0.6f; b.cy = fy + gap * 0.5f; } else { b.cx = fx; b.cy = fy + gap; }
                     b.r = br; break;
                 case Y: b.cx = fx - gap; b.cy = fy; b.r = br; break;
                 case L: b.cx = u * 1.6f; b.cy = u * 1.0f; b.r = u * 0.7f; break;
                 case R: b.cx = w - u * 1.6f; b.cy = u * 1.0f; b.r = u * 0.7f; break;
+                case L2: b.cx = u * 1.6f; b.cy = u * 2.3f; b.r = u * 0.6f; break;
+                case R2: b.cx = w - u * 1.6f; b.cy = u * 2.3f; b.r = u * 0.6f; break;
                 case SELECT: b.cx = w / 2f - u * 1.3f; b.cy = h - u * 0.7f; b.r = u * 0.55f; break;
-                case START: b.cx = w / 2f + u * 1.3f; b.cy = h - u * 0.7f; b.r = u * 0.55f; break;
+                case START: b.cx = hasSelect ? w / 2f + u * 1.3f : w / 2f; b.cy = h - u * 0.7f; b.r = u * 0.55f; break;
             }
-            if (buttons.size() <= 4 && b.bit == A) { b.cx = fx + gap * 0.6f; b.cy = fy - gap * 0.5f; }
+            if (faces <= 2 && b.bit == A) { b.cx = fx + gap * 0.6f; b.cy = fy - gap * 0.5f; }
+            if (faces == 1 && !b.pill) { b.cx = fx; b.cy = fy; b.r = br * 1.25f; }
         }
+        // Dreamcast puts its triggers on the first shoulder row.
+        boolean onlySecondRow = true;
+        for (Btn b : buttons) if (b.bit == L || b.bit == R) onlySecondRow = false;
+        if (onlySecondRow) for (Btn b : buttons) if (b.bit == L2 || b.bit == R2) { b.cy = u * 1.0f; b.r = u * 0.7f; }
         text.setTextSize(u * 0.45f);
     }
 

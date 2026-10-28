@@ -25727,11 +25727,65 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const s = await shaOfAndroidFile(f);
         system[f.replace(/-system\.zip$/, "")] = { file: f, sha256: s.sha256, size: s.size };
       }
+      // The owner's devices also learn which BIOS sets the host has (a stamp
+      // of names, sizes and dates, so a changed file is fetched again).
+      const bios: Record<string, { files: string[]; stamp: string }> = {};
+      if ((await access.callerOf(req)).admin) {
+        for (const core of Object.keys(ANDROID_CORE_BIOS)) {
+          const files = await androidBiosFiles(core);
+          if (!files.length) continue;
+          const sig = await Promise.all(files.map((f) => stat(f.full).then((s) => `${f.name}:${s.size}:${Math.round(s.mtimeMs)}`)));
+          bios[core] = { files: files.map((f) => f.name), stamp: crypto.createHash("sha1").update(sig.join("|")).digest("hex").slice(0, 16) };
+        }
+      }
       res.setHeader("Cache-Control", "no-store");
-      res.json({ abi: "arm64-v8a", cores: manifest, system });
+      res.json({ abi: "arm64-v8a", cores: manifest, system, bios });
     } catch {
       res.status(404).json({ error: "No Android cores are published on this host." });
     }
+  });
+  // BIOS for the phone player, for the owner's own devices only (admins):
+  // members never get BIOS files. Per core, the files that core reads from
+  // its system folder, packed as one zip from the host's BIOS folder.
+  const ANDROID_CORE_BIOS: Record<string, string[]> = {
+    fbneo: ["neogeo.zip"],
+    genesis_plus_gx: ["bios_CD_U.bin", "bios_CD_E.bin", "bios_CD_J.bin", "bios_MD.bin"],
+    pcsx_rearmed: ["scph5501.bin", "scph1001.bin", "scph7001.bin", "scph5500.bin", "scph5502.bin"],
+    flycast: ["dc/dc_boot.bin", "dc/dc_flash.bin"],
+    melonds: ["bios7.bin", "bios9.bin", "firmware.bin"],
+  };
+  async function androidBiosFiles(core: string): Promise<Array<{ name: string; full: string }>> {
+    const names = ANDROID_CORE_BIOS[core];
+    if (!names) return [];
+    const cfg = await getVaultConfig().catch(() => null);
+    const coresDir = await getCoresDir().catch(() => null);
+    const roots = [cfg?.bios_path, coresDir ? path.join(path.dirname(coresDir), "system") : null].filter(Boolean) as string[];
+    const found: Array<{ name: string; full: string }> = [];
+    for (const name of names) {
+      for (const root of roots) {
+        // "dc/dc_boot.bin" may also sit straight in the BIOS folder.
+        const hit = await Promise.any([path.join(root, name), path.join(root, path.basename(name))].map((p) => fsAccess(p).then(() => p))).catch(() => null);
+        if (hit) { found.push({ name, full: hit }); break; }
+      }
+    }
+    return found;
+  }
+  app.get("/api/engine/android/bios/:core", async (req, res) => {
+    if (!(await access.callerOf(req)).admin) return res.status(403).json({ error: "BIOS files go only to the host owner's own devices." });
+    const core = String(req.params.core).replace(/\.zip$/, "");
+    const files = await androidBiosFiles(core);
+    if (!files.length) return res.status(404).json({ error: "None of this console's BIOS files are in the host's BIOS folder." });
+    const AdmZip = (await import("adm-zip")).default;
+    const zip = new AdmZip();
+    for (const f of files) {
+      const data = await readFile(f.full);
+      zip.addFile(f.name, data);
+      // FinalBurn Neo also looks in system/fbneo.
+      if (core === "fbneo") zip.addFile(`fbneo/${f.name}`, data);
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Type", "application/zip");
+    res.send(zip.toBuffer());
   });
   app.get("/api/engine/android/files/:file", async (req, res) => {
     if (!requireAnyAuth(req, res)) return;

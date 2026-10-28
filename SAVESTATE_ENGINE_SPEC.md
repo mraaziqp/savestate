@@ -873,3 +873,42 @@ checksum; the browser flows are unchanged. Not verified yet: playing on a
 real phone (no ARM device or emulator on this PC). Next, after the owner's
 phone test: 7.3 (saves to the host, menu polish), then 7.4 (dolphin, armsx2,
 citra, cemu).
+
+### 14.5 Every console with a phone core (2026-10-28)
+
+The owner asked (2026-10-28) for every emulator rebuilt into the app and the
+third-party apps made unnecessary. Built from official sources with
+`engine\cores\build-core.ps1` (arm64-v8a, NDK 27.3, stripped; commits and
+SHA-256 in releases\cores\android\cores.json):
+
+| Console | Core | Notes |
+|---|---|---|
+| Genesis / Mega Drive, Master System, Game Gear, Sega CD, SG-1000 | genesis_plus_gx | Sega CD needs its BIOS (bios_CD_*.bin) |
+| 32X | picodrive | |
+| PlayStation | pcsx_rearmed | its own BIOS replacement when the host has none |
+| Nintendo 64 | parallel_n64 | OpenGL ES |
+| Neo Geo and arcade | fbneo | neogeo.zip from the host (owner's devices) |
+| Arcade (MAME 2003 sets) | mame2003_plus | |
+| Atari 2600 | stella2014 | |
+| Dreamcast | flycast | OpenGL ES only (no Vulkan); its own BIOS replacement |
+| GameCube and Wii | dolphin | plus dolphin-system.zip (Data/Sys, engine\cores\pack-system.mjs) |
+
+with gambatte, mgba, snes9x, fceumm and ppsspp from 14.4.
+
+The app side: devices.js maps each console to its core, and a console counts
+only once the host has published that core (the page reads
+/api/engine/android/cores into window.__nxAndroidCores), so a core still
+being built never gets a game. The touch controls follow each console's
+buttons on the RetroPad bits its core reads (Genesis A/B/C, Neo Geo A-D and
+Coin, N64 A/B/Z with the stick, PS1 L1/L2/R1/R2, Dreamcast triggers,
+GameCube Z). BIOS: /api/engine/android/bios/:core packs the files a core
+reads from the host's BIOS folder, for admins only (the owner's devices;
+members are refused and their core list names no BIOS); the app fetches it
+once and again when the files change (a stamp of names, sizes and dates).
+
+Not on phones, and why: PS2 (its libretro core builds for x86 PCs only),
+PS3, Switch and Xbox (no libretro core exists for any device), DS (melonDS
+builds, but most DS games need the lower touch screen, which the phone
+engine doesn't pass to cores yet). Those play by streaming from the PC
+(Phase 6, `?play=CODE`). On Windows PS3, Switch and Xbox stay separate
+programs for the same reason.
