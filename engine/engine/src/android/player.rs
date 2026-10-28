@@ -3,6 +3,12 @@
 //! and the sound (android::audio::Sound), runs frames at the core's own rate
 //! and draws each new picture straight to the game's window. The app (Java,
 //! NxEngine) talks to it through `start` and `send`.
+//!
+//! Speed: frames are paced at the core's declared rate, unless the sound it
+//! makes says otherwise (as the PC player does, serve.rs): PPSSPP and Dolphin
+//! make game time on their own threads and can hand over several frames of
+//! game time per run, so the rate the sound implies is the real one. The
+//! sound's writes also wait while its buffer is full (audio sync).
 use super::audio::Sound;
 use super::gles::{ANativeWindow, Screen};
 use crate::host::{self, PortInput};
@@ -40,6 +46,12 @@ pub struct Status {
     pub height: u32,
     pub sound: bool,
     pub message: Option<String>,
+    /// The rate frames are paced at, and what the core declared.
+    pub pace_fps: f32,
+    pub declared_fps: f32,
+    /// Average time the core takes per frame, and sound queued (ms).
+    pub frame_ms: f32,
+    pub sound_ms: f32,
 }
 
 pub struct Start {
@@ -162,6 +174,12 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
     let mut last_serial = u64::MAX;
     let (mut frames, mut fps_since) = (0u32, Instant::now());
     let mut last_save = Instant::now();
+    // The rate the sound implies (see the top of this file): one-second
+    // windows after 3 s of settling; a new rate only when two in a row agree.
+    let mut period: Option<Duration> = None;
+    let (mut win_runs, mut win_samples, mut win_at, mut total_runs) = (0u64, 0u64, Instant::now(), 0u64);
+    let mut last_sound_fps: Option<f64> = None;
+    let mut run_time = Duration::ZERO;
     let result = 'game: loop {
         // Commands from the app.
         while let Ok(cmd) = rx.try_recv() {
@@ -182,6 +200,7 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
                     }
                     set_status(st, |g| g.paused = p);
                     next = Instant::now();
+                    (win_runs, win_samples, win_at) = (0, 0, Instant::now());
                 }
                 Cmd::SaveState(path) => {
                     let r = session.serialize().and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()));
@@ -206,8 +225,11 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
         }
 
         session.set_inputs(&inputs);
+        let ran = Instant::now();
         session.run_frame(true);
+        run_time += ran.elapsed();
         let av = session.av_info();
+        let declared = if av.timing.fps > 1.0 { av.timing.fps } else { 60.0 };
         let aspect = if av.geometry.aspect_ratio > 0.0 { av.geometry.aspect_ratio } else { av.geometry.base_width as f32 / av.geometry.base_height.max(1) as f32 };
 
         // The picture: from the GPU framebuffer, or the software frame.
@@ -235,10 +257,30 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
 
         // Sound.
         session.take_audio_into(&mut audio);
+        win_runs += 1;
+        total_runs += 1;
+        win_samples += (audio.len() / 2) as u64;
         if let Some(s) = sound.as_mut() {
             s.push(&audio, av.timing.sample_rate);
         }
         audio.clear();
+        if win_at.elapsed() >= Duration::from_secs(1) {
+            let settled = total_runs as f64 > declared.max(30.0) * 3.0;
+            if settled && win_samples > 0 && av.timing.sample_rate > 1000.0 {
+                let sound_fps = av.timing.sample_rate * win_runs as f64 / win_samples as f64;
+                let agrees = last_sound_fps.is_some_and(|p| (p - sound_fps).abs() / sound_fps < 0.03);
+                last_sound_fps = Some(sound_fps);
+                if agrees {
+                    let off = (sound_fps - declared).abs() / declared > 0.05 && (3.0..=240.0).contains(&sound_fps);
+                    let want = if off { Some(Duration::from_secs_f64(1.0 / sound_fps)) } else { None };
+                    if want.map(|d| d.as_micros() / 200) != period.map(|d| d.as_micros() / 200) {
+                        crate::info!("android: pacing at {:.2} fps (declared {declared:.2}, sound implies {sound_fps:.2})", want.map(|d| 1.0 / d.as_secs_f64()).unwrap_or(declared));
+                        period = want;
+                    }
+                }
+            }
+            (win_runs, win_samples, win_at) = (0, 0, Instant::now());
+        }
 
         // Battery saves every 30 s (and on the way out).
         if last_save.elapsed() > Duration::from_secs(30) {
@@ -249,14 +291,17 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
         frames += 1;
         if fps_since.elapsed() >= Duration::from_secs(1) {
             let fps = frames as f32 / fps_since.elapsed().as_secs_f32();
-            set_status(st, |g| g.fps = fps);
+            let frame_ms = run_time.as_secs_f32() * 1000.0 / frames.max(1) as f32;
+            let sound_ms = sound.as_ref().map(|s| s.queued_ms() as f32).unwrap_or(0.0);
+            let pace = period.map(|d| 1.0 / d.as_secs_f64()).unwrap_or(declared) as f32;
+            set_status(st, |g| { g.fps = fps; g.frame_ms = frame_ms; g.sound_ms = sound_ms; g.pace_fps = pace; g.declared_fps = declared as f32; });
             frames = 0;
+            run_time = Duration::ZERO;
             fps_since = Instant::now();
         }
 
-        // Pace at the core's own rate (not the screen's).
-        let fps = if av.timing.fps > 1.0 { av.timing.fps } else { 60.0 };
-        next += Duration::from_secs_f64(1.0 / fps);
+        // Pace at the core's own rate (not the screen's), or the sound's.
+        next += period.unwrap_or_else(|| Duration::from_secs_f64(1.0 / declared));
         let now = Instant::now();
         if next + Duration::from_millis(100) < now {
             next = now; // fell far behind (a slow phone): don't race to catch up

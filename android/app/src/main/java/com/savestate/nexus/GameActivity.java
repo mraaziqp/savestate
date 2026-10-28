@@ -54,6 +54,7 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
     private String corePath;
     private int touchBits, padBits, lx, ly, rx, ry, hatBits, triggerBits;
     private String lastMessage;
+    private long lastReport;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -168,6 +169,21 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
         return h;
     }
 
+    private void post(String path, String json) {
+        try {
+            HttpURLConnection h = (HttpURLConnection) new URL(extra("origin") + path).openConnection();
+            h.setRequestMethod("POST");
+            h.setDoOutput(true);
+            h.setRequestProperty("Authorization", "Bearer " + extra("token"));
+            h.setRequestProperty("Content-Type", "application/json");
+            h.setConnectTimeout(10000);
+            h.setReadTimeout(10000);
+            try (OutputStream out = h.getOutputStream()) { out.write(json.getBytes("UTF-8")); }
+            h.getResponseCode();
+            h.disconnect();
+        } catch (Exception ignored) { /* a report is best effort */ }
+    }
+
     private byte[] get(String path) throws Exception {
         HttpURLConnection h = open(path);
         try (InputStream in = h.getInputStream()) {
@@ -258,6 +274,15 @@ public class GameActivity extends Activity implements SurfaceHolder.Callback {
             if (!s.optBoolean("running") && started) { finish(); return; }
             String msg = s.optString("message", "");
             if (!msg.isEmpty() && !"null".equals(msg) && !msg.equals(lastMessage)) { lastMessage = msg; Toast.makeText(this, msg, Toast.LENGTH_SHORT).show(); }
+            // How the game runs (speed, frame time, sound), every 10 s: the host
+            // keeps the latest per phone so problems can be seen without a cable.
+            if (System.currentTimeMillis() - lastReport > 10000 && s.optDouble("fps", 0) > 0) {
+                lastReport = System.currentTimeMillis();
+                s.put("game", extra("title")).put("platform", extra("platform")).put("coreId", extra("core"))
+                 .put("device", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).put("android", android.os.Build.VERSION.RELEASE);
+                final String body = s.toString();
+                new Thread(() -> post("/api/engine/android/report", body)).start();
+            }
         } catch (Exception ignored) { /* next time */ }
         ui.postDelayed(this::poll, 500);
     }

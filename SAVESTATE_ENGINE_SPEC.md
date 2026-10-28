@@ -912,3 +912,35 @@ builds, but most DS games need the lower touch screen, which the phone
 engine doesn't pass to cores yet). Those play by streaming from the PC
 (Phase 6, `?play=CODE`). On Windows PS3, Switch and Xbox stay separate
 programs for the same reason.
+
+### 14.6 Real speed on phones (2026-10-28)
+
+The first phone test ran GameCube (Crazy Taxi) and PSP (Daxter) far too
+fast. The phone player called the core 60 times a second and never waited
+for sound. PPSSPP and Dolphin make game time on their own threads and can
+hand over several frames of it in one run: PPSSPP runs until the game
+draws a new picture, and Dolphin's CPU thread pushes each field's sound.
+RetroArch holds them back by waiting on its sound output (audio sync).
+
+The player now does both:
+- **Audio sync.** The AAudio stream holds about 64 ms (8192-frame
+  capacity). Writes wait for room, up to 100 ms, then drop the rest so an
+  unplugged headset can't freeze the game.
+- **Sound-implied pacing.** As on the PC (serve.rs), each one-second window
+  after 3 s of settling measures frames per second of sound. When two
+  windows in a row agree within 3 %, and that rate is more than 5 % off the
+  declared one (3-240 fps), frames are paced at the sound's rate.
+
+Phones also get lighter 3D defaults (options.rs, `target_os = "android"`):
+- PPSSPP: 2x (960x544)
+- Dolphin: 1x native, dual core
+- Flycast: 1280x960
+- ParaLLEl N64: 640x480
+
+The PC keeps its 1080p-class settings.
+
+The app sends the player's status every 10 s to
+`POST /api/engine/android/report`. Each report includes fps, pacing rate,
+declared rate, run time per frame, queued sound, core, GPU, device and game.
+The owner reads the latest 50 at `GET /api/engine/android/reports`, so a slow
+or fast game can be diagnosed without a cable. App 1.0.74.

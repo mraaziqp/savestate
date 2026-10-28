@@ -469,6 +469,8 @@ import "./savesync.js";
     for (const el of root.querySelectorAll(FOCUSABLE)) {
       // A card is one stop: its own buttons are reached through it.
       if (el.parentElement && el.parentElement.closest(CARD) && root.contains(el.parentElement.closest(CARD))) continue;
+      // Floating extras (Pause all, the row arrows) aren't part of the page.
+      if (el.closest(".nxpa, .nxr-arrows, [data-gpnav-skip]")) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 2 || r.height < 2) continue;
       out.push({ el, r });
@@ -605,6 +607,127 @@ import "./savesync.js";
     }
     return false;
   };
+
+  // ── PC: keyboard, side-scrolling rows, long lists ──────────────────────
+  // 2026-10-28 ("easily scroll on my pc ... games, media, downloader, sorter"):
+  //   - the arrow keys move between cards the way a controller does, Enter
+  //     opens the one highlighted (not while typing, in a list box or slider,
+  //     or with a video playing big);
+  //   - a row that scrolls sideways (Continue Watching, a console's games)
+  //     shows ‹ › at its ends while the mouse is over it, and can be dragged;
+  //   - "Show 48 more" loads by itself as it comes into view.
+  const KEY_DIRS = { ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right" };
+  const bigVideo = () => Array.from(document.querySelectorAll("video")).some((v) => { const r = v.getBoundingClientRect(); return r.width > innerWidth * 0.5 && r.height > 120; });
+  document.addEventListener("keydown", (e) => {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const t = e.target;
+    if (typing(t) || (t && (t.tagName === "SELECT" || t.isContentEditable || (t.tagName === "INPUT" && /^(range|radio)$/i.test(t.type)) || t.closest?.('[role="slider"], [role="listbox"], [role="menu"], [data-keys-own]')))) return;
+    if (document.getElementById("ejs-game-container") || window.__nxGameOpen || bigVideo()) return;
+    const dir = KEY_DIRS[e.key];
+    if (dir) { if (window.__nxGamepadNav(dir, {})) e.preventDefault(); return; }
+    // Enter on a highlighted card that isn't a button itself (buttons and
+    // links already open on Enter).
+    if (e.key === "Enter" && t && t.classList?.contains(FOCUS_CLS) && !t.matches('button, a[href], input, textarea')) { e.preventDefault(); press(t); }
+  });
+
+  // Rows that scroll sideways. Found from what's under the mouse (cached per
+  // element); one pair of arrows floats over the row, outside React's tree.
+  const sideways = new WeakMap();
+  const isRow = (el) => {
+    if (sideways.has(el)) return sideways.get(el);
+    // overflow-x: auto makes overflow-y compute to auto as well, so a row is
+    // told apart by having nothing to scroll up and down (checked below).
+    const s = getComputedStyle(el);
+    const yes = /(auto|scroll)/.test(s.overflowX) && el.clientHeight >= 60;
+    sideways.set(el, yes);
+    return yes;
+  };
+  const rowAt = (node) => {
+    for (let el = node, i = 0; el && el !== document.body && i < 10; el = el.parentElement, i++) {
+      if (el.nodeType === 1 && isRow(el) && el.scrollWidth > el.clientWidth + 8 && el.scrollHeight <= el.clientHeight + 4) return el;
+    }
+    return null;
+  };
+  const arrows = document.createElement("div");
+  arrows.className = "nxr-arrows";
+  arrows.innerHTML = '<button type="button" class="nxr-arrow nxr-prev" aria-label="Scroll left" tabindex="-1">‹</button><button type="button" class="nxr-arrow nxr-next" aria-label="Scroll right" tabindex="-1">›</button>';
+  const css = document.createElement("style");
+  css.textContent = ".nxr-arrows{position:fixed;inset:0;pointer-events:none;z-index:60}.nxr-arrow{position:fixed;pointer-events:auto;width:40px;height:64px;border:0;border-radius:12px;background:rgba(8,10,20,.78);color:#fff;font:600 30px/1 system-ui;cursor:pointer;opacity:0;transition:opacity .15s;backdrop-filter:blur(6px);box-shadow:0 4px 18px rgba(0,0,0,.45)}.nxr-arrow.on{opacity:1}.nxr-arrow:hover{background:rgba(34,211,238,.9);color:#001}.nxr-dragging,.nxr-dragging *{cursor:grabbing!important;user-select:none!important}";
+  document.head.appendChild(css);
+  const prevBtn = arrows.children[0], nextBtn = arrows.children[1];
+  let hoverRow = null, arrowTimer = 0;
+  const placeArrows = () => {
+    if (!hoverRow || !document.body.contains(hoverRow)) { prevBtn.classList.remove("on"); nextBtn.classList.remove("on"); return; }
+    const r = hoverRow.getBoundingClientRect();
+    const y = Math.max(r.top + 4, Math.min(r.top + r.height / 2 - 32, r.bottom - 68));
+    prevBtn.style.top = nextBtn.style.top = y + "px";
+    prevBtn.style.left = Math.max(r.left + 4, 4) + "px";
+    nextBtn.style.left = Math.min(r.right - 44, innerWidth - 44) + "px";
+    prevBtn.classList.toggle("on", hoverRow.scrollLeft > 4);
+    nextBtn.classList.toggle("on", hoverRow.scrollLeft + hoverRow.clientWidth < hoverRow.scrollWidth - 4);
+  };
+  const page = (dir) => { if (hoverRow) { hoverRow.scrollBy({ left: dir * Math.max(200, hoverRow.clientWidth * 0.85), behavior: "smooth" }); setTimeout(placeArrows, 420); } };
+  prevBtn.addEventListener("click", (e) => { e.stopPropagation(); page(-1); });
+  nextBtn.addEventListener("click", (e) => { e.stopPropagation(); page(1); });
+  let moveQueued = false, lastTarget = null;
+  document.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse") return;
+    lastTarget = e.target;
+    if (moveQueued) return;
+    moveQueued = true;
+    requestAnimationFrame(() => {
+      moveQueued = false;
+      if (arrows.contains(lastTarget)) { clearTimeout(arrowTimer); return; }
+      const row = rowAt(lastTarget);
+      if (row) { clearTimeout(arrowTimer); hoverRow = row; placeArrows(); }
+      else if (hoverRow) { clearTimeout(arrowTimer); arrowTimer = setTimeout(() => { hoverRow = null; placeArrows(); }, 250); }
+    });
+  }, { passive: true });
+  document.addEventListener("scroll", () => { if (hoverRow) placeArrows(); }, { passive: true, capture: true });
+
+  // Dragging a row with the mouse scrolls it; the click that ends a drag is
+  // swallowed so a card doesn't open.
+  let drag = null;
+  document.addEventListener("pointerdown", (e) => {
+    if (e.pointerType !== "mouse" || e.button !== 0 || arrows.contains(e.target) || typing(e.target)) return;
+    const row = rowAt(e.target);
+    if (row) drag = { row, x: e.clientX, left: row.scrollLeft, moved: false };
+  }, { passive: true });
+  document.addEventListener("pointermove", (e) => {
+    if (!drag || !(e.buttons & 1)) { drag = null; return; }
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < 8) return;
+    if (!drag.moved) { drag.moved = true; document.documentElement.classList.add("nxr-dragging"); }
+    drag.row.scrollLeft = drag.left - dx;
+  }, { passive: true });
+  document.addEventListener("pointerup", () => {
+    if (!drag) return;
+    if (drag.moved) {
+      const swallow = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+      document.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => document.removeEventListener("click", swallow, { capture: true }), 50);
+      document.documentElement.classList.remove("nxr-dragging");
+      placeArrows();
+    }
+    drag = null;
+  }, true);
+  document.addEventListener("dragstart", (e) => { if (drag) e.preventDefault(); });
+
+  // "Show 48 more" buttons load by themselves when they come near the screen
+  // ("Show all" stays a choice).
+  if ("IntersectionObserver" in window) {
+    const watched = new WeakSet();
+    const more = new IntersectionObserver((entries) => {
+      for (const en of entries) if (en.isIntersecting && navShown(en.target)) { more.unobserve(en.target); watched.delete(en.target); en.target.click(); }
+    }, { rootMargin: "0px 0px 700px 0px" });
+    setInterval(() => {
+      for (const b of document.querySelectorAll("main button")) {
+        if (!watched.has(b) && /^show \d+ more$/i.test(b.textContent.trim())) { watched.add(b); more.observe(b); }
+      }
+    }, 1200);
+  }
+  const mountArrows = () => document.body ? document.body.appendChild(arrows) : setTimeout(mountArrows, 50);
+  mountArrows();
 
   mirror();
   refresh();

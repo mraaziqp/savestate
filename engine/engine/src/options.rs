@@ -214,7 +214,21 @@ pub fn curated(library_name: &str) -> HashMap<String, String> {
         "Citra" => &[("citra_resolution_factor", "3x"), ("citra_use_cpu_jit", "enabled")],
         _ => &[],
     };
-    pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    let mut wanted: HashMap<String, String> = pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    // Phones: full speed first. The PC's 1080p-class 3D settings make a phone
+    // GPU miss frames, so the 3D cores run nearer their native size there.
+    #[cfg(target_os = "android")]
+    {
+        let phone: &[(&str, &str)] = match library_name {
+            "PPSSPP" => &[("ppsspp_internal_resolution", "960x544"), ("ppsspp_frameskip", "0"), ("ppsspp_fast_memory", "enabled")],
+            "dolphin-emu" => &[("dolphin_efb_scale", "1"), ("dolphin_main_cpu_thread", "enabled"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled")],
+            "Flycast" => &[("reicast_internal_resolution", "1280x960"), ("reicast_threaded_rendering", "enabled"), ("reicast_hle_bios", "enabled")],
+            "ParaLLEl N64" => &[("parallel-n64-screensize", "640x480")],
+            _ => &[],
+        };
+        wanted.extend(phone.iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    }
+    wanted
 }
 
 #[cfg(test)]

@@ -21660,6 +21660,33 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // ── Media Hub (scaffold) ─────────────────────────────────────
+  // Personal clips the backup folders bring in (game replays, screen and OBS
+  // captures, phone and WhatsApp videos, meeting recordings): not films or
+  // shows, so the library leaves them out (?personal=1 lists them too). The
+  // files themselves stay where they are.
+  const PERSONAL_NAME = /^(VID|IMG|PXL|MVIMG|MOV|DSC|GOPR|DJI)[-_]?\d{6,}|WA\d{4}|WhatsApp Video|Screen ?Recording|Screen Shot|_replay_\d{4}|^unknown_\d{4}|Meeting Recording|Google Chrome \d{4}-\d\d|mylivewallpapers|^\d{4}[-.]\d\d[-.]\d\d[ _-]\d\d[-.]\d\d|^[\d\s,()._-]+$/i;
+  const PERSONAL_DIR = /[\\/](Captures|radeon|Recordings|Screen ?Recordings|Camera|DCIM|WhatsApp[^\\/]*|Snapchat|Instagram|TikTok)[\\/]/i;
+  const BACKUP_AREA = /[\\/]nexus-cloud-media[\\/](From this PC|music)[\\/]|^C:[\\/]Users[\\/][^\\/]+[\\/]Videos[\\/]/i;
+  const RELEASE_TAG = /\b(19|20)\d\d\b|\b(480|576|720|1080|2160)p\b|blu-?ray|bdrip|brrip|web-?dl|webrip|dvdrip|hdtv|x26[45]|hevc|\bS\d\dE\d\d\b|\b\d{1,2}x\d{2}\b|\bE\d{2,3}\b/i;
+  const squashName = (x: unknown) => String(x || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const personalClip = (m: any) => {
+    if (m.kind !== "video") return false;
+    const p = String(m.path || "");
+    if (m.category === "series" && m.seriesTitle && !BACKUP_AREA.test(p)) return false;
+    const name = path.basename(p).replace(/\.[^.]+$/, "");
+    const folder = squashName(path.basename(path.dirname(p)));
+    const show = squashName(m.seriesTitle);
+    // A show's episode filed in the show's own folder ("DBZ Super\12.mp4").
+    if (m.category === "series" && show.length > 2 && folder.length > 2 && (folder.includes(show) || show.includes(folder))) return false;
+    if (PERSONAL_NAME.test(name) || PERSONAL_DIR.test(p)) return true;
+    if (!BACKUP_AREA.test(p) || RELEASE_TAG.test(name)) return false;
+    // In a backup folder with no release tag: named after its folder stays
+    // ("One Punch Man\13-One Punch Man"); small untagged files ("clip1",
+    // "car vid", "Bennys Ace") are someone's own videos.
+    if (folder.length > 3 && squashName(name).includes(folder)) return false;
+    return Number(m.size || 0) < 1.5e9;
+  };
+
   app.get("/api/media/library", async (req, res) => {
     // Check media access: must be logged in AND have media_access flag (or be admin)
     const token = (req.headers.authorization ?? "").replace("Bearer ", "").trim();
@@ -21687,20 +21714,22 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     // The folder path on the host PC is only of use (and only shown) to admins.
     const root = (await access.callerOf(req)).admin ? mediaRoot : "";
-    const byKind = mem.media.reduce<Record<string, number>>((acc, m) => {
+    const shown = String(req.query.personal || "") === "1" ? mem.media : mem.media.filter((m) => !personalClip(m));
+    const byKind = shown.reduce<Record<string, number>>((acc, m) => {
       acc[m.kind] = (acc[m.kind] ?? 0) + 1;
       return acc;
     }, {});
-    const movies = mem.media.filter((m) => m.kind === "video" && m.category === "movie").length;
-    const seriesEpisodes = mem.media.filter((m) => m.kind === "video" && m.category === "series").length;
+    const movies = shown.filter((m) => m.kind === "video" && m.category === "movie").length;
+    const seriesEpisodes = shown.filter((m) => m.kind === "video" && m.category === "series").length;
     const seriesTitles = new Set(
-      mem.media
+      shown
         .filter((m) => m.kind === "video" && m.category === "series" && m.seriesTitle)
         .map((m) => String(m.seriesTitle).toLowerCase())
     ).size;
     res.json({
       root,
-      total: mem.media.length,
+      total: shown.length,
+      hiddenClips: mem.media.length - shown.length,
       videos: byKind.video ?? 0,
       images: byKind.image ?? 0,
       subtitles: byKind.subtitle ?? 0,
@@ -21708,7 +21737,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       seriesEpisodes,
       seriesTitles,
       // webReady: a prepared copy plays directly in any browser (server/videoprep.ts).
-      items: mem.media.map((m) => (m.kind === "video" && videoPrep.copyFor(m.path) ? { ...m, webReady: true } : m)),
+      items: shown.map((m) => (m.kind === "video" && videoPrep.copyFor(m.path) ? { ...m, webReady: true } : m)),
     });
   });
 
@@ -24011,7 +24040,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const scanned = mem.media.length ? mem.media : (cachedScan && (Date.now() - cachedScan.ts < MEDIA_REC_SCAN_TTL_MS))
       ? cachedScan.items
       : await scanMediaDir(root, 10000).then(items => { mediaRecScanCache.set(root, { items, ts: Date.now() }); return items; });
-    const allItems = scanned.filter(i => i.kind === "video");
+    const allItems = scanned.filter(i => i.kind === "video" && !personalClip(i));
 
     // Get watch history from DB
     let watchedRelPaths: string[] = [];
@@ -25770,6 +25799,23 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
     return found;
   }
+  // How games run on phones (GameActivity sends its player status every 10 s):
+  // the latest 50, newest first, for the owner to read.
+  const androidReports: Array<Record<string, unknown>> = [];
+  app.post("/api/engine/android/report", (req, res) => {
+    if (!requireAnyAuth(req, res)) return;
+    const b = (req.body || {}) as Record<string, unknown>;
+    const keep = ["game", "platform", "coreId", "core", "gpu", "device", "android", "fps", "pace_fps", "declared_fps", "frame_ms", "sound_ms", "width", "height", "sound", "paused"];
+    const r: Record<string, unknown> = { at: new Date().toISOString() };
+    for (const k of keep) if (b[k] !== undefined) r[k] = typeof b[k] === "string" ? String(b[k]).slice(0, 120) : b[k];
+    androidReports.unshift(r);
+    androidReports.length = Math.min(androidReports.length, 50);
+    res.json({ ok: true });
+  });
+  app.get("/api/engine/android/reports", async (req, res) => {
+    if (!(await access.callerOf(req)).admin) return res.status(403).json({ error: "Owner only." });
+    res.json({ reports: androidReports });
+  });
   app.get("/api/engine/android/bios/:core", async (req, res) => {
     if (!(await access.callerOf(req)).admin) return res.status(403).json({ error: "BIOS files go only to the host owner's own devices." });
     const core = String(req.params.core).replace(/\.zip$/, "");
@@ -27257,6 +27303,38 @@ Loop
         }));
         clientLibraries = Array.from(clientMusicCache.values());
       }
+
+      // The same song is often in several folders (D:\Music, E:\Music\P30, F:\Music,
+      // a phone's "_1" copy): one entry per song, the copy a playlist uses or else
+      // the biggest file (best quality). Same title once "(Official Video)",
+      // "[...]", "(MP3_160K)" and "_1" are set aside, and within 3 s in length.
+      // Nothing is deleted; the other copies stay where they are.
+      const inPlaylists = new Set<string>();
+      if (dbConnected && pool) {
+        const pl = await pool.query("SELECT track_ids FROM music_playlists").catch(() => ({ rows: [] as any[] }));
+        for (const r of pl.rows) for (const id of r.track_ids || []) inPlaylists.add(String(id));
+      }
+      const songKey = (t: any) => String(t.title || path.basename(String(t.absPath || ""))).toLowerCase()
+        .replace(/\((official|lyric|lyrics|audio|video|music|visualizer|hd|hq)[^)]*\)|\[[^\]]*\]|\(mp3_\d+k\)|_\d+$/g, "")
+        .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+      const kept = new Map<string, any[]>();
+      for (const t of localTracks) {
+        const k = songKey(t);
+        const list = kept.get(k) || [];
+        const twin = k ? list.findIndex((o) => Math.abs((o.duration || 0) - (t.duration || 0)) <= 3) : -1;
+        if (twin < 0) { list.push(t); kept.set(k, list); continue; }
+        const o = list[twin];
+        // The Drive backup (nexus-cloud-media\music) mirrors E:\Music etc.: the
+        // same file on a local disk streams faster.
+        const onDrive = (x: any) => /nexus-cloud-media/i.test(String(x.absPath || ""));
+        const [ts, os] = [Number(t.fileSize || 0), Number(o.fileSize || 0)];
+        const better = inPlaylists.has(t.id) !== inPlaylists.has(o.id) ? inPlaylists.has(t.id)
+          : Math.abs(ts - os) > Math.max(ts, os) * 0.01 ? ts > os : onDrive(o) && !onDrive(t);
+        const winner = better ? t : o;
+        winner.copies = (o.copies || 1) + 1;
+        list[twin] = winner;
+      }
+      localTracks = [...kept.values()].flat().sort((a, b) => String(a.title).localeCompare(String(b.title)));
 
       // Merge and return
       let allTracks = [...localTracks];
