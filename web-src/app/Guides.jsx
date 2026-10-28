@@ -198,7 +198,7 @@ const GUIDES = [
           <li><b>Download the app:</b> <a href="/api/downloads/vita" download>SaveState.vpk</a>.</li>
           <li><b>Copy it to the Vita</b> with VitaShell (USB, or FTP: press SELECT in VitaShell and open the address it shows in a file manager on your PC).</li>
           <li><b>Install it:</b> in VitaShell, select the VPK and press X. A SaveState bubble appears on the home screen.</li>
-          <li><b>Sign in</b> with your SaveState account. At home, set the host address to the home-network one (for example <span className="nxg-code">http://192.168.31.201:3000</span>) in Settings: games download much faster.</li>
+          <li><b>Sign in</b> with your SaveState account. At home, set the host address to the home-network one (for example <span className="nxg-code">http://192.168.31.206:3000</span>) in Settings: games download much faster.</li>
         </ol>
         <ul className="nxg-sec">
           <li><b>NES, SNES, Game Boy, GBA, Mega Drive, Master System, PC Engine, Neo Geo, arcade, Atari and PS1</b> play in <b>RetroArch for PS Vita</b> (from retroarch.com). SaveState starts the game in it with the right core. Neo Geo games get the BIOS from the host by themselves.</li>

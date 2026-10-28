@@ -806,7 +806,7 @@ for other distros. Copying files to the NAS from Git Bash needs
 
 ## QNAP NAS host (deploy/qnap)
 
-The TS-431 (192.168.31.201, ARMv7, 480 MB RAM) runs the app natively, not
+The TS-431 (192.168.31.206, ARMv7, 480 MB RAM) runs the app natively, not
 in Docker: Entware Node 18 (no ICU), the Node 18 bundle
 (`esbuild ... --target=node18`), `NEXUS_LOW_MEMORY=1`, Google Drive
 mounted with rclone at `SaveState/library`, ROM and music copies under
@@ -820,7 +820,7 @@ Cloudflare spreads visitors over all of them. That means this PC's tunnel
 off (`tunnel.off` in the host data folder, which run-host.ps1 checks every
 loop), Agent Builder's own connector (`~/.cloudflared/config.yml`, started
 by its launcher) pointing savestate.co.za and www at
-`http://192.168.31.201:3000`, then `touch tunnel.on` on the NAS. The NAS
+`http://192.168.31.206:3000`, then `touch tunnel.on` on the NAS. The NAS
 reaches Agent Builder on 192.168.31.217:4000 and Jarvis through
 `scripts/windows/lan-forward.cjs` (3006 -> 127.0.0.1:3005, home network
 only; `lanForward` in the host config). This PC keeps its server for the
