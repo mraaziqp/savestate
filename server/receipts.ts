@@ -30,7 +30,17 @@ export type Receipt = {
 };
 export type LiveItem = { kind: string; title: string; progress: number | null; detail: string; speed?: number | null; eta?: number | null; status?: string;
   /** A Drive copy: its id and what can be done to it here (Pause / Continue). */
-  jobId?: string; actions?: string[] };
+  jobId?: string; actions?: string[];
+  /** Seconds since it last made progress, and after how long it restarts by itself. */
+  movedAgo?: number | null; stallRestartSec?: number | null;
+  /** For jobs measured now and then: how long without change before it counts as stuck. */
+  stallAfterSec?: number | null;
+  /** What it's working on right now (file names, a film's title). */
+  files?: string[];
+  /** A waiting job: its place in line and what it starts after. */
+  queuePos?: number | null; queueAfter?: string | null;
+  /** What it's waiting for when nothing is moving ("checking Drive space"). */
+  waitingOn?: string | null };
 
 type Query = <T = any>(sql: string, params?: unknown[]) => Promise<T[] | null>;
 let q: Query | null = null;

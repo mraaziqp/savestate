@@ -177,6 +177,21 @@ select.nxa-input option{background:#15172a;color:#f4f5fb}
 .nxa-file small{display:block;color:var(--faint);font-size:11.5px;margin-top:2px;word-break:break-all}
 .nxa-progress{height:8px;border-radius:8px;background:rgba(255,255,255,.08);overflow:hidden}
 .nxa-progress i{display:block;height:100%;border-radius:8px;background:linear-gradient(90deg,#22d3ee,#4d7cff);transition:width .4s}
+.nxa-progress.moving i{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.22) 0 8px,transparent 8px 16px),linear-gradient(90deg,#22d3ee,#4d7cff);background-size:22px 22px,100% 100%;animation:nxaFlow .8s linear infinite}
+.nxa-progress.stuck i{background:linear-gradient(90deg,#f87171,#fb923c)}
+.nxa-progress.slow i{background:linear-gradient(90deg,#fbbf24,#f59e0b)}
+.nxa-progress.idle{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.05) 0 6px,transparent 6px 12px)}
+@keyframes nxaFlow{to{background-position:22px 0,0 0}}
+@keyframes nxaPulse{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,.6)}50%{box-shadow:0 0 0 6px rgba(52,211,153,0)}}
+.nxa-state{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;border:1px solid}
+.nxa-state i{width:8px;height:8px;border-radius:50%;background:currentColor;display:inline-block}
+.nxa-state.move{color:#34d399;border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}.nxa-state.move i{animation:nxaPulse 1.4s ease-out infinite}
+.nxa-state.slow{color:#fbbf24;border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.08)}
+.nxa-state.stuck{color:#f87171;border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.1)}
+.nxa-state.wait,.nxa-state.pause{color:#94a3b8;border-color:rgba(148,163,184,.3);background:rgba(148,163,184,.06)}
+.nxa-files{margin:6px 0 0;padding:0;list-style:none;font-size:12px;color:var(--faint,#8a93a6)}
+.nxa-files li{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (prefers-reduced-motion:reduce){.nxa-progress.moving i,.nxa-state.move i{animation:none}}
 .nxa-who{position:fixed;inset:0;z-index:5000;display:grid;place-items:center;padding:24px 16px;background:radial-gradient(ellipse at top,#1b1f3b,#07080f 70%);overflow:auto}
 .nxa-who-in{display:grid;justify-items:center;gap:28px;max-width:900px;width:100%}
 .nxa-who-in h1{margin:0;font-size:clamp(26px,5vw,44px);font-weight:900;letter-spacing:-.02em}

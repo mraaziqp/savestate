@@ -262,8 +262,10 @@ export function createDrives(deps: DrivesDeps) {
     for (const j of jobs) {
       if (j.status !== "copying") continue;
       const proc = running.get(j.id);
-      if (proc && j.lastProgressAt && now - j.lastProgressAt > 30 * 60_000) {
-        deps.log("WARN", `Upload ${j.id} made no progress for 30 minutes; restarting it`);
+      // 10 minutes (was 30): the page showed "gamebackup (D)" frozen at 91%
+      // for 20 minutes with four files at "100%" (2026-10-28).
+      if (proc && j.lastProgressAt && now - j.lastProgressAt > 10 * 60_000) {
+        deps.log("WARN", `Upload ${j.id} made no progress for 10 minutes; restarting it`);
         j.lastError = "Stalled; restarted automatically";
         j.status = "queued";
         restarting.add(j.id);
@@ -769,14 +771,28 @@ export function createDrives(deps: DrivesDeps) {
     receipt({ kind: "freed", title: `Freed ${gbs(bytes)} on this PC`, detail: `${files} file(s) from ${job.source}, safe on Google Drive (${job.remote}:${job.dest})${skipped ? `; ${skipped} left because they changed or were in use` : ""}`, bytes, data: { job: job.id } });
   }
 
-  addLiveSource(() => jobs.filter((j) => ["copying", "verifying", "deleting", "queued", "paused"].includes(j.status)).map((j) => ({
+  addLiveSource(() => {
+   // Waiting uploads in the order they'll start, and what's running now, so
+   // a waiting one can say where it is in line.
+   const order = jobs.filter((j) => j.status === "queued");
+   const runningNow = jobs.find((j) => j.status === "copying" || j.status === "verifying");
+   return jobs.filter((j) => ["copying", "verifying", "deleting", "queued", "paused"].includes(j.status)).map((j) => ({
     kind: "upload", title: j.label, status: j.status, jobId: j.id,
+    // Seconds since bytes last moved (copying), the files on the way, and the
+    // place in line (queued): the page tells moving, slow and stuck apart.
+    movedAgo: j.status === "copying" && j.lastProgressAt ? Math.round((Date.now() - j.lastProgressAt) / 1000) : null,
+    stallRestartSec: j.status === "copying" ? 600 : null,
+    files: j.status === "copying" ? j.stats.current : undefined,
+    queuePos: j.status === "queued" ? order.indexOf(j) + 1 : null,
+    queueAfter: j.status === "queued" ? (order.indexOf(j) === 0 ? runningNow?.label ?? null : order[order.indexOf(j) - 1]?.label ?? null) : null,
     actions: j.status === "paused" ? ["resume"] : j.status === "deleting" ? [] : ["pause"],
     progress: j.status === "copying" && j.stats.totalBytes ? doneOf(j) / totalOf(j) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
     detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(doneOf(j))} of ${gbs(totalOf(j))}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
-      : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : j.status === "paused" ? "Paused. Press Continue to carry on where it stopped." : "Waiting for its turn",
+      : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : j.status === "paused" ? "Paused. Press Continue to carry on where it stopped."
+      : `Waiting for its turn: one upload at a time gets the whole connection, so each finishes sooner.${j.lastError ? ` Last time: ${j.lastError}.` : ""}`,
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
-  })));
+  }));
+  });
 
   // Finished copies for the Activity log's "Completed" list: what was copied
   // where, and what the file-by-file check against Drive found.

@@ -3,6 +3,7 @@
 // (server/integrations.ts). Refreshed every 10 s while the page is open.
 import React, { useState, useEffect } from "react";
 import { useStyles, api, Icon, Note } from "./lib.jsx";
+import { Perf } from "./Perf.jsx";
 
 const COLOR = { up: "#34d399", degraded: "#fbbf24", down: "#f87171" };
 const WORD = { up: "Live", degraded: "Live, with a problem", down: "Not reachable" };
@@ -25,6 +26,7 @@ export function Connections() {
   return (
     <div className="nxa nxa-page">
       {error && <Note kind="bad">{error}</Note>}
+      <Perf />
       <div className="nxa-card">
         <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="link" /> Connections</h3>
           <p className="nxa-sub" style={{ margin: 0 }}>The assistant, the game builder and the NAS, checked every few seconds.

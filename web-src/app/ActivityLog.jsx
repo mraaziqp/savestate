@@ -8,20 +8,59 @@ const KINDS = [["", "Everything"], ["upload", "Uploads"], ["freed", "Space freed
   ["payment", "Payments"], ["plan", "Plans & access"], ["profile", "Profiles"], ["key", "Keys"], ["library", "Library"], ["system", "System"]];
 const ICON = { upload: "cloud", freed: "trash", download: "down", search: "bolt", payment: "star", plan: "users", profile: "user", key: "key", library: "film", system: "chip", account: "user", convert: "film" };
 const size = (n) => (n == null ? "" : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(2)} TB` : n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-const eta = (s) => (!s || s <= 0 || s > 30 * 86400 ? "" : s > 86400 ? `${Math.round(s / 86400)} d` : s > 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
+const eta = (s) => (!s || s <= 0 || s > 30 * 86400 ? "" : s > 86400 ? `${Math.round(s / 86400)} d` : s > 3600 ? `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min` : s > 60 ? `${Math.round(s / 60)} min` : `${Math.round(s)} s`);
 const when = (d) => new Date(d).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+
+// Whether a job is moving, slow, stuck or waiting (2026-10-28: "I can't tell
+// if it's stuck or going"). The server says how long since a job last moved
+// (movedAgo); for jobs that don't, the page notices itself when the numbers
+// last changed between refreshes.
+const ago = (s) => (s < 60 ? `${Math.max(1, Math.round(s))} s` : s < 3600 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min`);
+const nth = (n) => `${n}${n % 10 === 1 && n % 100 !== 11 ? "st" : n % 10 === 2 && n % 100 !== 12 ? "nd" : n % 10 === 3 && n % 100 !== 13 ? "rd" : "th"}`;
+function motion(i, movedAgo) {
+  if (i.status === "paused") return { tone: "pause", label: "Paused" };
+  if (i.status === "queued") return { tone: "wait", label: i.queuePos ? `Waiting · ${nth(i.queuePos)} in line${i.queueAfter ? ` · starts after ${i.queueAfter}` : ""}` : "Waiting for its turn" };
+  if (i.waitingOn) return { tone: i.waitingOn.includes("didn't answer") ? "stuck" : "wait", label: `Waiting: ${i.waitingOn}` };
+  if (i.status === "waiting") return { tone: "wait", label: "Waiting to start the next one" };
+  if (movedAgo == null) return { tone: "move", label: "Working" };
+  const stall = i.stallRestartSec ?? i.stallAfterSec ?? 900;
+  if (movedAgo <= Math.max(45, stall / 6)) return { tone: "move", label: `Moving · last change ${ago(movedAgo)} ago` };
+  if (movedAgo < stall / 2) return { tone: "slow", label: `Slow · no change for ${ago(movedAgo)}` };
+  return { tone: "stuck", label: `Stuck · no change for ${ago(movedAgo)}${i.stallRestartSec ? (movedAgo < i.stallRestartSec ? ` · restarts by itself in ${ago(i.stallRestartSec - movedAgo)}` : " · restarting") : ""}` };
+}
 
 function Live() {
   const [items, setItems] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
+  const [fetchedAt, setFetchedAt] = useState(0);
+  const [, setNow] = useState(0);
+  // key -> { sig, at }: when this page last saw each job's numbers change.
+  const seen = useRef(new Map());
   useEffect(() => {
     let live = true;
-    const tick = () => api("/api/activity/live").then((r) => live && setItems(r.items)).catch((e) => live && setError(e.message));
+    const tick = () => api("/api/activity/live").then((r) => {
+      if (!live) return;
+      const now = Date.now();
+      for (const i of r.items) {
+        const key = i.jobId || i.title.replace(/\d+/g, "#");
+        const sig = `${i.progress ?? ""}|${i.detail}|${(i.files || []).join(",")}`;
+        const prev = seen.current.get(key);
+        if (!prev || prev.sig !== sig) seen.current.set(key, { sig, at: prev ? now : now - (i.movedAgo ?? 0) * 1000 });
+      }
+      setItems(r.items); setFetchedAt(now); setError("");
+    }).catch((e) => live && setError(e.message));
     tick();
-    const t = setInterval(() => { if (!document.hidden) tick(); }, 5000);
-    return () => { live = false; clearInterval(t); };
+    const t = setInterval(() => { if (!document.hidden) tick(); }, 4000);
+    // The "x s ago" labels count up between refreshes.
+    const clock = setInterval(() => { if (!document.hidden) setNow(Date.now()); }, 1000);
+    return () => { live = false; clearInterval(t); clearInterval(clock); };
   }, []);
+  const movedAgoOf = (i) => {
+    if (i.movedAgo != null) return i.movedAgo + (Date.now() - fetchedAt) / 1000;
+    const s = seen.current.get(i.jobId || i.title.replace(/\d+/g, "#"));
+    return s && (i.status === "copying" || i.status === "running" || i.status === "downloading") ? (Date.now() - s.at) / 1000 : null;
+  };
   // Pause / Continue a Drive copy (admins; the same actions as on Cloud Drives).
   async function act(ids, action) {
     setBusy(ids.join(",") + action); setError("");
@@ -36,7 +75,7 @@ function Live() {
   return (
     <div className="nxa-card">
       <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="refresh" /> Happening now</h3>
-        <p className="nxa-sub" style={{ margin: 0 }}>Uploads to Drive, downloads, media uploads and searches, refreshed every few seconds.</p></div>
+        <p className="nxa-sub" style={{ margin: 0 }}>Uploads to Drive, downloads, media uploads and searches.{fetchedAt ? ` Updated ${ago((Date.now() - fetchedAt) / 1000)} ago.` : ""}</p></div>
         <div className="nxa-row nxa-wrap">
           {pausable.length > 1 && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act(pausable, "pause")}>Pause all uploads</button>}
           {resumable.length > 0 && <button className="nxa-btn sm primary" disabled={!!busy} onClick={() => act(resumable, "resume")}>{resumable.length > 1 ? "Continue all" : "Continue"}</button>}
@@ -45,20 +84,27 @@ function Live() {
       {!items && !error && <p className="nxa-dim"><Icon name="spinner" /> Checking…</p>}
       {items?.length === 0 && <p className="nxa-faint" style={{ fontSize: 13 }}>Nothing running right now.</p>}
       <div style={{ display: "grid", gap: 10 }}>
-        {items?.map((i, n) => (
-          <div key={n} className="nxa-file" style={{ display: "block", minWidth: 0 }}>
+        {items?.map((i, n) => {
+          const m = motion(i, movedAgoOf(i));
+          return (
+          <div key={i.jobId || n} className="nxa-file" style={{ display: "block", minWidth: 0 }}>
             <div className="nxa-row nxa-wrap" style={{ justifyContent: "space-between", gap: 4 }}>
               <b style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}><Icon name={ICON[i.kind] ?? "info"} size={14} /><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{i.title}</span></b>
               <span className="nxa-row" style={{ gap: 8 }}>
-                <span className="nxa-faint" style={{ fontSize: 12 }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed ? ` · ${size(i.speed)}/s` : ""}{eta(i.eta) ? ` · ${eta(i.eta)} left` : ""}</span>
+                <span className="nxa-faint" style={{ fontSize: 12 }}>{i.progress != null ? `${(i.progress * 100).toFixed(i.progress < 0.1 ? 1 : 0)}%` : ""}{i.speed > 0 && m.tone === "move" ? ` · ${size(i.speed)}/s` : ""}{eta(i.eta) && m.tone === "move" && i.speed > 20 * 1024 ? ` · about ${eta(i.eta)} left` : m.tone === "move" && i.speed != null && i.speed <= 20 * 1024 ? " · measuring speed" : ""}</span>
                 {i.jobId && i.actions?.includes("pause") && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act([i.jobId], "pause")}>Pause</button>}
                 {i.jobId && i.actions?.includes("resume") && <button className="nxa-btn sm primary" disabled={!!busy} onClick={() => act([i.jobId], "resume")}>Continue</button>}
               </span>
             </div>
-            {i.progress != null && <div className="nxa-progress" style={{ marginTop: 6 }} role="progressbar" aria-valuenow={Math.round(i.progress * 100)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${Math.min(100, i.progress * 100)}%` }} /></div>}
+            <div style={{ margin: "6px 0 2px" }}><span className={`nxa-state ${m.tone}`} role="status"><i />{m.label}</span></div>
+            {i.progress != null
+              ? <div className={`nxa-progress ${m.tone === "move" ? "moving" : m.tone}`} style={{ marginTop: 6 }} role="progressbar" aria-valuenow={Math.round(i.progress * 100)} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${Math.min(100, i.progress * 100)}%` }} /></div>
+              : m.tone !== "wait" && m.tone !== "pause" ? <div className="nxa-progress moving idle" style={{ marginTop: 6 }} aria-hidden="true"><i style={{ width: "100%", opacity: 0.35 }} /></div> : null}
             <small>{i.detail}</small>
+            {i.files?.length > 0 && <ul className="nxa-files">{i.files.map((f) => <li key={f}>↳ {f}</li>)}</ul>}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

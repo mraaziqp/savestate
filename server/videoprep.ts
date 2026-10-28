@@ -332,16 +332,36 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     }
   })();
 
+  // Where a film is worked on: the configured folder, the host's data folder,
+  // else (Windows) the local disk with the most free space. 2026-10-28: a
+  // 28 GB remux needed 71 GB, C: had 61, and D:/E:/G: (112-140 GB) were
+  // never tried.
   async function tempDir(need: number): Promise<string | null> {
+    const fits = async (dir: string) => {
+      try { const s = await statfs(path.parse(dir).root || dir); return s.bavail * s.bsize; } catch { return 0; }
+    };
     for (const dir of [process.env.NEXUS_VIDEO_PREP_TMP?.trim(), path.join(deps.persistDir, "tmp", "video-prep")].filter(Boolean) as string[]) {
-      try {
-        await mkdir(dir, { recursive: true });
-        const s = await statfs(dir);
-        if (s.bavail * s.bsize > need + 8 * 1024 ** 3) return dir;
-      } catch { /* try the next */ }
+      if ((await fits(dir)) > need + 8 * 1024 ** 3) { await mkdir(dir, { recursive: true }).catch(() => {}); return dir; }
+    }
+    if (process.platform !== "win32") return null;
+    // Local disks only: Drive for Desktop (and its I: letter) mustn't be worked
+    // on, and the media junction lives on C:.
+    const disks: Array<[string, number]> = [];
+    for (const letter of "DEFGH") {
+      const root = `${letter}:\\`;
+      const free = await fits(root);
+      if (free > need + 8 * 1024 ** 3 && !/^I:/i.test(root)) disks.push([root, free]);
+    }
+    disks.sort((a, b) => b[1] - a[1]);
+    for (const [root] of disks) {
+      const dir = path.join(root, "SaveState-temp", "video-prep");
+      try { await mkdir(dir, { recursive: true }); return dir; } catch { /* read-only or gone: next */ }
     }
     return null;
   }
+  // A film that found no room waits 30 minutes before it's tried again, so
+  // the films behind it carry on.
+  const noRoomUntil = new Map<string, number>();
   async function rcJob(method: string, params: Record<string, unknown>, onBytes?: (b: number) => void) {
     const { jobid } = await deps.rc(method, { ...params, _async: true }, 60_000);
     // A copy that has moved nothing for 5 minutes is stuck: one part of a
@@ -371,8 +391,17 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     const info = row.info ?? {};
     const name = path.posix.basename(rel);
     const size = row.src_bytes ?? 0;
-    const tmp = await tempDir(size * 2.2);
-    if (!tmp) { await save(rel, { error: "Not enough free space on this PC to prepare it right now." }); return false; }
+    waiting(`finding room on this PC for ${name}`);
+    const tmp = await within(tempDir(size * 2.2), 60_000, "the disk");
+    if (!tmp) {
+      deps.log("WARN", `video prep: no room on this PC for ${name} (${humanBytes(size * 2.2 + 8 * 1024 ** 3)} needed)`);
+      noRoomUntil.set(rel, Date.now() + 30 * 60_000);
+      await save(rel, { error: "Not enough free space on this PC to prepare it right now." });
+      waiting(`more free space on this PC (${name} needs ${humanBytes(size * 2.2 + 8 * 1024 ** 3)})`);
+      return false;
+    }
+    waiting(null);
+    deps.log("INFO", `video prep: starting ${name}`);
     const work = path.join(tmp, `${Date.now()}`);
     await mkdir(work, { recursive: true });
     const srcName = `source${path.extname(rel)}`;
@@ -503,7 +532,7 @@ export function createVideoPrep(deps: VideoPrepDeps) {
   }
 
   function next(): Row | null {
-    const list = [...rows.values()].filter((r) => r.status === "queued" && r.kind && r.kind !== "direct" && (r.attempts ?? 0) < 3);
+    const list = [...rows.values()].filter((r) => r.status === "queued" && r.kind && r.kind !== "direct" && (r.attempts ?? 0) < 3 && !((noRoomUntil.get(r.rel) ?? 0) > Date.now()));
     list.sort((a, b) =>
       (b.requested_at ? Date.parse(b.requested_at) : 0) - (a.requested_at ? Date.parse(a.requested_at) : 0)
       || (a.kind === "remux" ? 0 : 1) - (b.kind === "remux" ? 0 : 1)
@@ -511,22 +540,33 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     return list[0] ?? null;
   }
 
+  // What the loop is doing when no film is in hand, for the Activity page
+  // (2026-10-28: 336 films "to go" with nothing happening and no reason shown).
+  let waitingOn: { what: string; since: number } | null = { what: "starting up", since: Date.now() };
+  const waiting = (what: string | null) => { waitingOn = what ? (waitingOn?.what === what ? waitingOn : { what, since: Date.now() }) : null; };
+  // Every step that waits on something outside (database, Drive) has a limit,
+  // so one hung answer can't stop the queue for good.
+  const within = <T,>(p: Promise<T>, ms: number, what: string) => Promise.race([p, new Promise<T>((_, no) => setTimeout(() => no(new Error(`${what} didn't answer in ${Math.round(ms / 1000)} s`)), ms))]);
   async function loop() {
     for (;;) {
       try {
         await new Promise((r) => setTimeout(r, current ? 5000 : 15_000));
-        if (!deps.pool()) continue;
-        if (!scanning) await pollRequests();
-        if (settings.paused || deps.gameModeActive()) continue;
+        if (!deps.pool()) { waiting("the database"); continue; }
+        if (!scanning) { waiting("checking for films people asked for"); await within(pollRequests(), 120_000, "the database"); }
+        if (settings.paused) { waiting("paused"); continue; }
+        if (deps.gameModeActive()) { waiting("a game is running on this PC"); continue; }
         // Never fill the Drive account: stop with 200 GB to spare.
         if (Date.now() - driveFree.at > 30 * 60_000) {
-          const about = await deps.rc("operations/about", { fs: `${deps.remote}:` }, 60_000).catch(() => null);
+          waiting("checking free space on Google Drive");
+          const about = await within(deps.rc("operations/about", { fs: `${deps.remote}:` }, 60_000), 90_000, "Google Drive").catch(() => null);
           driveFree = { at: Date.now(), bytes: about?.free != null ? Number(about.free) : null };
         }
-        if (driveFree.bytes != null && driveFree.bytes < 200 * 1024 ** 3) continue;
+        if (driveFree.bytes != null && driveFree.bytes < 200 * 1024 ** 3) { waiting("Google Drive is nearly full"); continue; }
         const row = next();
-        if (row) await prepareOne(row);
-      } catch (e: any) { deps.log("WARN", `video prep: ${e?.message ?? e}`); }
+        if (!row) { waiting(rows.size ? "nothing left that can be prepared" : "the film list"); continue; }
+        waiting(null);
+        await prepareOne(row);
+      } catch (e: any) { waiting(String(e?.message ?? e)); deps.log("WARN", `video prep: ${e?.message ?? e}`); }
     }
   }
   // A game started: stop the conversion now (it starts again afterwards).
@@ -570,15 +610,22 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     return c;
   }
   if (deps.converter) {
+    let seen = { key: "", at: Date.now() };
     addLiveSource(() => {
       const c = counts();
       const left = c.queued + c.working;
       if (!left && !current) return [];
       const ready = c.ok + c.done;
+      // When the film in hand last moved on (its share done or its phase).
+      const key = current ? `${current.rel}|${current.phase}|${Math.round(current.progress * 1000)}` : "";
+      if (key !== seen.key) seen = { key, at: Date.now() };
       return [{
+        movedAgo: current ? Math.round((Date.now() - seen.at) / 1000) : null,
+        files: current ? [`${current.phase}: ${current.title}`] : undefined,
+        waitingOn: !current && !settings.paused && waitingOn ? `${waitingOn.what} (for ${fmtEta(Math.max(1, Math.round((Date.now() - waitingOn.since) / 1000)))})` : null,
         kind: "convert", title: `Preparing films for every device: ${ready} of ${c.films} ready`,
         progress: current ? current.progress : c.films ? ready / c.films : null,
-        status: settings.paused ? "paused" : "running", jobId: "video-prep", actions: settings.paused ? ["resume"] : ["pause"],
+        status: settings.paused ? "paused" : current ? "running" : "waiting", jobId: "video-prep", actions: settings.paused ? ["resume"] : ["pause"],
         speed: current?.speedBps ?? undefined,
         eta: current?.eta ?? undefined,
         detail: settings.paused ? `Paused. ${left} film(s) still to prepare.`

@@ -39,6 +39,7 @@ import { createConnect } from "./server/connect.ts";
 import { createHousehold } from "./server/household.ts";
 import { createMiniGames } from "./server/minigames.ts";
 import { createIntegrations } from "./server/integrations.ts";
+import { createPerf } from "./server/perf.ts";
 import { createPauseAll } from "./server/pause-all.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
@@ -5913,6 +5914,15 @@ async function startServer() {
   });
   app.use(integrations.middleware());
   integrations.register(app);
+  // Host performance tracker (admin): this host's numbers and the NAS's.
+  const perf = createPerf({
+    isAdmin: async (req) => (await access.callerOf(req)).admin,
+    version: (() => { try { return JSON.parse(readFileSync(path.join(process.cwd(), "package.json"), "utf8")).version ?? ""; } catch { return ""; } })(),
+    dataDir: process.cwd(),
+    nasUrl: process.env.NEXUS_NAS_URL ?? "http://192.168.31.201:3000",
+  });
+  app.use(perf.middleware());
+  perf.register(app);
 
   const PUBLIC_API_PREFIXES = [
     "/api/health",              // includes /api/health/full
@@ -6320,11 +6330,46 @@ async function startServer() {
     return set;
   }
   const rememberGameFile = (rel: string) => knownGameFilesCache?.set.add(romBasename(rel));
-  addLiveSource(() => {
+  // Speed from how much more is on disk than a minute or two ago, and when it
+  // last grew, so the page can tell "downloading" from "stuck".
+  // The files on disk are measured every few minutes, so qBittorrent's own
+  // download speed (asked at most every 5 s) says whether it's moving now.
+  let gameDlMovedAt = Date.now();
+  const gameDlWin: Array<[number, number]> = [];
+  let qbtSpeed: { at: number; bps: number | null } = { at: 0, bps: null };
+  const qbtDownloadSpeed = async (): Promise<number | null> => {
+    if (Date.now() - qbtSpeed.at < 5000) return qbtSpeed.bps;
+    qbtSpeed.at = Date.now();
+    try {
+      const cfg = await loadQbtConfig();
+      const cookie = cfg ? await qbtLogin(cfg).catch(() => null) : null;
+      if (!cfg || cookie === null) return (qbtSpeed.bps = null);
+      const r = await fetch(`${cfg.host}/api/v2/transfer/info`, { headers: cookie ? { Cookie: cookie } : {}, signal: AbortSignal.timeout(4000) });
+      qbtSpeed.bps = r.ok ? Number((await r.json())?.dl_info_speed) || 0 : null;
+    } catch { qbtSpeed.bps = null; }
+    return qbtSpeed.bps;
+  };
+  addLiveSource(async () => {
     const list = incompleteFiles.list();
     if (!list.length) return [];
     const size = list.reduce((n, f) => n + f.size, 0), have = list.reduce((n, f) => n + f.onDisk, 0);
+    const now = Date.now();
+    // qBittorrent's speed when it's the one downloading; else (another torrent
+    // app, e.g. BitTorrent filling E:\Download\playstation2_essentials) how
+    // much more is on disk than at earlier checks (files are measured every
+    // few minutes, so this is a 20-minute average).
+    if (!gameDlWin.length || have !== gameDlWin[gameDlWin.length - 1][1]) { if (gameDlWin.length && have > gameDlWin[gameDlWin.length - 1][1]) gameDlMovedAt = now; gameDlWin.push([now, have]); }
+    while (gameDlWin.length > 2 && now - gameDlWin[1][0] > 20 * 60_000) gameDlWin.shift();
+    const qbt = await qbtDownloadSpeed();
+    if (qbt && qbt > 1024) gameDlMovedAt = now;
+    const span = (gameDlWin[gameDlWin.length - 1][0] - gameDlWin[0][0]) / 1000;
+    const grown = span > 0 ? Math.max(0, (gameDlWin[gameDlWin.length - 1][1] - gameDlWin[0][1]) / span) : 0;
+    const speed = qbt && qbt > 1024 ? qbt : grown > 0 ? grown : null;
+    const newest = list.slice().sort((a, b) => (b.onDisk / (b.size || 1)) - (a.onDisk / (a.size || 1))).filter((f) => f.onDisk < f.size).slice(0, 3);
     return [{ kind: "download", title: `Games still downloading: ${list.length}`, status: "downloading", progress: size ? have / size : null,
+      speed, eta: speed && speed > 0 ? Math.round((size - have) / speed) : null,
+      movedAgo: Math.round((now - gameDlMovedAt) / 1000), stallAfterSec: 30 * 60,
+      files: newest.map((f) => `${path.basename(String((f as any).path ?? (f as any).name ?? ""))} ${Math.floor((f.onDisk / (f.size || 1)) * 100)}%`),
       detail: `${(have / 1024 ** 3).toFixed(1)} of ${(size / 1024 ** 3).toFixed(1)} GB so far. They appear in Games, and go to Google Drive, once each one is complete.` }];
   });
 
@@ -25800,8 +25845,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return found;
   }
   // How games run on phones (GameActivity sends its player status every 10 s):
-  // the latest 50, newest first, for the owner to read.
+  // the latest 200, newest first, for the owner to read; kept on disk so a
+  // restart doesn't lose a test run.
+  const ANDROID_REPORTS_FILE = path.join(PERSIST_DIR, "android-reports.json");
   const androidReports: Array<Record<string, unknown>> = [];
+  readFile(ANDROID_REPORTS_FILE, "utf8").then((t) => { const j = JSON.parse(t); if (Array.isArray(j)) androidReports.push(...j.slice(0, 200)); }).catch(() => {});
+  let androidReportsSave: NodeJS.Timeout | null = null;
   app.post("/api/engine/android/report", (req, res) => {
     if (!requireAnyAuth(req, res)) return;
     const b = (req.body || {}) as Record<string, unknown>;
@@ -25809,7 +25858,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const r: Record<string, unknown> = { at: new Date().toISOString() };
     for (const k of keep) if (b[k] !== undefined) r[k] = typeof b[k] === "string" ? String(b[k]).slice(0, 120) : b[k];
     androidReports.unshift(r);
-    androidReports.length = Math.min(androidReports.length, 50);
+    androidReports.length = Math.min(androidReports.length, 200);
+    if (!androidReportsSave) androidReportsSave = setTimeout(() => { androidReportsSave = null; writeFile(ANDROID_REPORTS_FILE, JSON.stringify(androidReports)).catch(() => {}); }, 5000);
     res.json({ ok: true });
   });
   app.get("/api/engine/android/reports", async (req, res) => {
