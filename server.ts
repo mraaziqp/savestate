@@ -29991,6 +29991,14 @@ Format as JSON:
           latest = apk.version;
           downloadUrl = '/api/downloads/apk';
         }
+      } else if (platform === 'vita') {
+        // The PS Vita app has its own versions (SaveState-Vita-<v>.vpk); it was
+        // falling through to the desktop branch and being offered the .deb.
+        const vpks = (await readdir(path.join(process.cwd(), 'releases', 'updates')).catch(() => [] as string[]))
+          .map((f) => /^SaveState-Vita-([\d.]+)\.vpk$/i.exec(f)?.[1]).filter(Boolean) as string[];
+        vpks.sort((a, b) => (semverGt(a, b) ? -1 : 1));
+        latest = vpks[0] ?? '0.0.0';
+        downloadUrl = vpks[0] ? '/api/downloads/vita' : null;
       } else {
         // 'desktop' (the electron-updater default) means Windows for backward
         // compatibility with existing installs; 'windows'/'linux'/'mac' are explicit.
