@@ -358,6 +358,7 @@ export function GetStarted() {
                   <span className="nxgs-dev-badge">Native Engine</span>
                 </div>
                 <p className="nxa-dim" style={{ fontSize: 12.5, margin: 0 }}>Full-speed in-app emulation (GameCube, PS2, PSP, RetroArch) without external windows.</p>
+                <p className="nxa-faint" style={{ fontSize: 11.5, margin: 0 }}>If Windows says "Windows protected your PC", choose More info, then Run anyway: new apps show this until Microsoft knows them.</p>
                 <a className="nxa-btn primary sm" href="/api/downloads/desktop?platform=windows" download>
                   <Icon name="down" /> Download for Windows
                 </a>

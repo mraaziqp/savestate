@@ -207,7 +207,7 @@ pub fn curated(library_name: &str) -> HashMap<String, String> {
         "FinalBurn Neo" => &[("fbneo-allow-patched-romsets", "enabled"), ("fbneo-load-subsystem-from-parent", "enabled")],
         "Mupen64Plus-Next" => &[("mupen64plus-rdp-plugin", "gliden64"), ("mupen64plus-rsp-plugin", "hle"), ("mupen64plus-43screensize", "1280x960"), ("mupen64plus-EnableNativeResFactor", "4")],
         "PPSSPP" => &[("ppsspp_internal_resolution", "1920x1088"), ("ppsspp_fast_memory", "enabled"), ("ppsspp_frameskip", "0")],
-        "dolphin-emu" => &[("dolphin_efb_scale", "x3 (1920 x 1584)"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled")],
+        "dolphin-emu" => &[("dolphin_efb_scale", "x3 (1920 x 1584)"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled"), ("dolphin_texture_cache_accuracy", "512"), ("dolphin_wait_for_shaders", "enabled")],
         "Flycast" => &[("reicast_internal_resolution", "1920x1440"), ("reicast_threaded_rendering", "enabled"), ("reicast_hle_bios", "enabled")],
         "LRPS2" | "PCSX2" => &[("pcsx2_renderer", "Auto"), ("pcsx2_upscale_multiplier", "3x Native (~1080p)"), ("pcsx2_fastboot", "enabled")],
         "melonDS DS" => &[("melonds_sysfile_mode", "builtin"), ("melonds_render_mode", "software")],
@@ -221,7 +221,11 @@ pub fn curated(library_name: &str) -> HashMap<String, String> {
     {
         let phone: &[(&str, &str)] = match library_name {
             "PPSSPP" => &[("ppsspp_internal_resolution", "960x544"), ("ppsspp_frameskip", "0"), ("ppsspp_fast_memory", "enabled")],
-            "dolphin-emu" => &[("dolphin_efb_scale", "1"), ("dolphin_main_cpu_thread", "enabled"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled")],
+            // Texture cache "Middle" (512): "Fast" (the default) garbled text
+            // and labels (Crazy Taxi's menus on a Galaxy S23 FE, 2026-11-02).
+            // Shaders made before the game starts, not mid-game.
+            "dolphin-emu" => &[("dolphin_efb_scale", "1"), ("dolphin_main_cpu_thread", "enabled"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled"),
+                ("dolphin_texture_cache_accuracy", "512"), ("dolphin_wait_for_shaders", "enabled")],
             "Flycast" => &[("reicast_internal_resolution", "1280x960"), ("reicast_threaded_rendering", "enabled"), ("reicast_hle_bios", "enabled")],
             "ParaLLEl N64" => &[("parallel-n64-screensize", "640x480")],
             _ => &[],

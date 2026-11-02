@@ -240,7 +240,9 @@ fn run(s: Start, rx: Receiver<Cmd>, st: &Mutex<Status>) -> Result<(), String> {
         session.run_frame(true);
         run_time += ran.elapsed();
         let av = session.av_info();
-        let declared = if av.timing.fps > 1.0 { av.timing.fps } else { 60.0 };
+        // Dolphin declares 119.88 (two fields a frame) though a game runs at
+        // 59.94: until the sound says otherwise, no console runs over 100.
+        let declared = if av.timing.fps > 100.0 { av.timing.fps / 2.0 } else if av.timing.fps > 1.0 { av.timing.fps } else { 60.0 };
         let aspect = if av.geometry.aspect_ratio > 0.0 { av.geometry.aspect_ratio } else { av.geometry.base_width as f32 / av.geometry.base_height.max(1) as f32 };
 
         // The picture: from the GPU framebuffer, or the software frame.

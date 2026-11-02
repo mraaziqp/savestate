@@ -73,11 +73,12 @@ impl Sound {
             if r != AAUDIO_OK || s.is_null() {
                 return Err(format!("the sound stream didn't open ({r})"));
             }
-            // About 64 ms of buffer (at least 4 bursts): one frame's sound is
-            // ~17 ms, so it holds three plus a late one without dropping any.
+            // About 42 ms of buffer (at least 4 bursts), kept half full: one
+            // frame's sound is ~17 ms. 64 ms put the sound ~48 ms behind the
+            // picture in Dolphin games (2026-11-02 phone reports).
             let rate = AAudioStream_getSampleRate(s).max(8000) as f64;
             let burst = AAudioStream_getFramesPerBurst(s).max(64);
-            AAudioStream_setBufferSizeInFrames(s, (burst * 4).max((rate * 0.064) as i32));
+            AAudioStream_setBufferSizeInFrames(s, (burst * 4).max((rate * 0.042) as i32));
             AAudioStream_requestStart(s);
             crate::info!("android: sound {} Hz, buffer {} frames", rate, AAudioStream_getBufferSizeInFrames(s));
             Ok(Sound { stream: s, rate, phase: 0.0, last: [0, 0], out: Vec::new(), paused: false })
