@@ -404,12 +404,12 @@ export function GetStarted() {
               <div className="nxgs-dev-card">
                 <div className="nxgs-dev-head">
                   <div className="nxgs-dev-title"><Icon name="cloud" /> iPhone, iPad &amp; Mac</div>
-                  <span className="nxgs-dev-badge">PWA</span>
+                  <span className="nxgs-dev-badge">Home Screen</span>
                 </div>
-                <p className="nxa-dim" style={{ fontSize: 12.5, margin: 0 }}>In Safari tap Share, then tap <b>Add to Home Screen</b> for fullscreen play and offline saves.</p>
-                <button className="nxa-btn sm" onClick={() => alert("In Safari: tap the Share button (square with arrow), then select 'Add to Home Screen'.")}>
-                  Show iOS Instructions
-                </button>
+                <p className="nxa-dim" style={{ fontSize: 12.5, margin: 0 }}>Install the SaveState profile: it adds SaveState to your Home Screen, full screen, with controller support. (Or in Safari: Share, then Add to Home Screen.)</p>
+                <div className="nxa-row" style={{ gap: 6 }}>
+                  <a className="nxa-btn sm primary" href="/api/downloads/ios"><Icon name="down" /> Install Profile</a>
+                </div>
               </div>
 
               {/* Android TV */}

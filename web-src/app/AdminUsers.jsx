@@ -46,6 +46,9 @@ export function AdminUsers() {
 
   if (!data) return <div className="nxa nxa-page"><style>{CSS}</style>{error ? <Note kind="bad">{error}</Note> : <p className="nxa-dim"><Icon name="spinner" /> Loading…</p>}</div>;
   const admins = data.users.filter((u) => isAdminRole(u.role)).length;
+  const pendingRequests = (data.accessRequests || []).filter((r) => r.status === "pending");
+  const pendingCount = pendingRequests.length;
+
   return (
     <div className="nxa nxa-page">
       <style>{CSS}</style>
@@ -53,11 +56,18 @@ export function AdminUsers() {
         <div className="nxa-card-head">
           <div>
             <h2 style={{ fontSize: 22, fontWeight: 900 }}>People &amp; groups</h2>
-            <p className="nxa-dim" style={{ marginTop: 4 }}>{data.users.length} accounts · {admins} admin{admins === 1 ? "" : "s"} · {data.groups.length} group{data.groups.length === 1 ? "" : "s"}</p>
+            <p className="nxa-dim" style={{ marginTop: 4 }}>
+              {data.users.length} accounts · {admins} admin{admins === 1 ? "" : "s"} · {data.groups.length} group{data.groups.length === 1 ? "" : "s"}
+              {pendingCount > 0 && <span style={{ color: "#f59e0b", fontWeight: 800 }}> · {pendingCount} access request{pendingCount === 1 ? "" : "s"} waiting</span>}
+            </p>
           </div>
         </div>
         <div className="nxa-tabs" role="tablist" style={{ marginTop: 6 }}>
           <button role="tab" aria-selected={tab === "people"} className={tab === "people" ? "on" : ""} onClick={() => setTab("people")}>People</button>
+          <button role="tab" aria-selected={tab === "requests"} className={tab === "requests" ? "on" : ""} onClick={() => setTab("requests")} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            Access Requests
+            {pendingCount > 0 && <span className="nxa-pill warn" style={{ padding: "1px 6px", fontSize: 11, fontWeight: 900, background: "#f59e0b", color: "#000" }}>{pendingCount}</span>}
+          </button>
           <button role="tab" aria-selected={tab === "groups"} className={tab === "groups" ? "on" : ""} onClick={() => setTab("groups")}>Groups</button>
           <button role="tab" aria-selected={tab === "invites"} className={tab === "invites" ? "on" : ""} onClick={() => setTab("invites")}>Custom Invites</button>
           <button role="tab" aria-selected={tab === "streams"} className={tab === "streams" ? "on" : ""} onClick={() => setTab("streams")}>Devices &amp; Streams</button>
@@ -65,6 +75,7 @@ export function AdminUsers() {
       </div>
       {error && <Note kind="bad">{error}</Note>}
       {tab === "people" && <People data={data} reload={load} />}
+      {tab === "requests" && <AccessRequestsTab data={data} reload={load} />}
       {tab === "groups" && <Groups data={data} reload={load} />}
       {tab === "invites" && <InvitesTab data={data} />}
       {tab === "streams" && <StreamsTab data={data} />}
@@ -81,6 +92,7 @@ function People({ data, reload }) {
   const list = data.users.filter((u) => {
     const text = `${u.display_name ?? ""} ${u.username} ${u.email ?? ""}`.toLowerCase();
     if (q && !text.includes(q.trim().toLowerCase())) return false;
+    if (filter === "pending") return !!u.hasPendingRequest;
     if (filter === "admins") return isAdminRole(u.role);
     if (filter === "members") return !isAdminRole(u.role);
     if (filter === "nolibrary") return !u.media_access && !isAdminRole(u.role);
@@ -89,12 +101,14 @@ function People({ data, reload }) {
     if (filter.startsWith("group:")) return u.groups.some((g) => g.id === filter.slice(6));
     return true;
   });
+  const pendingCount = data.users.filter((u) => u.hasPendingRequest).length;
   return (
     <div className="nxa-card" style={{ display: "grid", gap: 12 }}>
       <div className="nxau-top">
         <input className="nxa-input sm" placeholder="Search by name, username or email" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search people" />
         <select className="nxa-input sm" style={{ width: "auto" }} value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Show">
           <option value="all">Everyone</option>
+          {pendingCount > 0 && <option value="pending">⚠️ Pending Requests ({pendingCount})</option>}
           <option value="admins">Admins</option>
           <option value="members">Members</option>
           <option value="nolibrary">No library access</option>
@@ -141,6 +155,11 @@ function Person({ u, data, groupName, open, onToggle, reload }) {
           <span className="nxau-name">{u.display_name || u.username}{self ? " (you)" : ""}</span>
           <span className="nxau-sub" style={{ display: "block" }}>@{u.username}{u.email && u.email !== u.username ? ` · ${u.email}` : ""}</span>
           <span className="nxau-pills">
+            {u.hasPendingRequest && (
+              <span className="nxa-pill warn" style={{ background: "rgba(245,158,11,.15)", borderColor: "#f59e0b", color: "#f59e0b", fontWeight: 800 }}>
+                ⚠️ Request Pending
+              </span>
+            )}
             <span className={`nxa-pill ${admin ? "acc" : ""}`}>{ROLE[u.role] ?? u.role}</span>
             <span className="nxa-pill">{u.user_tier ?? "free"}{u.tier_expires_at ? ` until ${new Date(u.tier_expires_at).toLocaleDateString()}` : ""}</span>
             {(admin || u.media_access) && <span className="nxa-pill ok">Films</span>}
@@ -156,6 +175,23 @@ function Person({ u, data, groupName, open, onToggle, reload }) {
 
       {open && (
         <div className="nxau-body">
+          {u.hasPendingRequest && (
+            <div className="nxau-box" style={{ borderColor: "rgba(245,158,11,.4)", background: "rgba(245,158,11,.08)", marginTop: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+                <div>
+                  <h4 style={{ color: "#f59e0b", margin: 0, fontSize: 13 }}>⚠️ Pending Host Access Request</h4>
+                  <p className="nxau-sub" style={{ marginTop: 2 }}>{u.accessRequest?.message || "Requested access to stream media and play games."}</p>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button className="nxa-btn ok" disabled={!!busy} onClick={() => run("approve", () => api(u.accessRequest?.id ? `/api/admin/people/access-requests/${u.accessRequest.id}` : `/api/admin/people/${u.id}/grant-access`, { method: u.accessRequest?.id ? "PATCH" : "POST", body: { status: "approved", tier: "unlimited" } }), "Access approved (Unlimited).")}>Approve (Unlimited)</button>
+                  <button className="nxa-btn" disabled={!!busy} onClick={() => run("approve-free", () => api(u.accessRequest?.id ? `/api/admin/people/access-requests/${u.accessRequest.id}` : `/api/admin/people/${u.id}/grant-access`, { method: u.accessRequest?.id ? "PATCH" : "POST", body: { status: "approved", tier: "free" } }), "Access approved (Free).")}>Approve (Free)</button>
+                  {u.accessRequest?.id && (
+                    <button className="nxa-btn bad" disabled={!!busy} onClick={() => run("deny", () => api(`/api/admin/people/access-requests/${u.accessRequest.id}`, { method: "PATCH", body: { status: "denied" } }), "Request denied.")}>Deny</button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           {locked && <Note>{self ? "This is your own account: change your name, email and password from your profile." : "This is the host's owner account; it can't be changed here."}</Note>}
           <div className="nxau-grid">
             <div className="nxau-box">
@@ -168,7 +204,14 @@ function Person({ u, data, groupName, open, onToggle, reload }) {
                 onBlur={(e) => { if (e.target.value !== dateInput(u.tier_expires_at)) plan({ expiresAt: e.target.value || null }); }} aria-label="Plan ends" />
             </div>
             <div className="nxau-box">
-              <h4>Host library</h4>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <h4>Host library</h4>
+                {!admin && !u.media_access && !u.hasPendingRequest && (
+                  <button className="nxa-btn sm ok" disabled={!!busy} onClick={() => run("grant", () => api(`/api/admin/people/${u.id}/grant-access`, { method: "POST", body: { tier: "free" } }), "Access granted (Free plan).")}>
+                    Grant Access
+                  </button>
+                )}
+              </div>
               <Toggle label="Films & shows" on={admin || !!u.media_access} disabled={admin || !!busy} onChange={(v) => plan({ media_access: v })} />
               <Toggle label="Games" on={admin || !!(u.games_access ?? u.media_access)} disabled={admin || !!busy} onChange={(v) => plan({ games_access: v })} />
               <Toggle label="Can upload" on={admin || !!u.can_upload_media} disabled={admin || !!busy} onChange={(v) => plan({ can_upload_media: v })} />
@@ -241,6 +284,152 @@ function Toggle({ label, on, disabled, onChange }) {
     <div className="nxau-tog">
       <span>{label}</span>
       <button type="button" className={`nxa-switch ${on ? "on" : ""}`} role="switch" aria-checked={on} aria-label={label} disabled={disabled} onClick={() => onChange(!on)} />
+    </div>
+  );
+}
+
+// ── Access Requests ───────────────────────────────────────────────────────
+function AccessRequestsTab({ data, reload }) {
+  const [filter, setFilter] = useState("pending");
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState(null);
+
+  const requests = data.accessRequests || [];
+  const list = requests.filter((r) => {
+    if (filter === "pending") return r.status === "pending";
+    if (filter === "approved") return r.status === "approved";
+    if (filter === "denied") return r.status === "denied";
+    return true;
+  });
+
+  const pendingCount = requests.filter((r) => r.status === "pending").length;
+
+  async function resolveRequest(reqId, status, tier = "free") {
+    setBusy(reqId);
+    setMsg(null);
+    try {
+      await api(`/api/admin/people/access-requests/${reqId}`, {
+        method: "PATCH",
+        body: { status, tier },
+      });
+      setMsg({ kind: "ok", text: status === "approved" ? `Access approved (${tier} plan)!` : "Request denied." });
+      await reload();
+    } catch (e) {
+      setMsg({ kind: "bad", text: e.message });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <div className="nxa-card" style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <h3 style={{ fontSize: 16, fontWeight: 800, margin: 0 }}>Host Access Requests</h3>
+          <p className="nxa-dim" style={{ fontSize: 12.5, marginTop: 2 }}>
+            Friends and members who requested access to stream movies, series and play games on this host.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button className={`nxa-btn sm ${filter === "pending" ? "on" : ""}`} onClick={() => setFilter("pending")}>
+            Pending {pendingCount > 0 ? `(${pendingCount})` : ""}
+          </button>
+          <button className={`nxa-btn sm ${filter === "approved" ? "on" : ""}`} onClick={() => setFilter("approved")}>
+            Approved
+          </button>
+          <button className={`nxa-btn sm ${filter === "all" ? "on" : ""}`} onClick={() => setFilter("all")}>
+            All ({requests.length})
+          </button>
+        </div>
+      </div>
+
+      {msg && <Note kind={msg.kind}>{msg.text}</Note>}
+
+      {!list.length && (
+        <div style={{ padding: "32px 16px", textAlign: "center", borderRadius: 12, border: "1px dashed var(--line)" }}>
+          <p className="nxa-dim" style={{ fontSize: 13.5 }}>
+            {filter === "pending" ? "No pending access requests. Everyone is all set!" : "No requests found."}
+          </p>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gap: 10 }}>
+        {list.map((r) => {
+          const isPending = r.status === "pending";
+          const isApproved = r.status === "approved";
+          return (
+            <div key={r.id} style={{
+              display: "grid",
+              gridTemplateColumns: "auto minmax(0,1fr) auto",
+              gap: 14,
+              alignItems: "center",
+              padding: "14px 16px",
+              borderRadius: 14,
+              border: isPending ? "1px solid rgba(245,158,11,.4)" : "1px solid var(--line)",
+              background: isPending ? "rgba(245,158,11,.04)" : "rgba(255,255,255,.02)",
+            }}>
+              <span className="nxau-av" style={{ background: colorOf(r.username) }}>
+                {(r.display_name || r.username).slice(0, 1).toUpperCase()}
+              </span>
+
+              <div style={{ minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 800, fontSize: 15 }}>{r.display_name || r.username}</span>
+                  <span style={{ fontSize: 12.5, color: "var(--dim)" }}>@{r.username}</span>
+                  {r.email && <span style={{ fontSize: 12, color: "var(--dim)" }}>· {r.email}</span>}
+                  <span className={`nxa-pill ${isPending ? "warn" : isApproved ? "ok" : "bad"}`} style={{ textTransform: "capitalize", fontWeight: 800 }}>
+                    {r.status}
+                  </span>
+                </div>
+
+                {r.message && (
+                  <p style={{ margin: "4px 0 0", fontSize: 13, color: "rgba(255,255,255,.75)" }}>
+                    "{r.message}"
+                  </p>
+                )}
+
+                <p className="nxau-sub" style={{ margin: "4px 0 0" }}>
+                  Requested {when(r.created_at)}{r.resolved_at ? ` · Resolved ${when(r.resolved_at)}` : ""}
+                </p>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {isPending ? (
+                  <>
+                    <button
+                      className="nxa-btn ok"
+                      disabled={busy === r.id}
+                      onClick={() => resolveRequest(r.id, "approved", "unlimited")}
+                      title="Grant unlimited films, games, music and storage"
+                    >
+                      {busy === r.id ? <Icon name="spinner" /> : "Approve (Unlimited)"}
+                    </button>
+                    <button
+                      className="nxa-btn"
+                      disabled={busy === r.id}
+                      onClick={() => resolveRequest(r.id, "approved", "free")}
+                      title="Grant free films, games and streaming"
+                    >
+                      Approve (Free)
+                    </button>
+                    <button
+                      className="nxa-btn bad"
+                      disabled={busy === r.id}
+                      onClick={() => resolveRequest(r.id, "denied")}
+                    >
+                      Deny
+                    </button>
+                  </>
+                ) : (
+                  <span className="nxau-sub" style={{ fontStyle: "italic" }}>
+                    {isApproved ? `Approved (${r.user_tier || "unlimited"})` : "Denied"}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -730,6 +919,18 @@ function StreamsTab({ data }) {
               </a>
               <a href="/vita" className="nxa-btn sm" target="_blank" rel="noreferrer" style={{ textDecoration: "none", textAlign: "center" }}>
                 Web Portal
+              </a>
+            </div>
+          </div>
+
+          <div className="nxau-box">
+            <h4 style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 16 }}>🍏</span> Apple iOS (iPhone &amp; iPad)
+            </h4>
+            <p className="nxau-sub">Home Screen profile (.mobileconfig): SaveState full screen with controller support. A native iOS app needs a Mac to build.</p>
+            <div style={{ display: "flex", gap: 6 }}>
+              <a href="/api/downloads/ios" className="nxa-btn sm primary" download style={{ flex: 1, textDecoration: "none", textAlign: "center" }}>
+                Install Profile
               </a>
             </div>
           </div>

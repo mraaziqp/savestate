@@ -26,6 +26,12 @@ const config: CapacitorConfig = {
     allowMixedContent: true,
     backgroundColor: '#0b0d10',
   },
+  ios: {
+    contentInset: 'always',
+    backgroundColor: '#0b0d10',
+    preferredContentMode: 'mobile',
+    scheme: 'SaveState',
+  },
   server: {
     url: target,
     cleartext: target.startsWith('http://'),

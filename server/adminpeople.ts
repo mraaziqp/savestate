@@ -19,12 +19,13 @@ export type AdminPeopleDeps = {
   callerOf: (req: express.Request) => Promise<Caller>;
   invalidateUser: (userId?: string) => void;
   /** Library access for someone added to an admin's group (server.ts). */
-  grantHostAccess: (granterId: string, targetId: string) => Promise<boolean>;
+  grantHostAccess: (granterId: string, targetId: string, tier?: string) => Promise<boolean>;
   resetLink: (userId: string) => Promise<string>;
   tierIds: () => string[];
   /** Screens watching now on an account (planlimits.ts). */
   screensOf: (userId: string) => number;
   log: (level: string, msg: string) => void;
+  sendNotification?: (notif: any) => Promise<any>;
 };
 
 const SCHEMA = `ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;`;
@@ -52,7 +53,7 @@ export function createAdminPeople(deps: AdminPeopleDeps) {
     // Everyone, with their groups; and every group.
     app.get("/api/admin/people", async (req, res) => {
       const admin = await adminOf(req, res); if (!admin) return;
-      const [users, groups, members] = await Promise.all([
+      const [users, groups, members, requests] = await Promise.all([
         deps.query(`SELECT id, username, display_name, email, role, user_tier, tier_expires_at, media_access, games_access,
                            can_upload_media, created_at, last_seen, to_jsonb(users)->>'suspended_at' AS suspended_at
                       FROM users ORDER BY lower(coalesce(display_name, username))`),
@@ -60,6 +61,13 @@ export function createAdminPeople(deps: AdminPeopleDeps) {
                            g.owner_id, u.username AS owner
                       FROM host_groups g LEFT JOIN users u ON u.id = g.owner_id ORDER BY g.created_at`),
         deps.query(`SELECT group_id, user_id, can_download, joined_at FROM host_group_members`),
+        deps.query(`SELECT har.id, har.host_id, har.requester_id, har.status, har.message, har.created_at, har.resolved_at,
+                           u.username, u.display_name, u.email, u.role, u.user_tier, u.media_access, u.games_access,
+                           hp.name AS host_name
+                      FROM host_access_requests har
+                      JOIN users u ON u.id = har.requester_id
+                      LEFT JOIN host_profiles hp ON hp.id = har.host_id
+                      ORDER BY CASE WHEN har.status='pending' THEN 0 ELSE 1 END, har.created_at DESC`),
       ]);
       if (!users) return res.status(503).json({ error: "The database is not reachable right now. Try again in a minute." });
       const byUser = new Map<string, Array<{ id: string; can_download: boolean }>>();
@@ -70,13 +78,124 @@ export function createAdminPeople(deps: AdminPeopleDeps) {
         byUser.get(k)!.push({ id: String(m.group_id), can_download: !!m.can_download });
         count.set(String(m.group_id), (count.get(String(m.group_id)) ?? 0) + 1);
       }
+      const reqByUser = new Map<string, any>();
+      for (const r of (requests ?? []) as any[]) {
+        const k = String(r.requester_id);
+        if (!reqByUser.has(k) || r.status === "pending") {
+          reqByUser.set(k, r);
+        }
+      }
       res.setHeader("Cache-Control", "no-store");
       res.json({
         me: { id: admin.userId, ultra: admin.role === "ultra_admin" },
         tiers: deps.tierIds(),
-        users: users.map((u: any) => ({ ...u, groups: byUser.get(String(u.id)) ?? [], screens: deps.screensOf(String(u.id)) })),
+        users: users.map((u: any) => {
+          const req = reqByUser.get(String(u.id));
+          return {
+            ...u,
+            groups: byUser.get(String(u.id)) ?? [],
+            screens: deps.screensOf(String(u.id)),
+            accessRequest: req ?? null,
+            hasPendingRequest: req?.status === "pending",
+          };
+        }),
         groups: (groups ?? []).map((g: any) => ({ ...g, members: count.get(String(g.id)) ?? 0 })),
+        accessRequests: requests ?? [],
       });
+    });
+
+    // Approve or deny an access request
+    app.patch("/api/admin/people/access-requests/:id", async (req, res) => {
+      const admin = await adminOf(req, res); if (!admin) return;
+      const { status, tier = "free" } = req.body ?? {};
+      if (!status || !["approved", "denied"].includes(status)) {
+        return res.status(400).json({ error: "status must be 'approved' or 'denied'" });
+      }
+      const reqRow = (await deps.query(`
+        SELECT har.*, u.username, u.display_name, u.email
+        FROM host_access_requests har
+        JOIN users u ON u.id = har.requester_id
+        WHERE har.id=$1
+      `, [req.params.id]))?.[0];
+      if (!reqRow) return res.status(404).json({ error: "Access request not found" });
+
+      await deps.query(
+        "UPDATE host_access_requests SET status=$1, resolved_at=NOW() WHERE id=$2",
+        [status, req.params.id]
+      );
+
+      const requesterId = String(reqRow.requester_id);
+      const reqLabel = reqRow.display_name ? `${reqRow.display_name} (@${reqRow.username})` : `@${reqRow.username}`;
+
+      if (status === "approved") {
+        const validTiers = deps.tierIds();
+        const assignTier = validTiers.includes(tier) ? tier : "free";
+        await deps.grantHostAccess(admin.userId, requesterId, assignTier);
+        await deps.query(
+          "UPDATE users SET media_access=TRUE, games_access=TRUE, user_tier=$1 WHERE id::text=$2",
+          [assignTier, requesterId]
+        );
+        deps.invalidateUser(requesterId);
+        receipt({
+          kind: "account",
+          status: "ok",
+          userId: requesterId,
+          actor: admin.username,
+          title: `Access approved: ${reqLabel}`,
+          detail: `${reqLabel} was approved with '${assignTier}' tier by ${admin.username}. Full library and games access granted.`,
+        });
+        if (deps.sendNotification && reqRow.email) {
+          void deps.sendNotification({
+            to_user_id: requesterId,
+            to_email: reqRow.email,
+            subject: "SaveState: Your access request has been approved!",
+            body: `Hi ${reqRow.display_name || reqRow.username},\n\nYour access request to SaveState has been approved with the '${assignTier}' plan!\nYou can now log in to stream films, series, music, and play retro games seamlessly.\n\nEnjoy!\nSaveState Host Admin`,
+            event_type: "access_approved",
+            data: { requester_id: requesterId, tier: assignTier },
+          }).catch(() => {});
+        }
+      } else {
+        receipt({
+          kind: "account",
+          status: "warn",
+          userId: requesterId,
+          actor: admin.username,
+          title: `Access denied: ${reqLabel}`,
+          detail: `Access request for ${reqLabel} was denied by ${admin.username}.`,
+        });
+      }
+      res.json({ ok: true, status, requesterId });
+    });
+
+    // 1-click grant full access to any user from People list
+    app.post("/api/admin/people/:id/grant-access", async (req, res) => {
+      const admin = await adminOf(req, res); if (!admin) return;
+      const target = await userRow(req.params.id);
+      if (!target) return res.status(404).json({ error: "That account no longer exists." });
+      const { tier = "free" } = req.body ?? {};
+      const validTiers = deps.tierIds();
+      const assignTier = validTiers.includes(tier) ? tier : "free";
+
+      await deps.grantHostAccess(admin.userId, String(target.id), assignTier);
+      await deps.query(
+        "UPDATE users SET media_access=TRUE, games_access=TRUE, user_tier=$1 WHERE id::text=$2",
+        [assignTier, target.id]
+      );
+      // Mark any pending access requests for this user as approved
+      await deps.query(
+        "UPDATE host_access_requests SET status='approved', resolved_at=NOW() WHERE requester_id::text=$1 AND status='pending'",
+        [target.id]
+      );
+      deps.invalidateUser(String(target.id));
+      receipt({
+        kind: "account",
+        status: "ok",
+        userId: String(target.id),
+        actor: admin.username,
+        title: `Full access granted: @${target.username}`,
+        detail: `Access granted with '${assignTier}' tier by ${admin.username}.`,
+      });
+      res.json({ ok: true, tier: assignTier });
     });
 
     // Role, name, email, suspension. (Plan and library access: PUT /api/admin/plans/users/:id.)

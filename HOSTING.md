@@ -1060,24 +1060,32 @@ colours, so no shelf shows a blank tile. A background job keeps filling.
   so it only needs rebuilding when the Android shell changes. Signing key:
   `NEXUS_APK_KEYSTORE` (in the host data folder) and its password in `.env`.
   **Back the keystore up**: Android refuses an update signed with another key.
+- **iPhone / iPad**: `/api/downloads/ios` (also `/SaveState.mobileconfig`) serves a
+  Home Screen profile (`com.apple.webClip.managed`): SaveState full screen, no
+  Safari bars, always pointing at this site (no `?url=`). There is no native iOS
+  app: an `.ipa` must be compiled and signed on a Mac with Xcode (the `ios/`
+  Capacitor project is there for that); `/api/downloads/ios-ipa` says so (404).
 - **Windows**: `releases\updates\SaveState-Setup-<version>.exe` (the newest
   `.exe` there is what `/api/downloads/desktop` serves). It runs the one-click
   installer: the PC's own Node.js, or a private copy in
   `%LOCALAPPDATA%\NexusEmuClient\node` from nodejs.org (winget only if that is
   blocked); the game launcher (`client-launcher.cjs`); the runner
   (`/api/client-launcher/runner.vbs`, started at sign-in and by `nexusemu://`)
-  which keeps the launcher running and restarts it within ~10 s if it stops
-  (one runner at a time; a second launcher on the port exits); and a
-  SaveState shortcut on the Desktop and Start menu (Edge app window).
-  Re-running it replaces a running launcher with the new one. To rebuild: save
+  which keeps the launcher running; and a SaveState shortcut on the Desktop and
+  Start menu (Edge app window). To rebuild: save
   `https://savestate.co.za/api/client-launcher/windows-installer` (through the
-  public site: fetched from localhost it points PCs at localhost) as `SaveState-Setup.cmd` in an
-  empty folder and run `iexpress /N /Q savestate.sed` with an SED whose
-  `AppLaunched` is `cmd.exe /c SaveState-Setup.cmd`. PCs that already have the
-  launcher get a new one by running the installer again (the launcher does
-  not update itself). The setup's embedded script was identical to the live
-  one on 2026-10-19 (extract it with `SaveState-Setup-<v>.exe /Q /C /T:<dir>`
-  and compare), so it installs the current launcher and engine.
+  public site) as `SaveState-Setup.cmd` in an empty folder and run
+  `iexpress /N /Q savestate.sed` with an SED whose `AppLaunched` is
+  `cmd.exe /c SaveState-Setup.cmd` (check it: `SaveState-Setup-<v>.exe /Q /C /T:<dir>`).
+- **Native Windows app (Tauri)**: not published. The project has no Tauri
+  source, and this PC has no Microsoft C++ build tools to compile one. A
+  2026-10-30 "Tauri" installer repackaged an old NexusEmu 1.0.59 binary
+  (D:\NexusVerifyFinal\app.exe, its window opened as "NexusEmu — Local Launcher
+  Failed to Start"); it and its portable zip are in
+  `releases/updates/legacy-archive`, not served.
+- **Dolphin (standalone) controllers**: the launcher writes `SIDevice0-3 = 6`
+  (Dolphin's standard GameCube controller; 1 is the N64 microphone, 5 the GBA
+  link) and XInput/SDL pads for players 1-4 in `GCPadNew.ini`.
 - The launcher writes `launcher.log` next to itself
   (`%LOCALAPPDATA%\NexusEmuClient`): one line per launch with how long each
   step took. The page asks it at 127.0.0.1:17373 first and 17374 only when

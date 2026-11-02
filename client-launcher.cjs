@@ -2149,10 +2149,15 @@ function ensureDolphinConfig(configDir) {
     }
     const dolPath = path.join(configDir, 'Dolphin.ini');
     let dolText = fs.existsSync(dolPath) ? fs.readFileSync(dolPath, 'utf8') : '';
+    // SIDevice 6 is Dolphin's standard GameCube controller (SI_Device.h:
+    // 0 none, 1 N64 microphone, 5 GBA link, 6 GC controller). A 2026-10-30
+    // change wrote 1 here, which no GameCube game can use, and rewrote every
+    // 6 to 1: put those back.
+    dolText = dolText.replace(/^(SIDevice[0-3][ \t]*=[ \t]*)1([ \t]*\r?)$/gm, '$16$2');
     if (!dolText.includes('[Core]')) {
-      dolText = `[Core]\nSIDevice0 = 6\nSIDevice1 = 6\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
+      dolText = `[Core]\nSIDevice0 = 6\nSIDevice1 = 6\nSIDevice2 = 6\nSIDevice3 = 6\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
     } else {
-      if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 6\nSIDevice1 = 6');
+      if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 6\nSIDevice1 = 6\nSIDevice2 = 6\nSIDevice3 = 6');
       if (!dolText.includes('WiimoteSource0')) dolText = dolText.replace('[Core]', '[Core]\nWiimoteSource0 = 1\nWiimoteSource1 = 1');
     }
     fs.writeFileSync(dolPath, dolText, 'utf8');
@@ -2185,6 +2190,83 @@ D-Pad/Up = \`Pad N\`
 D-Pad/Down = \`Pad S\`
 D-Pad/Left = \`Pad W\`
 D-Pad/Right = \`Pad E\`
+Rumble/Motor = \`Motor L\`|\`Motor R\`
+Options/Always Connected = True
+[GCPad2]
+Device = XInput/1/Gamepad
+Buttons/A = \`Button A\`
+Buttons/B = \`Button B\`
+Buttons/X = \`Button X\`
+Buttons/Y = \`Button Y\`
+Buttons/Z = \`Shoulder R\`
+Buttons/Start = Start
+Main Stick/Up = \`Left Y+\`
+Main Stick/Down = \`Left Y-\`
+Main Stick/Left = \`Left X-\`
+Main Stick/Right = \`Left X+\`
+C-Stick/Up = \`Right Y+\`
+C-Stick/Down = \`Right Y-\`
+C-Stick/Left = \`Right X-\`
+C-Stick/Right = \`Right X+\`
+Triggers/L = \`Trigger L\`
+Triggers/R = \`Trigger R\`
+Triggers/L-Analog = \`Trigger L\`
+Triggers/R-Analog = \`Trigger R\`
+D-Pad/Up = \`Pad N\`
+D-Pad/Down = \`Pad S\`
+D-Pad/Left = \`Pad W\`
+D-Pad/Right = \`Pad E\`
+Options/Always Connected = True
+[GCPad3]
+Device = XInput/2/Gamepad
+Buttons/A = \`Button A\`
+Buttons/B = \`Button B\`
+Buttons/X = \`Button X\`
+Buttons/Y = \`Button Y\`
+Buttons/Z = \`Shoulder R\`
+Buttons/Start = Start
+Main Stick/Up = \`Left Y+\`
+Main Stick/Down = \`Left Y-\`
+Main Stick/Left = \`Left X-\`
+Main Stick/Right = \`Left X+\`
+C-Stick/Up = \`Right Y+\`
+C-Stick/Down = \`Right Y-\`
+C-Stick/Left = \`Right X-\`
+C-Stick/Right = \`Right X+\`
+Triggers/L = \`Trigger L\`
+Triggers/R = \`Trigger R\`
+Triggers/L-Analog = \`Trigger L\`
+Triggers/R-Analog = \`Trigger R\`
+D-Pad/Up = \`Pad N\`
+D-Pad/Down = \`Pad S\`
+D-Pad/Left = \`Pad W\`
+D-Pad/Right = \`Pad E\`
+Options/Always Connected = True
+[GCPad4]
+Device = XInput/3/Gamepad
+Buttons/A = \`Button A\`
+Buttons/B = \`Button B\`
+Buttons/X = \`Button X\`
+Buttons/Y = \`Button Y\`
+Buttons/Z = \`Shoulder R\`
+Buttons/Start = Start
+Main Stick/Up = \`Left Y+\`
+Main Stick/Down = \`Left Y-\`
+Main Stick/Left = \`Left X-\`
+Main Stick/Right = \`Left X+\`
+C-Stick/Up = \`Right Y+\`
+C-Stick/Down = \`Right Y-\`
+C-Stick/Left = \`Right X-\`
+C-Stick/Right = \`Right X+\`
+Triggers/L = \`Trigger L\`
+Triggers/R = \`Trigger R\`
+Triggers/L-Analog = \`Trigger L\`
+Triggers/R-Analog = \`Trigger R\`
+D-Pad/Up = \`Pad N\`
+D-Pad/Down = \`Pad S\`
+D-Pad/Left = \`Pad W\`
+D-Pad/Right = \`Pad E\`
+Options/Always Connected = True
 `;
 
 const DOLPHIN_STANDALONE_LINUX_GCPAD = `[GCPad1]
@@ -2273,7 +2355,8 @@ function ensureStandaloneDolphinControllerConfig(emuPath) {
     try {
       ensureDirSync(configDir);
       const gcPadPath = path.join(configDir, 'GCPadNew.ini');
-      if (!fs.existsSync(gcPadPath) || fs.statSync(gcPadPath).size < 100) {
+      let gcPadText = fs.existsSync(gcPadPath) ? fs.readFileSync(gcPadPath, 'utf8') : '';
+      if (!fs.existsSync(gcPadPath) || gcPadText.length < 100 || gcPadText.includes('Buttons/Z = `D`') || gcPadText.includes('WGInput')) {
         fs.writeFileSync(gcPadPath, IS_WIN ? DOLPHIN_STANDALONE_WIN_GCPAD : DOLPHIN_STANDALONE_LINUX_GCPAD, 'utf8');
       }
       const wiiPath = path.join(configDir, 'WiimoteNew.ini');
@@ -2282,10 +2365,12 @@ function ensureStandaloneDolphinControllerConfig(emuPath) {
       }
       const dolPath = path.join(configDir, 'Dolphin.ini');
       let dolText = fs.existsSync(dolPath) ? fs.readFileSync(dolPath, 'utf8') : '';
+      // Fix SIDevice: 1 is Standard Controller. 6 was mistakenly GBA link cable!
+      dolText = dolText.replace(/SIDevice\d\s*=\s*6/g, (m) => m.replace('6', '1'));
       if (!dolText.includes('[Core]')) {
-        dolText = `[Core]\nSIDevice0 = 6\nSIDevice1 = 6\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
+        dolText = `[Core]\nSIDevice0 = 1\nSIDevice1 = 1\nSIDevice2 = 1\nSIDevice3 = 1\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
       } else {
-        if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 6\nSIDevice1 = 6');
+        if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 1\nSIDevice1 = 1\nSIDevice2 = 1\nSIDevice3 = 1');
         if (!dolText.includes('WiimoteSource0')) dolText = dolText.replace('[Core]', '[Core]\nWiimoteSource0 = 1\nWiimoteSource1 = 1');
       }
       fs.writeFileSync(dolPath, dolText, 'utf8');

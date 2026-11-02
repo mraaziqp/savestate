@@ -6143,10 +6143,11 @@ async function startServer() {
   // Admin > Manage Users: every account and every group (server/adminpeople.ts).
   createAdminPeople({
     query: dbRows, callerOf: (req) => access.callerOf(req), invalidateUser: (id) => access.invalidate(id),
-    grantHostAccess: (g, t) => grantHostAccess(g, t),
+    grantHostAccess: (g, t, tier) => grantHostAccess(g, t, tier),
     resetLink: async (id) => `${RESET_BASE_URL}/?reset=${await createResetToken(id)}`,
     tierIds: () => tiers.tierIds(), screensOf: (id) => planLimits.screensOf(id),
     log: (level, msg) => log(level, msg, "people"),
+    sendNotification: (n) => sendNotification(n),
   }).register(app);
 
   // Receipts for everything that finishes, and live progress (server/receipts.ts).
@@ -6415,6 +6416,28 @@ async function startServer() {
       movedAgo: Math.round((now - gameDlMovedAt) / 1000), stallAfterSec: 30 * 60,
       files: newest.map((f) => `${path.basename(String((f as any).path ?? (f as any).name ?? ""))} ${Math.floor((f.onDisk / (f.size || 1)) * 100)}%`),
       detail: `${(have / 1024 ** 3).toFixed(1)} of ${(size / 1024 ** 3).toFixed(1)} GB so far. They appear in Games, and go to Google Drive, once each one is complete.` }];
+  });
+
+  // Pending host access requests: surfaced live in Activity Log "Happening now"
+  addLiveSource(async () => {
+    if (!pool || !dbConnected) return [];
+    const pendingReqs = await pool.query(
+      `SELECT har.id, har.requester_id, har.created_at, u.username, u.display_name, hp.name AS host_name
+       FROM host_access_requests har
+       JOIN users u ON u.id = har.requester_id
+       LEFT JOIN host_profiles hp ON hp.id = har.host_id
+       WHERE har.status = 'pending'
+       ORDER BY har.created_at DESC`
+    ).then((r: any) => r.rows).catch(() => []);
+    if (!pendingReqs.length) return [];
+    const names = pendingReqs.map((r: any) => r.display_name ? `${r.display_name} (@${r.username})` : `@${r.username}`);
+    return [{
+      kind: "access",
+      title: `${pendingReqs.length} friend access request${pendingReqs.length === 1 ? "" : "s"} waiting for approval`,
+      status: "warn",
+      progress: null,
+      detail: `${names.join(", ")} requested access to the host. Review and approve in People & groups > Access requests.`
+    }];
   });
 
   // Sizes of ROM folders offered for upload (Drives page): measured in the
@@ -16470,6 +16493,34 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         await pool.query("UPDATE users SET role='ultra_admin', media_access=TRUE, can_upload_media=TRUE WHERE id=$1", [u.id]).catch(() => {});
         u.role = "ultra_admin";
         log("INFO", `First account on this host: ${u.username} is its owner`, "auth");
+      } else {
+        // Auto-create pending access request for primary host so new users are never invisible
+        const primHost = await pool.query("SELECT id, owner_id, name FROM host_profiles ORDER BY created_at ASC LIMIT 1").then((x: any) => x.rows[0]).catch(() => null);
+        if (primHost) {
+          await pool.query(
+            "INSERT INTO host_access_requests (id, host_id, requester_id, message) VALUES ($1,$2,$3,$4) ON CONFLICT (host_id, requester_id) DO NOTHING",
+            [crypto.randomUUID(), primHost.id, u.id, "Registered on SaveState host"]
+          ).catch(() => {});
+        }
+        receipt({
+          kind: "account",
+          status: "warn",
+          userId: u.id,
+          actor: u.username,
+          title: `New user registered: ${u.display_name || u.username}`,
+          detail: `${u.display_name ? u.display_name + ` (@${u.username})` : `@${u.username}`}${u.email ? ` · ${u.email}` : ""} registered. Pending host access approval in People & groups.`
+        });
+        const hostOwner = await pool.query("SELECT id, email, username FROM users WHERE role='ultra_admin' OR id=$1 LIMIT 1", [primHost?.owner_id]).then((x: any) => x.rows[0]).catch(() => null);
+        if (hostOwner?.email || hostOwner?.id) {
+          void sendNotification({
+            to_user_id: hostOwner?.id,
+            to_email: hostOwner?.email,
+            subject: `SaveState: New user registration (@${u.username})`,
+            body: `Hi ${hostOwner?.username || "Host Admin"},\n\nA new user just registered on your SaveState host:\n\nUser: ${u.display_name ? u.display_name + " (@" + u.username + ")" : "@" + u.username}\nEmail: ${u.email || "None"}\nTime: ${new Date().toLocaleString()}\n\nTo approve library and games access, open Admin > People & groups > Access Requests.\n\nSaveState Host Admin`,
+            event_type: "user_registered",
+            data: { userId: u.id, username: u.username }
+          }).catch(() => {});
+        }
       }
       const token = sessionFor(req, res, u);
       log("INFO", `New user registered: ${u.username}`, "auth");
@@ -18238,10 +18289,36 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (hp.owner_id === auth.userId) return res.status(400).json({ error: "You own this host" });
     const existing = await pool.query("SELECT status FROM host_access_requests WHERE host_id=$1 AND requester_id=$2", [hp.id, auth.userId]).then(r => r.rows[0]).catch(() => null);
     if (existing) return res.json({ ok: true, status: existing.status, already: true });
+    const reqMsg = String(req.body.message ?? '').slice(0, 300);
     await pool.query(
-      "INSERT INTO host_access_requests (host_id, requester_id, message) VALUES ($1,$2,$3) ON CONFLICT (host_id, requester_id) DO NOTHING",
-      [hp.id, auth.userId, String(req.body.message ?? '').slice(0, 300)]
+      "INSERT INTO host_access_requests (id, host_id, requester_id, message) VALUES ($1,$2,$3,$4) ON CONFLICT (host_id, requester_id) DO NOTHING",
+      [crypto.randomUUID(), hp.id, auth.userId, reqMsg]
     );
+
+    const reqUser = await pool.query("SELECT id, username, display_name, email FROM users WHERE id=$1", [auth.userId]).then((r: any) => r.rows[0]).catch(() => null);
+    const ownerUser = await pool.query("SELECT id, username, email FROM users WHERE id=$1", [hp.owner_id]).then((r: any) => r.rows[0]).catch(() => null);
+    const reqLabel = reqUser?.display_name ? `${reqUser.display_name} (@${reqUser.username})` : `@${reqUser?.username || auth.username}`;
+
+    receipt({
+      kind: "account",
+      status: "warn",
+      userId: auth.userId,
+      actor: reqUser?.username || auth.username,
+      title: `Access requested: ${reqLabel}`,
+      detail: `${reqLabel} requested access to host "${hp.name}".${reqMsg ? ` Note: "${reqMsg}".` : ""} Review in People & groups > Access requests.`
+    });
+
+    if (ownerUser?.email || hp.owner_id) {
+      void sendNotification({
+        to_user_id: hp.owner_id,
+        to_email: ownerUser?.email,
+        subject: `SaveState: Access request from ${reqUser?.username || auth.username}`,
+        body: `Hi ${ownerUser?.username || "Host Admin"},\n\n${reqLabel} has requested access to your SaveState host "${hp.name}".\n\n${reqMsg ? `Message: "${reqMsg}"\n\n` : ""}Review and approve this request with 1-click in Admin > People & groups > Access Requests.\n\nSaveState Host Admin`,
+        event_type: "access_request",
+        data: { host_id: hp.id, requester_id: auth.userId, message: reqMsg }
+      }).catch(() => {});
+    }
+
     res.json({ ok: true, status: 'pending' });
   });
 
@@ -18263,14 +18340,22 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/hosts/access-requests", async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
+    const isCallerAdmin = await isAdminUser({ userId: auth.userId });
     const hp = await pool.query("SELECT id FROM host_profiles WHERE owner_id=$1", [auth.userId]).then(r => r.rows[0]).catch(() => null);
-    if (!hp) return res.json([]);
+    if (!hp && !isCallerAdmin) return res.json([]);
     const rows = await pool.query(
-      `SELECT har.*, u.username, u.display_name, u.role
-       FROM host_access_requests har
-       JOIN users u ON u.id=har.requester_id
-       WHERE har.host_id=$1 ORDER BY har.created_at DESC`,
-      [hp.id]
+      isCallerAdmin
+        ? `SELECT har.*, u.username, u.display_name, u.email, u.role, hp.name AS host_name
+           FROM host_access_requests har
+           JOIN users u ON u.id=har.requester_id
+           LEFT JOIN host_profiles hp ON hp.id=har.host_id
+           ORDER BY CASE WHEN har.status='pending' THEN 0 ELSE 1 END, har.created_at DESC`
+        : `SELECT har.*, u.username, u.display_name, u.email, u.role, hp.name AS host_name
+           FROM host_access_requests har
+           JOIN users u ON u.id=har.requester_id
+           LEFT JOIN host_profiles hp ON hp.id=har.host_id
+           WHERE har.host_id=$1 ORDER BY CASE WHEN har.status='pending' THEN 0 ELSE 1 END, har.created_at DESC`,
+      isCallerAdmin ? [] : [hp.id]
     ).then(r => r.rows).catch(() => []);
     res.json(rows);
   });
@@ -18279,20 +18364,58 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.patch("/api/hosts/access-requests/:requestId", express.json(), async (req, res) => {
     if (!pool || !dbConnected) return res.status(503).json({ error: "DB not connected" });
     const auth = requireAnyAuth(req, res); if (!auth) return;
+    const isCallerAdmin = await isAdminUser({ userId: auth.userId });
     const hp = await pool.query("SELECT id FROM host_profiles WHERE owner_id=$1", [auth.userId]).then(r => r.rows[0]).catch(() => null);
-    if (!hp) return res.status(403).json({ error: "You don't have a host profile" });
+    if (!hp && !isCallerAdmin) return res.status(403).json({ error: "Only admins or host owners can manage access requests" });
     const { status, tier = 'free' } = req.body as { status?: string; tier?: string };
     if (!status || !['approved','denied'].includes(status)) return res.status(400).json({ error: "status must be 'approved' or 'denied'" });
     const validTiers = tiers.tierIds();
-    const assignTier = validTiers.includes(tier) ? tier : undefined;
+    const assignTier = validTiers.includes(tier) ? tier : 'free';
     const r = await pool.query(
-      "UPDATE host_access_requests SET status=$1, resolved_at=NOW() WHERE id=$2 AND host_id=$3 RETURNING requester_id",
-      [status, req.params.requestId, hp.id]
+      isCallerAdmin
+        ? "UPDATE host_access_requests SET status=$1, resolved_at=NOW() WHERE id=$2 RETURNING requester_id, host_id"
+        : "UPDATE host_access_requests SET status=$1, resolved_at=NOW() WHERE id=$2 AND host_id=$3 RETURNING requester_id, host_id",
+      isCallerAdmin ? [status, req.params.requestId] : [status, req.params.requestId, hp.id]
     );
     if (r.rowCount === 0) return res.status(404).json({ error: "Request not found" });
-    // If approved, grant media_access and set tier
-    if (status === 'approved' && r.rows[0]?.requester_id) {
-      await grantHostAccess(auth.userId, r.rows[0].requester_id, assignTier);
+    const requesterId = r.rows[0]?.requester_id;
+    // If approved, grant media_access, games_access and set tier
+    if (status === 'approved' && requesterId) {
+      await grantHostAccess(auth.userId, requesterId, assignTier);
+      await pool.query("UPDATE users SET media_access=TRUE, games_access=TRUE, user_tier=$1 WHERE id=$2", [assignTier, requesterId]).catch(() => {});
+      access.invalidate(String(requesterId));
+
+      const reqUser = await pool.query("SELECT username, display_name, email FROM users WHERE id=$1", [requesterId]).then((u: any) => u.rows[0]).catch(() => null);
+      const reqLabel = reqUser?.display_name ? `${reqUser.display_name} (@${reqUser.username})` : `@${reqUser?.username || requesterId}`;
+      receipt({
+        kind: "account",
+        status: "ok",
+        userId: requesterId,
+        actor: auth.username,
+        title: `Access approved: ${reqLabel}`,
+        detail: `${reqLabel} was approved with '${assignTier}' tier by ${auth.username}. Full library and games access granted.`
+      });
+      if (reqUser?.email) {
+        void sendNotification({
+          to_user_id: requesterId,
+          to_email: reqUser.email,
+          subject: "SaveState: Your access request has been approved!",
+          body: `Hi ${reqUser.display_name || reqUser.username},\n\nYour access request to SaveState has been approved with the '${assignTier}' plan!\nYou can now log in to stream films, series, music, and play retro games.\n\nEnjoy!\nSaveState Host Admin`,
+          event_type: "access_approved",
+          data: { requester_id: requesterId, tier: assignTier }
+        }).catch(() => {});
+      }
+    } else if (status === 'denied' && requesterId) {
+      const reqUser = await pool.query("SELECT username, display_name FROM users WHERE id=$1", [requesterId]).then((u: any) => u.rows[0]).catch(() => null);
+      const reqLabel = reqUser?.display_name ? `${reqUser.display_name} (@${reqUser.username})` : `@${reqUser?.username || requesterId}`;
+      receipt({
+        kind: "account",
+        status: "warn",
+        userId: requesterId,
+        actor: auth.username,
+        title: `Access denied: ${reqLabel}`,
+        detail: `Access request for ${reqLabel} was denied by ${auth.username}.`
+      });
     }
     res.json({ ok: true, status });
   });
@@ -18415,9 +18538,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const caller = await pool.query("SELECT role FROM users WHERE id=$1", [auth.userId]).then(r => r.rows[0]).catch(() => null);
     if (!caller || !['admin','superadmin','ultra_admin'].includes(caller.role)) return res.status(403).json({ error: "Admin only" });
     const rows = await pool.query(`
-      SELECT id, username, display_name, role, user_tier, media_access, can_upload_media, created_at, last_seen
-      FROM users
-      ORDER BY created_at DESC
+      SELECT u.id, u.username, u.display_name, u.email, u.role, u.user_tier, u.media_access, u.can_upload_media, u.created_at, u.last_seen,
+             har.id AS access_request_id, har.status AS access_request_status, har.message AS access_request_message,
+             (har.status = 'pending') AS has_pending_request
+      FROM users u
+      LEFT JOIN host_access_requests har ON har.requester_id = u.id AND har.status = 'pending'
+      ORDER BY CASE WHEN har.status = 'pending' THEN 0 ELSE 1 END, u.created_at DESC
     `).then(r => r.rows).catch(() => []);
     res.json(rows);
   });
@@ -29951,8 +30077,119 @@ Format as JSON:
     res.download(path.join(dir, files[0]), 'SaveState.vpk');
   });
 
+  // SaveState for Windows Portable (.zip)
+  app.get('/api/downloads/windows-portable', async (_req, res) => {
+    const zipPath = path.join(updatesDir, 'SaveState-Windows-Portable-1.0.75.zip');
+    if (existsSync(zipPath)) {
+      return res.redirect(302, '/updates/SaveState-Windows-Portable-1.0.75.zip');
+    }
+    res.status(404).json({ error: 'SaveState Windows Portable package not found' });
+  });
+
+  // SaveState for iOS (iPhone / iPad) WebClip configuration profile (.mobileconfig)
+  // Allows 1-click installation to iOS Home Screen with full-screen mode, precomposed icon, and controller support
+  const handleIosProfile = async (req: express.Request, res: express.Response) => {
+    try {
+      const proto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
+      const host = (req.headers['x-forwarded-host'] as string) || req.headers.host || 'savestate.co.za';
+      // Always this site: a ?url= let anyone make a SaveState-branded profile
+      // that opens another website (2026-11-02 audit).
+      const safeHost = /^[a-z0-9.-]+(:\d+)?$/i.test(String(host)) ? String(host) : 'savestate.co.za';
+      const targetUrl = `${proto === 'http' ? 'http' : 'https'}://${safeHost}`;
+      
+      const iconPath = path.join(process.cwd(), 'dist', 'apple-touch-icon.png');
+      let iconBase64 = '';
+      if (existsSync(iconPath)) {
+        iconBase64 = (await readFile(iconPath)).toString('base64');
+      }
+
+      const mobileConfig = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>FullScreen</key>
+            <true/>
+            ${iconBase64 ? `<key>Icon</key>\n            <data>\n            ${iconBase64}\n            </data>` : ''}
+            <key>IsRemovable</key>
+            <true/>
+            <key>Label</key>
+            <string>SaveState</string>
+            <key>PayloadDescription</key>
+            <string>SaveState Native Web App with hardware controller support</string>
+            <key>PayloadDisplayName</key>
+            <string>SaveState</string>
+            <key>PayloadIdentifier</key>
+            <string>com.savestate.nexus.webclip</string>
+            <key>PayloadType</key>
+            <string>com.apple.webClip.managed</string>
+            <key>PayloadUUID</key>
+            <string>A55B2E10-3C84-4B7B-B962-92AEF1F1070A</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>Precomposed</key>
+            <true/>
+            <key>URL</key>
+            <string>${targetUrl}</string>
+        </dict>
+    </array>
+    <key>PayloadDescription</key>
+    <string>Installs SaveState native full-screen app directly to your iPhone or iPad Home Screen.</string>
+    <key>PayloadDisplayName</key>
+    <string>SaveState iOS Installer</string>
+    <key>PayloadIdentifier</key>
+    <string>com.savestate.nexus.profile</string>
+    <key>PayloadOrganization</key>
+    <string>SaveState</string>
+    <key>PayloadRemovalDisallowed</key>
+    <false/>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadUUID</key>
+    <string>E7A6B459-009A-40C9-8809-7CF06D5E62FA</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+</dict>
+</plist>`;
+
+      res.setHeader('Content-Type', 'application/x-apple-aspen-config; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="SaveState.mobileconfig"');
+      res.status(200).send(mobileConfig);
+    } catch (err: any) {
+      res.status(500).json({ error: 'Failed to generate iOS configuration profile', message: err?.message });
+    }
+  };
+
+  app.get('/SaveState.mobileconfig', handleIosProfile);
+  app.get('/api/downloads/ios-profile', handleIosProfile);
+  app.get('/api/downloads/ios', async (req, res) => {
+    if (req.query.format === 'ipa') {
+      return res.redirect(302, '/api/downloads/ios-ipa');
+    }
+    return handleIosProfile(req, res);
+  });
+
+  // No iOS app is published: an .ipa needs a Mac with Xcode to compile and
+  // sign. The file once offered here held the iOS project's source (Swift,
+  // icons), not an app, so nothing could install it (2026-11-02 audit).
+  app.get('/api/downloads/ios-ipa', (_req, res) => {
+    res.status(404).json({ error: 'There is no iOS app to download yet. Install the SaveState profile instead: /api/downloads/ios' });
+  });
+
   app.get('/api/downloads/desktop', async (req, res) => {
-    const platform = normalizeDesktopPlatform(String(req.query.platform ?? 'windows'));
+    const raw = String(req.query.platform ?? 'windows').toLowerCase();
+    if (raw === 'ios' || raw === 'iphone' || raw === 'ipad') {
+      return res.redirect(302, '/api/downloads/ios');
+    }
+    if (raw === 'windows-portable' || req.query.format === 'zip') {
+      const zipPath = path.join(updatesDir, 'SaveState-Windows-Portable-1.0.75.zip');
+      if (existsSync(zipPath)) {
+        return res.redirect(302, '/updates/SaveState-Windows-Portable-1.0.75.zip');
+      }
+    }
+    const platform = normalizeDesktopPlatform(raw);
     const installer = await findLatestDesktopInstaller(platform);
     if (installer) return res.redirect(302, `/updates/${encodeURIComponent(installer.fileName)}`);
     // No packaged desktop build is published from this host, but on Windows
@@ -29991,6 +30228,9 @@ Format as JSON:
           latest = apk.version;
           downloadUrl = '/api/downloads/apk';
         }
+      } else if (platform === 'ios') {
+        latest = pkg.version ?? '1.0.75';
+        downloadUrl = '/api/downloads/ios-profile';
       } else if (platform === 'vita') {
         // The PS Vita app has its own versions (SaveState-Vita-<v>.vpk); it was
         // falling through to the desktop branch and being offered the .deb.

@@ -99,7 +99,11 @@ export type FinalCheck = {
 
 const pickSample = <T,>(list: T[], n: number) => { const a = [...list]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a.slice(0, n); };
 
-const EXCLUDES = ["desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**", "*.partial", "*.!qB", "*.crdownload", "*.tmp"];
+const EXCLUDES = [
+  "desktop.ini", "Thumbs.db", ".DS_Store", "$RECYCLE.BIN/**", "System Volume Information/**",
+  "*.partial", "*.!qB", "*.crdownload", "*.tmp",
+  ".thumbnails/**", "**/.thumbnails/**", "**/thumbnails/**", ".cache/**", "**/.cache/**"
+];
 // A file changed in the last 30 minutes is probably still being written (a
 // torrent still downloading into the folder): copying it would send half a
 // game. It waits for a later run instead.
@@ -292,10 +296,51 @@ export function createDrives(deps: DrivesDeps) {
     // The least left to send goes first: a 540 GB series folder had the ROM
     // folders waiting days behind it (2026-10-27). A daily re-sync (nothing
     // counted yet) is a quick check, so it goes first too.
+    const isRom = (j: OffloadJob) => (j.kind === "roms" || /roms/i.test(j.label) || /roms/i.test(j.source) ? 1 : 0);
     const left = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
-    // One the owner moved up ("Up next") goes before the rest.
-    const next = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || left(a) - left(b))[0];
+    // One the owner moved up ("Up next") goes before the rest, followed by irreplaceable ROMs, then smallest remaining.
+    const next = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
     if (next) void runCopy(next);
+  }
+
+  function startAll(forceRestartCopying = false): { queuedCount: number; message: string; runningId: string | null } {
+    let count = 0;
+    const now = Date.now();
+    let runningId: string | null = null;
+    for (const j of jobs) {
+      if (["paused", "failed", "incomplete"].includes(j.status)) {
+        j.status = "queued";
+        j.lastError = null;
+        j.retryAt = null;
+        count++;
+      } else if (j.keepSynced && ["verified", "kept", "done"].includes(j.status)) {
+        j.status = "queued";
+        j.nextSyncAt = null;
+        j.stats = newStats();
+        count++;
+      } else if (j.status === "copying") {
+        runningId = j.id;
+        if (forceRestartCopying || (j.stats?.speed != null && j.stats.speed < 15 * 1024)) {
+          const proc = running.get(j.id);
+          if (proc) {
+            deps.log("INFO", `Restarting slow/stalled upload ${j.id} (${j.label}) to advance queue`);
+            j.status = "queued";
+            restarting.add(j.id);
+            proc.kill();
+            count++;
+          }
+        }
+      }
+    }
+    // Prioritize ROM jobs so game libraries always backup first
+    for (const j of jobs) {
+      if (j.status === "queued" && (j.kind === "roms" || /roms/i.test(j.label) || /roms/i.test(j.source))) {
+        j.upNextAt = now + 10000;
+      }
+    }
+    save();
+    setTimeout(pump, 300);
+    return { queuedCount: count, message: `Started and queued ${count} upload job(s)`, runningId };
   }
   const restarting = new Set<string>();
   const RETRY_DELAYS = [5, 15, 60, 360].map((m) => m * 60_000);
@@ -1224,6 +1269,24 @@ export function createDrives(deps: DrivesDeps) {
       } catch (e) { fail(res, e); }
     });
 
+    // Start / resume / kick all uploads immediately on demand
+    app.post("/api/admin/offload/start-all", async (req, res) => {
+      try {
+        const force = req.body?.force === true;
+        const result = startAll(force);
+        deps.log("INFO", `[Offload] Start-all uploads triggered: ${result.queuedCount} job(s) queued`);
+        res.json({ ok: true, ...result });
+      } catch (e) { fail(res, e); }
+    });
+
+    app.post("/api/admin/offload/kick", async (_req, res) => {
+      try {
+        const result = startAll(true);
+        deps.log("INFO", `[Offload] Kick/force-restart uploads triggered: ${result.queuedCount} job(s) queued`);
+        res.json({ ok: true, ...result });
+      } catch (e) { fail(res, e); }
+    });
+
     app.post("/api/admin/offload/:id/:action", async (req, res) => {
       const job = jobs.find((j) => j.id === req.params.id);
       if (!job) return res.status(404).json({ error: "No such upload." });
@@ -1272,5 +1335,5 @@ export function createDrives(deps: DrivesDeps) {
     });
   }
 
-  return { register, findRclone, rc, emailOf, applyRate, nudge: () => pump(), jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
+  return { register, findRclone, rc, emailOf, applyRate, nudge: () => pump(), startAll: (force?: boolean) => startAll(force), jobs: () => jobs, invalidateSummary: () => { emailCache.clear(); } };
 }

@@ -506,6 +506,14 @@ export function DrivesPage() {
       loadJobs();
     } catch (e) { setError(e.message); }
   };
+  const startAllUploads = async () => {
+    setMsg(""); setError("");
+    try {
+      const res = await api("/api/admin/offload/start-all", { method: "POST", body: { force: true } });
+      setMsg(res.message || "Uploads started.");
+      loadJobs();
+    } catch (e) { setError(e.message); }
+  };
   const onAction = async (job, action, body = {}) => {
     try { await api(`/api/admin/offload/${job.id}/${action}`, { method: "POST", body }); loadJobs(); if (action === "delete-local" || action === "autofree-on") setTimeout(loadInfo, 4000); }
     catch (e) { setError(e.message); }
@@ -537,6 +545,15 @@ export function DrivesPage() {
       {gameMode && <Note>A game is running on this PC, so new uploads wait until it closes.</Note>}
       {msg && <Note kind="ok">{msg}</Note>}
       {error && <Note kind="bad">{error}</Note>}
+
+      <div className="nxa-row nxa-wrap" style={{ alignItems: "center", justifyContent: "space-between", margin: "10px 0" }}>
+        <button className="nxa-btn primary" onClick={startAllUploads}>
+          <Icon name="bolt" /> Start All Uploads Now
+        </button>
+        <span className="nxa-dim" style={{ fontSize: 13 }}>
+          Kicks off queued uploads, unpauses stuck jobs, and prioritizes game ROM backups.
+        </span>
+      </div>
 
       <FreeSpace local={info.local} jobs={jobs} suggestions={suggestions} remote={form.remote} onAction={onAction} startOffload={startOffload} />
 

@@ -73,6 +73,15 @@ function Live() {
       setItems((await api("/api/activity/live")).items);
     } catch (e) { setError(e.message); } finally { setBusy(""); }
   }
+
+  async function startAllUploads() {
+    setBusy("start-all"); setError("");
+    try {
+      await api("/api/admin/offload/start-all", { method: "POST", body: { force: true } });
+      setItems((await api("/api/activity/live")).items);
+    } catch (e) { setError(e.message); } finally { setBusy(""); }
+  }
+
   const pausable = (items ?? []).filter((i) => i.jobId && i.actions?.includes("pause")).map((i) => i.jobId);
   const resumable = (items ?? []).filter((i) => i.jobId && i.actions?.includes("resume")).map((i) => i.jobId);
   return (
@@ -80,12 +89,22 @@ function Live() {
       <div className="nxa-card-head"><div><h3 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="refresh" /> Happening now</h3>
         <p className="nxa-sub" style={{ margin: 0 }}>Uploads to Drive, downloads, media uploads and searches.{fetchedAt ? ` Updated ${ago((Date.now() - fetchedAt) / 1000)} ago.` : ""}</p></div>
         <div className="nxa-row nxa-wrap">
+          <button className="nxa-btn sm primary" disabled={!!busy} onClick={startAllUploads}>
+            <Icon name="bolt" /> Start Uploads Now
+          </button>
           {pausable.length > 1 && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act(pausable, "pause")}>Pause all uploads</button>}
-          {resumable.length > 0 && <button className="nxa-btn sm primary" disabled={!!busy} onClick={() => act(resumable, "resume")}>{resumable.length > 1 ? "Continue all" : "Continue"}</button>}
+          {resumable.length > 0 && <button className="nxa-btn sm" disabled={!!busy} onClick={() => act(resumable, "resume")}>{resumable.length > 1 ? "Continue all" : "Continue"}</button>}
         </div></div>
       {error && <Note kind="bad">{error}</Note>}
       {!items && !error && <p className="nxa-dim"><Icon name="spinner" /> Checking…</p>}
-      {items?.length === 0 && <p className="nxa-faint" style={{ fontSize: 13 }}>Nothing running right now.</p>}
+      {items?.length === 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-start", padding: "12px 0" }}>
+          <p className="nxa-faint" style={{ fontSize: 13, margin: 0 }}>Nothing running right now.</p>
+          <button className="nxa-btn sm primary" disabled={!!busy} onClick={startAllUploads}>
+            <Icon name="cloud" /> Start / Resume All Uploads
+          </button>
+        </div>
+      )}
       <div style={{ display: "grid", gap: 10 }}>
         {items?.map((i, n) => {
           const m = motion(i, movedAgoOf(i));
