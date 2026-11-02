@@ -21960,7 +21960,15 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       seriesEpisodes,
       seriesTitles,
       // webReady: a prepared copy plays directly in any browser (server/videoprep.ts).
-      items: shown.map((m) => (m.kind === "video" && videoPrep.copyFor(m.path) ? { ...m, webReady: true } : m)),
+      // Videos only, without the duplicate "path" (the pages read relPath;
+      // covers and subtitles travel on each video): 9 MB of JSON, 7.2 MB of it
+      // image entries, froze phones for half a second (2026-11-02). ?all=1
+      // returns every entry as before.
+      items: (String(req.query.all || "") === "1" ? shown : shown.filter((m) => m.kind === "video")).map((m) => {
+        const out: any = m.kind === "video" && videoPrep.copyFor(m.path) ? { ...m, webReady: true } : { ...m };
+        if (String(req.query.all || "") !== "1" && out.path === out.relPath) delete out.path;
+        return out;
+      }),
     });
   });
 
