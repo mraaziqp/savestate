@@ -304,15 +304,23 @@ export function createDrives(deps: DrivesDeps) {
     }
     // Only copies share the uplink: a check (reading hashes) or a free (local
     // deletes) running for one folder no longer holds up the next upload.
-    if (jobs.some((j) => j.status === "copying")) return;
+    // One upload at a time, plus one small one beside a big one: 60 Game Boy
+    // games (ROMS (E)) waited behind a 451 GB series upload that runs for a
+    // day (2026-11-02). Small = a re-check of a folder already on Drive (nothing
+    // counted yet) or under 5 GB left.
+    const copying = jobs.filter((j) => j.status === "copying");
+    if (copying.length >= 2) return;
     if (deps.gameModeActive?.()) return;
+    const leftOf = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
+    const small = (j: OffloadJob) => (j.stats.totalBytes ? leftOf(j) < 5 * 1024 ** 3 : true);
+    if (copying.length === 1 && small(copying[0])) return;
     // The least left to send goes first: a 540 GB series folder had the ROM
     // folders waiting days behind it (2026-10-27). A daily re-sync (nothing
     // counted yet) is a quick check, so it goes first too.
     const isRom = (j: OffloadJob) => (j.kind === "roms" || /roms/i.test(j.label) || /roms/i.test(j.source) ? 1 : 0);
     const left = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
     // One the owner moved up ("Up next") goes before the rest, followed by irreplaceable ROMs, then smallest remaining.
-    const next = jobs.filter((j) => j.status === "queued").sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
+    const next = jobs.filter((j) => j.status === "queued" && (copying.length === 0 || small(j))).sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
     if (next) void runCopy(next);
   }
 

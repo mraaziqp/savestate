@@ -583,6 +583,23 @@ export function createDownloader(deps: DownloaderDeps) {
         deps.log("INFO", `Download disk has room again (${(free / 1024 ** 3).toFixed(0)} GB free): started ${stuck.length} download(s)`);
       }
       if (guard.paused.length) { guard.paused = []; void saveGuard(); }
+    } else {
+      // Between the two marks: downloads that fit start again, smallest
+      // first, keeping 3 GB free after them (an episode of 3 GB sat
+      // at 3% for days with 8 GB free, waiting for 15, 2026-11-02).
+      let room = free - 3 * 1024 ** 3;
+      const fits: string[] = [];
+      for (const t of list.filter((x) => x.amount_left > 0 && (x.state === "error" || guard.paused.includes(x.hash))).sort((a, b) => a.amount_left - b.amount_left)) {
+        if (t.amount_left > room) break;
+        room -= t.amount_left;
+        fits.push(t.hash);
+      }
+      if (fits.length) {
+        await act("start", fits);
+        guard.paused = guard.paused.filter((h) => !fits.includes(h));
+        void saveGuard();
+        deps.log("INFO", `Download disk: ${(free / 1024 ** 3).toFixed(1)} GB free, started ${fits.length} download(s) that fit`);
+      }
     }
   }
   setTimeout(() => void diskGuard().catch(() => {}), 60_000).unref?.();
