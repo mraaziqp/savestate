@@ -24,9 +24,11 @@ export function PauseAll() {
   const [, tick] = useState(0);
   useEffect(() => {
     let live = true;
-    let allowed = true; // members are refused once, and not asked again
+    // Only admins have the button: asked first, so a member's page doesn't
+    // log a refused request on every load (2026-11-02 audit).
+    let allowed = false;
     const load = () => allowed && api("/api/admin/pause-all").then((s) => live && setState(s)).catch(() => { allowed = false; if (live) setState(null); });
-    load();
+    api("/api/plans/me").then((m) => { allowed = !!m?.isAdmin; load(); }).catch(() => {});
     const t = setInterval(() => { tick((n) => n + 1); setGame(!!(window.__nxGameOpen || document.getElementById("ejs-game-container"))); if (!document.hidden) load(); }, 30_000);
     const g = setInterval(() => setGame(!!(window.__nxGameOpen || document.getElementById("ejs-game-container"))), 2000);
     return () => { live = false; clearInterval(t); clearInterval(g); };

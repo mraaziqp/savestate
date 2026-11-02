@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SaveState",
+  "version": "1.0.75",
+  "identifier": "za.co.savestate.desktop",
+  "build": {
+    "frontendDist": "./loading"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "SaveState",
+    "copyright": "SaveState",
+    "category": "Game",
+    "shortDescription": "SaveState: films, series, music and games",
+    "longDescription": "SaveState in its own window, with the game launcher that plays games on this PC inside SaveState.",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.ico"],
+    "resources": {
+      "resources/node.exe": "node/node.exe",
+      "../client-launcher.cjs": "client-launcher.cjs"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper" },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}
