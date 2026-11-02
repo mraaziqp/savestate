@@ -443,7 +443,7 @@ import "./savesync.js";
   const PRESS_CLS = "nx-controller-pressed";
   const FOCUSABLE = 'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="tab"], [role="link"], [role="option"], [role="menuitem"], [role="switch"], [role="checkbox"], [role="radio"], [tabindex]:not([tabindex="-1"]), [data-gameid], [data-card], [data-gpnav="1"]';
   const CARD = "[data-gameid], [data-card], .nx-game-card";
-  const MODALS = '.nxplay, .nx-playmode-modal, .nx-detail, [role="dialog"], [aria-modal="true"], .nx-modal';
+  const MODALS = '.nxplay, .nx-playmode-modal, .nx-detail, .nx-detail-wrap, .nxw-sheet-wrap, .nxw-pop, [role="dialog"], [aria-modal="true"], .nx-modal';
   let lastFocused = null, lastPoint = null, lastMoveAt = 0;
 
   function clearFocus() {
@@ -456,7 +456,22 @@ import "./savesync.js";
     const marked = document.querySelectorAll("[data-gpnav-scope]");
     if (marked.length) return marked[marked.length - 1];
     const open = Array.from(document.querySelectorAll(MODALS)).filter((m) => m.getBoundingClientRect().width > 0);
-    return open[open.length - 1] || document.body;
+    if (open.length) return open[open.length - 1];
+    // A popup drawn as a full-screen layer without a dialog role (Discover's
+    // film details): the topmost large fixed layer with buttons. The remote
+    // used to move behind it, among the films on the page (2026-11-02).
+    let top = null, topZ = -1;
+    for (const d of document.querySelectorAll("body > div div.fixed, body > div.fixed")) {
+      const r = d.getBoundingClientRect();
+      if (r.width < innerWidth * 0.6 || r.height < innerHeight * 0.6) continue;
+      if (d.closest(".nx-music-away, .nxr-arrows") || !d.querySelector("button, a[href]")) continue;
+      const s = getComputedStyle(d);
+      const z = Number(s.zIndex) || 0;
+      if (s.position !== "fixed" || z < 30 || s.visibility === "hidden" || Number(s.opacity) === 0) continue;
+      if (d.contains(document.querySelector("aside"))) continue; // the app's own frame
+      if (z >= topZ) { top = d; topZ = z; }
+    }
+    return top || document.body;
   }
   const navShown = (el) => {
     if (el.disabled || el.getAttribute("aria-disabled") === "true" || el.closest('[aria-hidden="true"], [inert]')) return false;
@@ -473,6 +488,10 @@ import "./savesync.js";
       if (el.closest(".nxpa, .nxr-arrows, [data-gpnav-skip]")) continue;
       const r = el.getBoundingClientRect();
       if (r.width < 2 || r.height < 2) continue;
+      // The Music page stays mounted off screen while music plays elsewhere
+      // (.nx-music-away, only its player bar showing): a TV remote's first
+      // press landed in its hidden search box (2026-11-02).
+      if ((r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) && el.closest(".nx-music-away")) continue;
       out.push({ el, r });
     }
     return out;
@@ -518,7 +537,19 @@ import "./savesync.js";
   }
   // Where to start: the item nearest the last spot (after a re-render), else
   // the first thing in the page's content, top left.
-  function startPoint(list) {
+  // A popup just opened: the remote starts on its main button ("Get it",
+  // "Play"), not on whatever sat under the last spot on the page (it began on
+  // a "More like this" film under Discover's film sheet, 2026-11-02).
+  let lastScope = null;
+  function startPoint(list, root) {
+    if (root && root !== document.body && root !== lastScope) {
+      lastScope = root;
+      lastPoint = null;
+      const btns = list.filter((s) => s.el.matches('button, a[href], [role="button"]') && !/close|back|dismiss/i.test(s.el.getAttribute("aria-label") || "") && s.r.bottom > 0 && s.r.top < innerHeight && navShown(s.el));
+      btns.sort((a, b) => (a.r.top - b.r.top) || (a.r.left - b.r.left));
+      if (btns[0]) return btns[0].el;
+    }
+    if (!root || root === document.body) lastScope = null;
     if (lastPoint) {
       let best = null, bd = Infinity;
       for (const s of list) {
@@ -559,7 +590,10 @@ import "./savesync.js";
     if (typing(document.activeElement)) { const el = document.activeElement; el.blur(); focusEl(el, true); return true; }
     if (ctx?.te) { ctx.ce(null); return true; }
     if (root !== document.body) {
-      const close = root.querySelector('[aria-label="Close" i], [aria-label^="Close" i], [data-close], .nxplay-close, [aria-label="Back" i]');
+      const close = root.querySelector('[aria-label="Close" i], [aria-label^="Close" i], [data-close], .nxplay-close, [aria-label="Back" i]')
+        // A popup with only a "Cancel" button (Discover's quality picker): that,
+        // rather than Escape, which closes the whole film sheet behind it.
+        || [...root.querySelectorAll("button")].find((b) => /^(cancel|close|back|done)$/i.test(b.textContent.trim()) && navShown(b));
       if (close && navShown(close)) { close.click(); return true; }
       window.dispatchEvent(new CustomEvent("nexus:play-close"));
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
@@ -579,7 +613,7 @@ import "./savesync.js";
     if (action === "lb" || action === "rb") {
       if (document.querySelector("[data-gpnav-scope]")) return true;
       lastFocused = null; lastPoint = null; clearFocus();
-      setTimeout(() => { const list = stops(scope()); const first = startPoint(list); if (first) focusEl(first, true); }, 400);
+      setTimeout(() => { const list = stops(scope()); const first = startPoint(list, scope()); if (first) focusEl(first, true); }, 400);
       return false;
     }
     if (action === "menu") return false;
@@ -593,10 +627,11 @@ import "./savesync.js";
     if (!curr) {
       // Nothing chosen yet (or it went away in a re-render): start here, and
       // for a direction carry on from it.
-      curr = startPoint(list);
+      curr = startPoint(list, root);
       if (!curr) return false;
       focusEl(curr, true);
-      if (action === "confirm") return true;
+      // In a popup the first press lands on its main button and stops there.
+      if (action === "confirm" || root !== document.body) return true;
     }
     if (action === "confirm") { press(curr); return true; }
 
@@ -637,13 +672,52 @@ import "./savesync.js";
   document.addEventListener("keydown", (e) => {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     const t = e.target;
+    const dir = KEY_DIRS[e.key];
+    // Back (Escape, a TV remote's Back) closes only the topmost popup: the film
+    // sheet also listens for Escape, so one press closed the quality picker
+    // and the sheet behind it (2026-11-02). Synthetic Escapes (from back()
+    // itself) pass through untouched.
+    if (e.key === "Escape" && e.isTrusted && !typing(t)) {
+      const root = scope();
+      if (root !== document.body && root.matches(".nxw-pop, .nx-playmode-modal")) {
+        e.preventDefault();
+        e.stopPropagation();
+        back(root, {}, current(root));
+        return;
+      }
+    }
+    // In a one-line text box a TV remote (arrow keys only) was trapped: the
+    // arrows moved the text cursor and nothing could leave the box. Up and
+    // down now always move on; left and right move the cursor until it
+    // reaches an end, then move on (2026-11-02).
+    if (dir && t && t.tagName === "INPUT" && typing(t)) {
+      if (document.getElementById("ejs-game-container") || window.__nxGameOpen) return;
+      if (dir === "left" || dir === "right") {
+        try {
+          const atStart = t.selectionStart === 0 && t.selectionEnd === 0;
+          const atEnd = t.selectionStart === t.value.length;
+          if ((dir === "left" && !atStart) || (dir === "right" && !atEnd)) return;
+        } catch { /* no cursor (number boxes): move on */ }
+      }
+      t.blur();
+      lastFocused = t;
+      if (window.__nxGamepadNav(dir, {})) e.preventDefault();
+      return;
+    }
     if (typing(t) || (t && (t.tagName === "SELECT" || t.isContentEditable || (t.tagName === "INPUT" && /^(range|radio)$/i.test(t.type)) || t.closest?.('[role="slider"], [role="listbox"], [role="menu"], [data-keys-own]')))) return;
     if (document.getElementById("ejs-game-container") || window.__nxGameOpen || bigVideo()) return;
-    const dir = KEY_DIRS[e.key];
     if (dir) { if (window.__nxGamepadNav(dir, {})) e.preventDefault(); return; }
     // Enter on a highlighted card that isn't a button itself (buttons and
     // links already open on Enter).
-    if (e.key === "Enter" && t && t.classList?.contains(FOCUS_CLS) && !t.matches('button, a[href], input, textarea')) { e.preventDefault(); press(t); }
+    // A highlighted film card is often not focusable itself (a div), so
+    // Enter arrives on the page body: it opens the highlighted item anyway.
+    if (e.key === "Enter") {
+      const f = document.querySelector("." + FOCUS_CLS);
+      if (!f || (t !== f && t !== document.body && t !== document.documentElement)) return;
+      if (t === f && f.matches('button, a[href], input, textarea, select')) return; // opens itself
+      e.preventDefault();
+      press(f);
+    }
   });
 
   // Rows that scroll sideways. Found from what's under the mouse (cached per

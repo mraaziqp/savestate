@@ -547,6 +547,16 @@ shell = patch(shell, "connections is admin-only in the menu", `addgames:"manage_
 shell = patch(shell, "connections title", `connections:"Connections",`, `ql={addgames:"Add games",`, `ql={connections:"Connections",addgames:"Add games",`);
 shell = patch(shell, "add games is known", `"minigames","help","addgames"`, `"household","receipts","minigames","help"]`, `"household","receipts","minigames","help","addgames"]`);
 shell = patch(shell, "connections is known", `"help","addgames","connections"]`, `"minigames","help","addgames"]`, `"minigames","help","addgames","connections"]`);
+// The sidebar's own arrow keys (up/down = next section) ran on every press,
+// even ones the page's navigation had used (boot.js marks those handled): on
+// a TV remote each press of Down on Discover switched to the next section, so
+// nothing below the first row could be reached (2026-11-02).
+shell = patch(shell, "sidebar keys yield", `c=v=>{if(v.defaultPrevented||m(v.target))return;`, `c=v=>{if(m(v.target))return;`, `c=v=>{if(v.defaultPrevented||m(v.target))return;`);
+// The shell's own keyboard-to-controller listener (arrow keys and Enter as
+// controller presses) ran the navigation a second time for every press
+// boot.js had already handled: on a TV remote each press moved two steps,
+// and a film's popup opened straight onto its second row (2026-11-02).
+shell = patch(shell, "key presses once", `function Sn(t){if(t.defaultPrevented)return;const a=t.target;`, `function Sn(t){const a=t.target;`, `function Sn(t){if(t.defaultPrevented)return;const a=t.target;`);
 
 // Tabs the menu offers but deep links (?tab=) and in-app navigation refused.
 shell = patch(shell, "known tabs", `"matchmaker","music","multiplayer","remoteplay","ai"`,
