@@ -109,7 +109,20 @@ const EXCLUDES = [
 // game. It waits for a later run instead.
 const SETTLE = "30m";
 const SETTLE_MS = 30 * 60_000;
-const excludeArgs = () => [...EXCLUDES.flatMap((e) => ["--exclude", e]), `--min-age=${SETTLE}`];
+// Videos not worth Drive space (owner, 2026-11-02: "don't upload unnecessary
+// videos"): game replays and captures, screen and OBS recordings, WhatsApp
+// forwards, meeting recordings, release samples and trailers. Camera videos,
+// films and shows still go. Matched without regard to case; the check against
+// Drive uses the same list, so a skipped clip is never "missing".
+const V = "{mp4,mkv,mov,avi,webm,wmv,flv,m4v,ts,3gp}";
+const CLIP_EXCLUDES = [
+  `*_replay_*.${V}`, `**/radeon/**.${V}`, `**/Captures/**.${V}`, `**/Screen Recordings/**.${V}`, `**/ScreenRecord*/**.${V}`,
+  `unknown_20*.${V}`, `*Meeting Recording*.${V}`, `* - Google Chrome *.${V}`,
+  `[12][0-9][0-9][0-9]-[01][0-9]-[0-3][0-9] [0-2][0-9]-[0-5][0-9]-[0-5][0-9].${V}`,
+  `*WhatsApp Video*.${V}`, `VID-20[0-9][0-9][01][0-9][0-3][0-9]-WA[0-9]*.${V}`, `**/WhatsApp*/**.${V}`,
+  `*sample*.${V}`, `**/Sample/**`, `**/Samples/**`, `**/Trailers/**`, `*-trailer.${V}`, `*.trailer.${V}`,
+];
+const excludeArgs = () => ["--ignore-case", ...[...EXCLUDES, ...CLIP_EXCLUDES].flatMap((e) => ["--exclude", e]), `--min-age=${SETTLE}`];
 const LOCAL_DRIVES = "CDEFGH".split("").map((d) => `${d}:`);
 const isLocalFs = (fs_: string) => /^[A-Za-z]:$/.test(fs_);
 /** A member's own connected drive: "u_<user id without dashes>_<n>". */
@@ -586,7 +599,9 @@ export function createDrives(deps: DrivesDeps) {
       // ROM and music folders are thousands of small files, where Drive's
       // per-file overhead, not the line, sets the pace: send more at once.
       // --fast-list reads the folder on Drive in a few big requests.
-      `--transfers=${job.kind === "movies" || job.kind === "tv" ? 4 : 8}`, "--checkers=16", "--fast-list", "--drive-chunk-size=64M",
+      // Films and series are big files: 128 MB pieces send each in fewer,
+      // longer requests (4 at once = 512 MB of buffer at most).
+      `--transfers=${job.kind === "movies" || job.kind === "tv" ? 4 : 8}`, "--checkers=16", "--fast-list", `--drive-chunk-size=${job.kind === "movies" || job.kind === "tv" ? "128M" : "64M"}`,
       "--retries=10", "--low-level-retries=20", "--use-json-log", "--log-level=NOTICE", "--stats=4s", "--stats-log-level=NOTICE",
       ...excludeArgs(), ...dupeArgs(job)];
     const proc = spawn(bin, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
