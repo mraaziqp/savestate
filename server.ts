@@ -6244,6 +6244,11 @@ async function startServer() {
   // Watching, listening, playing or opening the app counts; a background tab
   // polling for status does not. Long single-request streams count while open.
   let siteActiveAt = 0, openStreams = 0, lastActivity = "";
+  // HLS plays as many short segment requests, so openStreams was 0 most of the
+  // time someone watched and uploads ran at the "browsing" share meanwhile.
+  // A film's segment or range request marks someone watching for 45 s.
+  let watchingAt = 0;
+  const watchingNow = () => openStreams > 0 || Date.now() - watchingAt < 45_000;
   // A game being fetched to play counts too: someone is waiting on it, and a
   // 16 MB game took over a minute behind a folder copy using the line.
   const STREAM_PATHS = /^\/api\/(media\/(stream|file|hls\/)|music\/stream|stream\/(feed|hls\/|gdrive\/|media\/)|emulator\/(native-core|bios\/serve)|roms\/|games\/[^/]+\/(download|download-rom|stream|rom))/;
@@ -6261,6 +6266,11 @@ async function startServer() {
       siteActiveAt = Date.now();
       lastActivity = `${req.method} ${req.path.slice(0, 80)} ${String(req.headers["user-agent"] ?? "").slice(0, 60)}`;
       if (wasIdle) { try { drives.applyRate(); } catch { /* not ready yet */ } }
+      if (/^\/api\/media\/(hls\/segment|stream)/.test(req.path) || (req.path === "/api/media/file" && req.headers.range)) {
+        const was = watchingNow();
+        watchingAt = Date.now();
+        if (!was) { try { drives.applyRate(); } catch { /* not ready yet */ } }
+      }
       if (stream && /^\/api\/(media\/(stream|file)|music\/stream|stream\/feed)/.test(req.path)) {
         openStreams++;
         res.once("close", () => { openStreams = Math.max(0, openStreams - 1); siteActiveAt = Date.now(); });
@@ -6473,7 +6483,7 @@ async function startServer() {
     callerOf: (req) => access.callerOf(req),
     gameModeActive: () => holdBackground(),
     siteBusy: () => siteBusy(),
-    streamingNow: () => openStreams > 0,
+    streamingNow: () => watchingNow(),
     isIncomplete: (p: string) => incompleteFiles.get(p) != null,
     suggestions: async () => {
       const out: Array<{ label: string; source: string; kind: "roms" | "music" | "movies" | "files"; dest: string; bytes?: number }> = [];
@@ -22720,7 +22730,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   });
 
   // ── Video format & capability probing ────────────────────────────────────
-  const _videoFormatCache = new Map<string, { codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number; ts: number }>();
+  const _videoFormatCache = new Map<string, { codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number; hdr?: boolean; ts: number }>();
 
   // ── Persistent probe cache ────────────────────────────────────────────────
   // probeVideoFormat() runs ffprobe against a file on the Google Drive mount,
@@ -22756,12 +22766,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     void writeFile(PROBE_CACHE_FILE, JSON.stringify(_probeDisk)).catch(() => {});
   }, 20_000).unref?.();
   async function probeVideoFormat(target: string) {
-    const EMPTY_FMT = { codec: "", pixFmt: "", width: 0, height: 0, is10Bit: false, duration: 0, audioCodec: "", audioChannels: 0 };
+    const EMPTY_FMT = { codec: "", pixFmt: "", width: 0, height: 0, is10Bit: false, duration: 0, audioCodec: "", audioChannels: 0, hdr: false };
     const cached = _videoFormatCache.get(target);
     if (cached && Date.now() - cached.ts < 3_600_000) return cached;
 
     const ck = await probeCacheKey(target);
-    if (ck && _probeDisk[ck]) {
+    // Entries from before HDR was probed are probed again once.
+    if (ck && _probeDisk[ck] && typeof _probeDisk[ck].hdr === "boolean") {
       const hit = { ..._probeDisk[ck], ts: Date.now() };
       _videoFormatCache.set(target, hit);
       if (hit.duration > 0) _mediaDurationCache.set(target, { duration: hit.duration, ts: Date.now() });
@@ -22769,14 +22780,14 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
     try {
       const { execFile } = await import("child_process");
-      const fmt = await new Promise<{ codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number }>((resolve) => {
+      const fmt = await new Promise<{ codec: string; pixFmt: string; width: number; height: number; is10Bit: boolean; duration: number; audioCodec: string; audioChannels: number; hdr: boolean }>((resolve) => {
         // Audio is probed alongside video (no -select_streams filter) so the
         // stream handler can tell whether the existing track is already in a
         // form browsers play directly — re-encoding AAC to AAC burns CPU on
         // every stream and loses a generation of quality for nothing.
         execFile(FFPROBE_BIN, [
           "-v", "quiet",
-          "-show_entries", "stream=codec_name,codec_type,pix_fmt,width,height,channels,duration:format=duration",
+          "-show_entries", "stream=codec_name,codec_type,pix_fmt,width,height,channels,duration,color_transfer:format=duration",
           "-of", "json",
           target,
         ], { timeout: 10000 }, (err, stdout) => {
@@ -22794,7 +22805,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
             const duration = parseFloat(data?.format?.duration) || parseFloat(v?.duration) || 0;
             const audioCodec = String(a?.codec_name ?? "").toLowerCase();
             const audioChannels = parseInt(a?.channels ?? "0", 10) || 0;
-            resolve({ codec, pixFmt, width, height, is10Bit, duration, audioCodec, audioChannels });
+            const hdr = /^(smpte2084|arib-std-b67)$/i.test(String(v?.color_transfer ?? ""));
+            resolve({ codec, pixFmt, width, height, is10Bit, duration, audioCodec, audioChannels, hdr });
           } catch {
             resolve(EMPTY_FMT);
           }
@@ -22807,8 +22819,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       if (ck && fmt.duration > 0) { _probeDisk[ck] = fmt; _probeDirty = true; }
       return fmt;
     } catch {
-      return { codec: "", pixFmt: "", width: 0, height: 0, is10Bit: false, duration: 0, audioCodec: "", audioChannels: 0 };
+      return { codec: "", pixFmt: "", width: 0, height: 0, is10Bit: false, duration: 0, audioCodec: "", audioChannels: 0, hdr: false };
     }
+  }
+
+  // The hot cache's copy when there is one. pick() without a stat runs a
+  // synchronous stat on the Drive mount, which froze the whole server while
+  // Drive was slow; this stats asynchronously first.
+  async function localCopy(target: string): Promise<string> {
+    const st = await stat(target).catch(() => null);
+    return st ? hotCache.pick(target, st) : target;
   }
 
   app.get("/api/media/stream", async (req, res) => {
@@ -22839,18 +22859,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const _lad = qualityLadder(quality, videoFmt.width);
     const targetWidth = _lad.width;
 
-    const needsVideoTranscode = !isH264_8bit || quality !== "auto";
+    const needsVideoTranscode = !isH264_8bit || quality !== "auto" || !!videoFmt.hdr;
 
     const useHw = needsVideoTranscode ? await hwEncodeAvailable() : false;
     const encA = videoEncodeArgs({
-      hw: useHw, quality, srcWidth: videoFmt.width, srcHeight: videoFmt.height,
+      hw: useHw, quality, srcWidth: videoFmt.width, srcHeight: videoFmt.height, hdr: videoFmt.hdr,
     });
 
     const ffmpegArgs = [
       "-hide_banner", "-loglevel", "error",
       ...(needsVideoTranscode ? encA.pre : []),
       ...(startSec > 0 ? ["-ss", String(startSec)] : []),
-      "-i", hotCache.pick(target),
+      "-i", await localCopy(target),
       "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
     ];
 
@@ -23196,7 +23216,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }
 
   /** Probe once, at first use: does a real VAAPI H.264 encode actually run? */
+  let _hdrTone: "placebo" | "zscale" | null = null;
+  async function hdrToneProbe() {
+    if (_hdrTone) return _hdrTone;
+    const ok = await probeEncode(["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25:duration=0.2",
+      "-vf", "libplacebo=w=320:h=240:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:format=yuv420p", "-c:v", "rawvideo"]);
+    _hdrTone = ok ? "placebo" : "zscale";
+    log("INFO", `HDR tone mapping: ${ok ? "libplacebo (GPU)" : "zscale (CPU)"}`, "media");
+    return _hdrTone;
+  }
   async function hwEncodeAvailable(): Promise<boolean> {
+    if (_hdrTone === null) await hdrToneProbe();
     if (_hwEncodeAvailable !== null) return _hwEncodeAvailable;
     if (process.env.NEXUS_DISABLE_HW_TRANSCODE === "1") {
       _hwEncodeAvailable = false;
@@ -23276,9 +23306,36 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
    * computed here and rounded to an even number (H.264 requires even dims).
    */
   function videoEncodeArgs(opts: {
-    hw: boolean; quality: string; srcWidth: number; srcHeight: number; keyframes?: boolean;
+    hw: boolean; quality: string; srcWidth: number; srcHeight: number; keyframes?: boolean; hdr?: boolean;
   }): { pre: string[]; post: string[] } {
     const lad = qualityLadder(opts.quality, opts.srcWidth);
+    // HDR films (HDR10, HLG, Dolby Vision) were converted to SDR with no tone
+    // mapping and played grey and flat. libplacebo does it on the GPU (5.8x
+    // realtime at 1080p on the RTX 3060 Ti); zscale on the CPU (3.3x) where
+    // there's no Vulkan.
+    if (opts.hdr && _hdrTone === "placebo" && _hwKind !== "vaapi") {
+      const sw = opts.srcWidth > 0 ? opts.srcWidth : 1920;
+      const sh = opts.srcHeight > 0 ? opts.srcHeight : 1080;
+      const outW = Math.min(lad.width, sw);
+      const outH = Math.max(2, Math.round((sh * outW) / sw / 2) * 2);
+      const vf = `libplacebo=w=${outW}:h=${outH}:tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:format=yuv420p`;
+      const base = videoEncodeArgs({ ...opts, hdr: false });
+      const post = [...base.post];
+      const i = post.indexOf("-vf");
+      if (i >= 0) post.splice(i, 2, "-vf", vf);
+      const pf = post.indexOf("-pix_fmt");
+      if (pf >= 0) post.splice(pf, 2);
+      return { pre: ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk", ...base.pre], post };
+    }
+    if (opts.hdr && _hwKind !== "vaapi") {
+      const base = videoEncodeArgs({ ...opts, hdr: false });
+      const post = [...base.post];
+      const i = post.indexOf("-vf");
+      if (i >= 0) post[i + 1] = `${post[i + 1]},zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p`;
+      const pf = post.indexOf("-pix_fmt");
+      if (pf >= 0) post.splice(pf, 2);
+      return { pre: base.pre, post };
+    }
     if (!opts.hw) {
       return {
         pre: [],
@@ -23428,7 +23485,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // bytes (codec, channel layout, segment boundaries). v3: 5.1 audio is now
   // downmixed to stereo, because 6-channel AAC with an unknown layout made
   // Chrome fail decoder init and loop on "Reconnecting...".
-  const HLS_ENCODER_VERSION = "6";
+  // v7: HDR is tone-mapped.
+  const HLS_ENCODER_VERSION = "7";
 
   const HLS_FAST_START_COUNT = 3;    // how many short segments at the head
   const HLS_FAST_START_SECONDS = 2;  // their length
@@ -23463,7 +23521,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
    */
   function buildHlsSegment(
     target: string, quality: string, audioTrack: number, segN: number,
-    fmt: { width: number; height: number }, totalDur: number,
+    fmt: { width: number; height: number; hdr?: boolean }, totalDur: number,
   ): Promise<Buffer> {
     const segKey = hlsKey(target, quality, audioTrack, segN);
     const segCache = path.join(HLS_CACHE_DIR, `${segKey}.ts`);
@@ -23478,13 +23536,13 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       const segStart = sb.start;
       const encB = videoEncodeArgs({
         hw: await hwEncodeAvailable(), quality,
-        srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true,
+        srcWidth: fmt.width, srcHeight: fmt.height, keyframes: true, hdr: fmt.hdr,
       });
       const args = [
         "-hide_banner", "-loglevel", "error",
         ...encB.pre,
         "-ss", String(segStart),
-        "-i", hotCache.pick(target),
+        "-i", await localCopy(target),
         "-t", String(sb.dur),
         "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
         ...encB.post,
@@ -23562,7 +23620,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
   async function startHlsSession(
     target: string, quality: string, audioTrack: number, from: number,
-    fmt: { width: number; height: number }, totalDur: number,
+    fmt: { width: number; height: number; hdr?: boolean }, totalDur: number,
   ): Promise<HlsSession> {
     const key = sessionKey(target, quality, audioTrack);
     const old = hlsSessions.get(key);
@@ -23575,7 +23633,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const dir = path.join(HLS_SESSION_DIR, `${key}-${Date.now()}`);
     await mkdir(dir, { recursive: true });
     const startSec = segmentBounds(from, totalDur || Number.MAX_SAFE_INTEGER).start;
-    const enc = videoEncodeArgs({ hw: await hwEncodeAvailable(), quality, srcWidth: fmt.width, srcHeight: fmt.height });
+    const enc = videoEncodeArgs({ hw: await hwEncodeAvailable(), quality, srcWidth: fmt.width, srcHeight: fmt.height, hdr: fmt.hdr });
     // Keyframes exactly on the 6s grid so every segment boundary matches the
     // playlist. videoEncodeArgs' own -g / -force_key_frames are replaced.
     const post: string[] = [];
@@ -23587,7 +23645,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       "-hide_banner", "-loglevel", "error",
       ...enc.pre,
       "-ss", String(startSec),
-      "-i", hotCache.pick(target),
+      "-i", await localCopy(target),
       "-map", "0:v:0", "-map", `0:a:${audioTrack}?`,
       ...post,
       "-force_key_frames", `expr:gte(t,n_forced*${HLS_SEGMENT_SECONDS})`,
@@ -23650,7 +23708,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
    */
   async function getHlsSegmentViaSession(
     target: string, quality: string, audioTrack: number, n: number,
-    fmt: { width: number; height: number }, totalDur: number,
+    fmt: { width: number; height: number; hdr?: boolean }, totalDur: number,
   ): Promise<string> {
     const cachePath = path.join(HLS_CACHE_DIR, `${hlsKey(target, quality, audioTrack, n)}.ts`);
     if (existsSync(cachePath)) return cachePath;
@@ -23991,6 +24049,12 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
       if (servedFromCache) { sendCached(); prefetchAhead(n); }
       else {
+        // HDR: every ffmpeg pays ~2 s to start the GPU tone mapper, so the
+        // short opening segments one after another took 5-6 s each, slower
+        // than they play. The rest of the opening is built alongside this one.
+        if (fmt.hdr) {
+          for (let nn = n + 1; nn < Math.min(count, HLS_FAST_START_COUNT); nn++) buildSegment(nn).catch(() => {});
+        }
         const buf = await buildSegment(n);
         res.setHeader("Content-Type", "video/mp2t");
         res.setHeader("Cache-Control", "public, max-age=31536000, immutable");

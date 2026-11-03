@@ -444,12 +444,12 @@ import "./savesync.js";
   const FOCUSABLE = 'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="tab"], [role="link"], [role="option"], [role="menuitem"], [role="switch"], [role="checkbox"], [role="radio"], [tabindex]:not([tabindex="-1"]), [data-gameid], [data-card], [data-gpnav="1"]';
   const CARD = "[data-gameid], [data-card], .nx-game-card";
   const MODALS = '.nxplay, .nx-playmode-modal, .nx-detail, .nx-detail-wrap, .nxw-sheet-wrap, .nxw-pop, [role="dialog"], [aria-modal="true"], .nx-modal';
-  let lastFocused = null, lastPoint = null, lastMoveAt = 0;
+  let lastFocused = null, lastPoint = null, lastMoveAt = 0, pageFocus = null;
 
   function clearFocus() {
     document.querySelectorAll("." + FOCUS_CLS).forEach((el) => el.classList.remove(FOCUS_CLS));
   }
-  window.addEventListener("pointerdown", () => { clearFocus(); lastFocused = null; }, { passive: true });
+  window.addEventListener("pointerdown", () => { clearFocus(); lastFocused = null; pageFocus = null; }, { passive: true });
 
   // The part of the page the controller works in: the newest dialog, else all of it.
   function scope() {
@@ -568,6 +568,7 @@ import "./savesync.js";
     try { el.focus({ preventScroll: true, focusVisible: true }); } catch { /* not focusable: the outline still shows */ }
     try { el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: quick ? "instant" : "smooth" }); } catch { /* old browser */ }
     lastFocused = el;
+    if (scope() === document.body) pageFocus = el;
     const r = el.getBoundingClientRect();
     lastPoint = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   }
@@ -575,6 +576,9 @@ import "./savesync.js";
     const a = document.activeElement;
     if (a && a !== document.body && root.contains(a) && a.matches(FOCUSABLE)) return a;
     if (lastFocused && document.body.contains(lastFocused) && root.contains(lastFocused)) return lastFocused;
+    // Back from a popup: carry on from the card that opened it, not the top
+    // of the page (a film's page on Movies & TV, 2026-11-03).
+    if (root === document.body && pageFocus && document.body.contains(pageFocus) && navShown(pageFocus)) { focusEl(pageFocus, true); return pageFocus; }
     return null;
   }
   const typing = (el) => !!el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && !/^(button|submit|checkbox|radio|range|color|file|reset|image)$/i.test(el.type || "")));
@@ -586,6 +590,7 @@ import "./savesync.js";
     if (typing(el) || el.tagName === "SELECT") { try { el.focus(); } catch { /* ignore */ } if (el.tagName === "SELECT") { try { el.showPicker?.(); } catch { /* needs a gesture */ } } return; }
     target.click();
   }
+  let inBack = false;
   function back(root, ctx, curr) {
     if (typing(document.activeElement)) { const el = document.activeElement; el.blur(); focusEl(el, true); return true; }
     if (ctx?.te) { ctx.ce(null); return true; }
@@ -593,10 +598,19 @@ import "./savesync.js";
       const close = root.querySelector('[aria-label="Close" i], [aria-label^="Close" i], [data-close], .nxplay-close, [aria-label="Back" i]')
         // A popup with only a "Cancel" button (Discover's quality picker): that,
         // rather than Escape, which closes the whole film sheet behind it.
-        || [...root.querySelectorAll("button")].find((b) => /^(cancel|close|back|done)$/i.test(b.textContent.trim()) && navShown(b));
+        || [...root.querySelectorAll("button")].find((b) => /^(cancel|close|back|done)$/i.test(b.textContent.trim()) && navShown(b))
+        // An icon-only ✕ or ← with no label (a film's page on Movies & TV):
+        // Back left it open (2026-11-03).
+        || [...root.querySelectorAll("button")].find((b) => !b.textContent.trim() && b.querySelector("svg.lucide-x, svg.lucide-arrow-left, svg.lucide-chevron-left") && navShown(b));
       if (close && navShown(close)) { close.click(); return true; }
       window.dispatchEvent(new CustomEvent("nexus:play-close"));
-      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true }));
+      // The shell turns this Escape back into "cancel" and asks again: without
+      // the guard each answer sent another Escape, until the page ran out of
+      // stack (a film's Play / Download popup on Movies & TV, 2026-11-03).
+      if (inBack) return false;
+      inBack = true;
+      try { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true })); }
+      finally { inBack = false; }
       return true;
     }
     if (curr && !curr.closest("aside, nav")) {
@@ -612,7 +626,7 @@ import "./savesync.js";
     // Tabs and the menu: the shell knows their order.
     if (action === "lb" || action === "rb") {
       if (document.querySelector("[data-gpnav-scope]")) return true;
-      lastFocused = null; lastPoint = null; clearFocus();
+      lastFocused = null; lastPoint = null; pageFocus = null; clearFocus();
       setTimeout(() => { const list = stops(scope()); const first = startPoint(list, scope()); if (first) focusEl(first, true); }, 400);
       return false;
     }

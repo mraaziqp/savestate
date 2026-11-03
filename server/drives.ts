@@ -81,7 +81,7 @@ type OffloadJob = {
   /** Bytes of this folder that go to Drive (set by the duplicate check). */
   sendBytes?: number;
   /** Files already on Drive somewhere else in the archive (same name and size): not sent again. */
-  dupes?: { count: number; bytes: number; at: number; file: string; examples: string[] } | null;
+  dupes?: { count: number; bytes: number; at: number; file: string; examples: string[]; lowerQuality?: number; lowerBytes?: number } | null;
   /** Files changed in the last half hour (still downloading): left for a later run. */
   stillChanging?: { count: number; bytes: number; at: number } | null;
   /** The final check before this PC's copy may go (see runFinalCheck). */
@@ -178,7 +178,7 @@ export function createDrives(deps: DrivesDeps) {
     return null;
   }
 
-  let rcd: { proc: ChildProcess; url: string; auth: string } | null = null;
+  let rcd: { proc: ChildProcess; url: string; auth: string; rate?: string } | null = null;
   let rcdStarting: Promise<typeof rcd> | null = null;
   async function startRcd() {
     if (rcd && rcd.proc.exitCode === null) return rcd;
@@ -320,7 +320,12 @@ export function createDrives(deps: DrivesDeps) {
     const isRom = (j: OffloadJob) => (j.kind === "roms" || /roms/i.test(j.label) || /roms/i.test(j.source) ? 1 : 0);
     const left = (j: OffloadJob) => (j.stats.totalBytes ? Math.max(0, totalOf(j) - doneOf(j)) : 0);
     // One the owner moved up ("Up next") goes before the rest, followed by irreplaceable ROMs, then smallest remaining.
-    const next = jobs.filter((j) => j.status === "queued" && (copying.length === 0 || small(j))).sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
+    // Never two copies reading one disk: a hard disk serving two folders at
+    // once seeks between them and both crawl (E: at 6.5 MB/s, 100% busy, with
+    // PS2 essentials and ROMS (E) side by side, 2026-11-03).
+    const diskOf = (j: OffloadJob) => (/^([A-Za-z]):/.exec(j.source)?.[1] ?? j.source).toUpperCase();
+    const busyDisks = new Set(copying.map(diskOf));
+    const next = jobs.filter((j) => j.status === "queued" && (copying.length === 0 || small(j)) && !busyDisks.has(diskOf(j))).sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
     if (next) void runCopy(next);
   }
 
@@ -364,6 +369,8 @@ export function createDrives(deps: DrivesDeps) {
     return { queuedCount: count, message: `Started and queued ${count} upload job(s)`, runningId };
   }
   const restarting = new Set<string>();
+  /** Uploads whose rclone just started: its first count follows the last run's. */
+  const freshRun = new Set<string>();
   const RETRY_DELAYS = [5, 15, 60, 360].map((m) => m * 60_000);
   function failed(job: OffloadJob, why: string) {
     job.status = "failed";
@@ -401,13 +408,21 @@ export function createDrives(deps: DrivesDeps) {
   readFile(capacityFile, "utf8").then((t) => { capacity = Number(JSON.parse(t).bytesPerSecond) || 0; }).catch(() => {});
   function learnCapacity(speed: number) {
     if (!(speed > 0)) return;
-    const next = speed > capacity ? capacity * 0.7 + speed * 0.3 : capacity * 0.999 + speed * 0.001;
+    // One reading raises it by a quarter at most: bursts (files Drive copied
+    // on its own side, read-ahead buffers filling) once set it to 64 MB/s on
+    // a ~20 MB/s line, and "leave 60% for viewers" then capped nothing.
+    const sample = capacity > 0 ? Math.min(speed, capacity * 1.25) : speed;
+    const next = sample > capacity ? capacity * 0.7 + sample * 0.3 : capacity * 0.999 + sample * 0.001;
     if (Math.abs(next - capacity) / Math.max(1, capacity) > 0.02) {
       capacity = next;
       writeFile(capacityFile, JSON.stringify({ bytesPerSecond: Math.round(capacity), at: new Date().toISOString() })).catch(() => {});
     } else capacity = next;
   }
+  /** The line's upload speed in bytes/s: NEXUS_UPLINK_MBPS (megabits) when set, else learned. */
+  const lineSpeed = () => { const m = Number(process.env.NEXUS_UPLINK_MBPS); return m > 0 ? (m * 1e6) / 8 : capacity; };
+  /** The whole upload budget right now, shared by every upload (see share()). */
   function desiredRate(): string {
+    const capacity = lineSpeed();
     if (deps.gameModeActive?.()) return process.env.NEXUS_UPLOAD_BWLIMIT_GAMING?.trim() || "64k";
     const [from, to] = (process.env.NEXUS_UPLOAD_FULL_HOURS?.trim() || "1-7").split("-").map(Number);
     const h = new Date().getHours();
@@ -431,23 +446,41 @@ export function createDrives(deps: DrivesDeps) {
     }
     return capped;
   }
-  /** Apply the current limit to every running upload now (someone just arrived). */
-  function applyRate() {
-    const rate = desiredRate();
-    for (const [id, c] of jobRc) {
-      if (c.rate === rate) continue;
-      fetch(`${c.url}/core/bwlimit`, { method: "POST", headers: { Authorization: c.auth, "Content-Type": "application/json" }, body: JSON.stringify({ rate }) })
-        .then((r) => { if (r.ok) { c.rate = rate; deps.log("INFO", `Upload ${id}: speed limit now ${rate}`); } }).catch(() => {});
-    }
+  /**
+   * One transfer's part of a budget. The limit used to be given to each
+   * upload in full, so two uploads took twice the cap, and the shared rclone
+   * (video prep's copies, a browser upload's last step) had none: it sent
+   * ~10 MB/s to Drive while someone watched (2026-11-02).
+   */
+  function share(rate: string): string {
+    const m = /^(\d+(?:\.\d+)?)([kKmM])$/.exec(rate);
+    if (!m) return rate;
+    const kib = Number(m[1]) * (/m/i.test(m[2]) ? 1024 : 1);
+    const ways = Math.max(1, jobRc.size + (rcd ? 1 : 0));
+    return `${Math.max(64, Math.round(kib / ways))}k`;
   }
-  const bwTimer = setInterval(() => {
-    const rate = desiredRate();
-    for (const [id, c] of jobRc) {
-      if (c.rate === rate) continue;
-      fetch(`${c.url}/core/bwlimit`, { method: "POST", headers: { Authorization: c.auth, "Content-Type": "application/json" }, body: JSON.stringify({ rate }) })
-        .then((r) => { if (r.ok) { c.rate = rate; deps.log("INFO", `Upload ${id}: speed limit now ${rate}`); } }).catch(() => {});
-    }
-  }, 15_000);
+  /**
+   * The shared rclone's limit, as "upload:download". A browser upload being
+   * moved onto Drive runs there and goes flat out. While someone watches,
+   * video prep also gives way on downloads: it fetches whole films from Drive
+   * over the same line the film being watched is read from.
+   */
+  function rcdRate(): string {
+    if (handovers > 0) return "off";
+    const up = share(desiredRate());
+    if (deps.streamingNow?.()) return `${up}:${process.env.NEXUS_PREP_DOWN_WATCHING?.trim() || "2M"}`;
+    return up === "off" ? "off" : `${up}:off`;
+  }
+  const setLimit = (c: { url: string; auth: string; rate?: string }, rate: string, label: string) =>
+    fetch(`${c.url}/core/bwlimit`, { method: "POST", headers: { Authorization: c.auth, "Content-Type": "application/json" }, body: JSON.stringify({ rate }) })
+      .then((r) => { if (r.ok) { c.rate = rate; deps.log("INFO", `${label}: speed limit now ${rate}`); } }).catch(() => {});
+  /** Apply the current limits now (someone just arrived or left, an upload started). */
+  function applyRate() {
+    const rate = share(desiredRate());
+    for (const [id, c] of jobRc) if (c.rate !== rate) void setLimit(c, rate, `Upload ${id}`);
+    if (rcd && rcd.proc.exitCode === null) { const r = rcdRate(); if (rcd.rate !== r) void setLimit(rcd, r, "Shared rclone"); }
+  }
+  const bwTimer = setInterval(applyRate, 15_000);
   bwTimer.unref?.();
 
   function parseStats(job: OffloadJob, line: string) {
@@ -467,7 +500,11 @@ export function createDrives(deps: DrivesDeps) {
       const win = (job.speedWin ??= []);
       if (win.length && bytes < win[win.length - 1][1]) win.length = 0; // rclone restarted its count
       // A new run after a restart counts from 0: keep what the last run sent.
-      if (bytes < job.stats.bytes && job.stats.bytes > 0) job.carriedBytes = (job.carriedBytes ?? 0) + job.stats.bytes;
+      // Only then: rclone's count also dips when a file is retried, and every
+      // dip was added (PS2 essentials showed 543 TB carried, 2026-11-03).
+      if (freshRun.delete(job.id) && job.stats.bytes > 0) {
+        job.carriedBytes = Math.min((job.carriedBytes ?? 0) + job.stats.bytes, job.sendBytes || Number.MAX_SAFE_INTEGER);
+      }
       win.push([now, bytes]);
       while (win.length > 2 && now - win[0][0] > 5 * 60_000) win.shift();
       const span = (now - win[0][0]) / 1000;
@@ -486,7 +523,17 @@ export function createDrives(deps: DrivesDeps) {
       };
       save();
     } else if (entry?.level === "error" && entry?.msg) {
-      job.lastError = String(entry.msg).slice(0, 300);
+      // Google's upload URLs (~280 characters of query) filled the whole
+      // message and cut off the reason, e.g. a quota or a dropped connection.
+      job.lastError = String(entry.msg).replace(/(https?:\/\/[^\s"?]+)\?[^\s"]*/g, "$1").slice(0, 400);
+      // A disk with no free space at all refuses even reads on Windows
+      // ("There is not enough space on the disk"): E: at 0 GB failed every
+      // PS2 file over and over while the page showed only a Google URL.
+      if (/not enough space on the disk/i.test(job.lastError)) {
+        const drive = /^([A-Za-z]:)/.exec(job.source)?.[1] ?? "The disk";
+        job.lastError = `${drive} is completely full, and Windows won't read files from a full disk. Free some space on ${drive} and this upload carries on by itself.`;
+      }
+      deps.log("WARN", `Upload ${job.id}: ${job.lastError}`);
       save();
     }
   }
@@ -545,12 +592,43 @@ export function createDrives(deps: DrivesDeps) {
     return out;
   }
   const globEscape = (p: string) => p.replace(/[\\*?[\]{}]/g, (c) => `\\${c}`);
+  /**
+   * Which film or episode a video file is, and its picture quality, from the
+   * release name: "Gantz.O.2016.1080p..." -> film|gantz o|2016 at rank 3.
+   * Strict on purpose: a film needs its year and an episode its SxxEyy, and
+   * the resolution must be in the name, or nothing is concluded.
+   */
+  function videoId(name: string, where = ""): { id: string; rank: number } | null {
+    if (!/\.(mkv|mp4|m4v|avi|mov|wmv|ts|m2ts|webm)$/i.test(name)) return null;
+    const base = name.replace(/\.[^.]+$/, "").replace(/[._]+/g, " ");
+    const rank = /2160p|\b4k\b|\buhd\b/i.test(base) ? 4 : /1080[pi]/i.test(base) ? 3 : /720p/i.test(base) ? 2 : /\b(480p|576p|dvdrip|sdtv)\b/i.test(base) ? 1 : 0;
+    if (!rank) return null;
+    const norm = (t: string) => t.toLowerCase().replace(/\([^)]*\)|\[[^\]]*\]/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+    const ep = /^(.*?)\bS(\d{1,2}) ?E(\d{1,3})\b/i.exec(base);
+    if (ep) { const show = norm(ep[1]); return show ? { id: `ep|${show}|${Number(ep[2])}|${Number(ep[3])}`, rank } : null; }
+    // Anything else that looks like an episode is never taken for a film:
+    // "[Erai-raws] Baki (2018) - 04 [1080p]" read as the film "Baki (2018)"
+    // made 26 episodes "copies" of one (2026-11-03).
+    if (/ - \d{1,4}(v\d)? |\b(episode|ep|e)\s?\d{1,4}\b|\bseason\b|\b\d{1,2}x\d{2}\b/i.test(base) || /(^|[\\/])(season|series|s\d{1,2})[^\\/]*[\\/]|tv shows/i.test(where)) return null;
+    const fy = /^(.*)[ (\[]((?:19|20)\d{2})[ )\]]/.exec(`${base} `); // the last year: "Blade Runner 2049 2017"
+    if (fy) { const title = norm(fy[1]); return title.length >= 2 ? { id: `film|${title}|${fy[2]}`, rank } : null; }
+    return null;
+  }
+
   async function findDupes(job: OffloadJob, bin: string) {
     const root = job.dest.split("/")[0] || job.dest;
     const [onDrive, here] = await Promise.all([listDrive(bin, job.remote, root), walkLocal(job.source)]);
     const dest = job.dest.replace(/\/+$/, "");
     const skip: string[] = []; const examples: string[] = [];
-    let bytes = 0;
+    let bytes = 0, lowerQuality = 0, lowerBytes = 0;
+    // The best copy of each film and episode already on Drive, by release name.
+    const best = new Map<string, { rank: number; path: string }>();
+    if (job.kind === "movies" || job.kind === "tv" || job.kind === "files") {
+      for (const [key, p] of onDrive) {
+        const v = videoId(key.slice(0, key.lastIndexOf("|")), p);
+        if (v && (best.get(v.id)?.rank ?? 0) < v.rank) best.set(v.id, { rank: v.rank, path: p });
+      }
+    }
     const recent = here.filter((f) => Date.now() - f.mtimeMs < SETTLE_MS || Boolean(deps.isIncomplete?.(path.join(job.source, f.rel))));
     job.stillChanging = recent.length ? { count: recent.length, bytes: recent.reduce((n, f) => n + f.size, 0), at: Date.now() } : null;
     if (recent.length) deps.log("INFO", `Upload ${job.id}: ${recent.length} file(s) changed in the last half hour or still downloading; they go in a later run`);
@@ -561,20 +639,32 @@ export function createDrives(deps: DrivesDeps) {
       if (recent.includes(f)) continue;
       if (f.size < 5 * 1024 * 1024) continue;
       const there = onDrive.get(`${f.name.toLowerCase()}|${f.size}`);
-      // Not on Drive, or at this job's own place (rclone skips those itself).
-      if (!there || there.toLowerCase() === `${dest}/${f.rel}`.toLowerCase()) continue;
-      skip.push(`- /${globEscape(f.rel)}`);
-      bytes += f.size;
-      if (examples.length < 20) examples.push(`${f.rel} = ${there}`);
+      const own = `${dest}/${f.rel}`.toLowerCase();
+      if (there && there.toLowerCase() !== own) {
+        skip.push(`- /${globEscape(f.rel)}`);
+        bytes += f.size;
+        if (examples.length < 20) examples.push(`${f.rel} = ${there}`);
+        continue;
+      }
+      // Another release of the same film or episode, at the same or a better
+      // picture, is already on Drive: this one adds nothing to the library
+      // (a 720p copy beside the 1080p one). Kept on this PC, never deleted.
+      const v = best.size ? videoId(f.name, `${job.source}/${f.rel}`) : null;
+      const better = v ? best.get(v.id) : undefined;
+      if (v && better && better.rank >= v.rank && better.path.toLowerCase() !== own) {
+        skip.push(`- /${globEscape(f.rel)}`);
+        bytes += f.size; lowerQuality++; lowerBytes += f.size;
+        if (examples.length < 20) examples.push(`${f.rel} (same or better copy on Drive: ${better.path})`);
+      }
     }
     await mkdir(reportsDir, { recursive: true });
     const file = path.join(reportsDir, `${job.id}.dupes.txt`);
     await writeFile(file, skip.join("\n") + (skip.length ? "\n" : ""));
-    job.dupes = { count: skip.length, bytes, at: Date.now(), file, examples };
+    job.dupes = { count: skip.length, bytes, at: Date.now(), file, examples, lowerQuality, lowerBytes };
     // What this folder really has to send (for progress): everything here,
     // less duplicates and files still being written.
     job.sendBytes = Math.max(0, here.reduce((n, f) => n + f.size, 0) - bytes - (job.stillChanging?.bytes ?? 0));
-    if (skip.length) deps.log("INFO", `Upload ${job.id}: ${skip.length} file(s), ${gbs(bytes)}, are already on Drive elsewhere; not sending them again`);
+    if (skip.length) deps.log("INFO", `Upload ${job.id}: ${skip.length} file(s), ${gbs(bytes)}, are already on Drive elsewhere${lowerQuality ? ` (${lowerQuality} as a same-or-better release, ${gbs(lowerBytes)})` : ""}; not sending them again`);
     saveNow();
   }
   const dupeArgs = (job: OffloadJob) => (job.dupes?.count && existsSync(job.dupes.file) ? [`--exclude-from=${job.dupes.file}`] : []);
@@ -601,8 +691,11 @@ export function createDrives(deps: DrivesDeps) {
     deps.log("INFO", `Upload ${job.id}: ${job.source} -> ${job.remote}:${job.dest}`);
     const rcPort = 6100 + Math.floor(Math.random() * 800);
     const rcPass = crypto.randomBytes(12).toString("hex");
-    const rate = desiredRate();
-    jobRc.set(job.id, { url: `http://127.0.0.1:${rcPort}`, auth: "Basic " + Buffer.from(`nx:${rcPass}`).toString("base64"), rate });
+    jobRc.set(job.id, { url: `http://127.0.0.1:${rcPort}`, auth: "Basic " + Buffer.from(`nx:${rcPass}`).toString("base64"), rate: "" });
+    // This upload counts in the split from the start; the others follow below.
+    const rate = share(desiredRate());
+    jobRc.get(job.id)!.rate = rate;
+    setTimeout(applyRate, 2000).unref?.();
     const args = ["copy", job.source, `${job.remote}:${job.dest}`, `--bwlimit=${rate}`, "--rc", `--rc-addr=127.0.0.1:${rcPort}`, "--rc-user=nx", `--rc-pass=${rcPass}`,
       // ROM and music folders are thousands of small files, where Drive's
       // per-file overhead, not the line, sets the pace: send more at once.
@@ -614,6 +707,7 @@ export function createDrives(deps: DrivesDeps) {
       ...excludeArgs(), ...dupeArgs(job)];
     const proc = spawn(bin, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     running.set(job.id, proc);
+    freshRun.add(job.id);
     let buf = "";
     const onData = (d: Buffer) => {
       buf += d.toString("utf8");
@@ -859,7 +953,7 @@ export function createDrives(deps: DrivesDeps) {
     queueAfter: j.status === "queued" ? (order.indexOf(j) === 0 ? runningNow?.label ?? null : order[order.indexOf(j) - 1]?.label ?? null) : null,
     actions: j.status === "paused" ? ["resume", "next"] : j.status === "deleting" ? [] : j.status === "queued" ? ["pause", "next"] : ["pause"],
     progress: j.status === "copying" && j.stats.totalBytes ? doneOf(j) / totalOf(j) : j.status === "verifying" && j.stats.totalChecks ? j.stats.checks / j.stats.totalChecks : null,
-    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(doneOf(j))} of ${gbs(totalOf(j))}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
+    detail: j.status === "copying" ? `Uploading to ${j.remote}: ${gbs(doneOf(j))} of ${gbs(totalOf(j))}${j.counting ? " so far (still counting what's left)" : ""}${j.carriedBytes ? " · carried on after a restart" : ""}${j.stats.checks ? ` · ${j.stats.checks} file(s) already on Drive skipped` : ""}${j.dupes?.count ? ` · ${j.dupes.count} duplicate(s) already on Drive elsewhere (${gbs(j.dupes.bytes)}) not sent again${j.dupes.lowerQuality ? `, ${j.dupes.lowerQuality} of them a lower-or-same quality release of a film or episode Drive has` : ""}` : ""}${j.stillChanging?.count ? ` · ${j.stillChanging.count} file(s) still downloading, sent in a later run` : ""}${deps.gameModeActive?.() ? " · held back while a game is running on this PC (carries on at full speed when you close it)" : jobRc.get(j.id)?.rate && jobRc.get(j.id)!.rate !== "off" ? ` · limited to ${jobRc.get(j.id)!.rate}/s while the site is in use` : ""}`
       : j.status === "verifying" ? "Checking every file against Drive" : j.status === "deleting" ? "Freeing space on this PC" : j.status === "paused" ? "Paused. Press Continue to carry on where it stopped."
       : `Waiting for its turn: one upload at a time gets the whole connection, so each finishes sooner.${j.lastError ? ` Last time: ${j.lastError}.` : ""}`,
     speed: j.status === "copying" ? j.stats.speed : null, eta: j.status === "copying" ? j.stats.eta : null,
@@ -935,6 +1029,8 @@ export function createDrives(deps: DrivesDeps) {
       catch { jobs = []; }
     }
     for (const j of jobs) if (j.kind === "roms" && j.keepSynced === undefined) j.keepSynced = true;
+    // Counts inflated by the retry bug above can't be more than the folder.
+    for (const j of jobs) if (j.carriedBytes && j.sendBytes && j.carriedBytes > j.sendBytes) j.carriedBytes = 0;
     let resumed = 0;
     for (const j of jobs) {
       if (j.status === "copying" || j.status === "verifying") { j.status = "queued"; resumed++; }
@@ -972,6 +1068,9 @@ export function createDrives(deps: DrivesDeps) {
             const [pid, cmd = ""] = line.split("\t");
             const m = /\s(copy|check|sync)\s+"?([^"]+?)"?\s+"?[\w-]+:/i.exec(cmd);
             if (!m || !Number(pid) || !sources.includes(m[2].toLowerCase())) continue;
+            // Only the server's own (its rc login, or a report in its folder):
+            // a check someone ran by hand on the same folder was ended too.
+            if (!cmd.includes("--rc-user=nx") && !cmd.toLowerCase().includes(reportsDir.toLowerCase())) continue;
             try { process.kill(Number(pid)); deps.log("INFO", `Ended an upload left running by the last server (${m[1]} ${m[2]})`); } catch { /* gone */ }
           }
         });
