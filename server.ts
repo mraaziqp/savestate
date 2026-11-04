@@ -27562,8 +27562,12 @@ Loop
     res.setHeader("Connection", "keep-alive");
     activeMusicScan.sseClients.add(res);
     broadcastMusicScanProgress();
+    // Silent between scans, so Cloudflare reset the stream (QUIC protocol
+    // error in every page check, 2026-11-04); the other streams beat too.
+    const heartbeat = setInterval(() => { try { res.write(": heartbeat\n\n"); } catch { clearInterval(heartbeat); } }, 25_000);
 
     req.on("close", () => {
+      clearInterval(heartbeat);
       activeMusicScan.sseClients.delete(res);
     });
   });
