@@ -325,7 +325,11 @@ export function createDrives(deps: DrivesDeps) {
     // PS2 essentials and ROMS (E) side by side, 2026-11-03).
     const diskOf = (j: OffloadJob) => (/^([A-Za-z]):/.exec(j.source)?.[1] ?? j.source).toUpperCase();
     const busyDisks = new Set(copying.map(diskOf));
-    const next = jobs.filter((j) => j.status === "queued" && (copying.length === 0 || small(j)) && !busyDisks.has(diskOf(j))).sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
+    // A big copy that has used under a quarter of the line for 5 minutes does
+    // not hold up the next one either: ROMS (E), thousands of tiny files, sent
+    // 0.18 MB/s on a 15 MB/s line all night while 400 GB waited (2026-11-04).
+    const idleLine = (j: OffloadJob) => { const t = runAt.get(j.id); const line = lineSpeed(); return !!t && now - t > 5 * 60_000 && line > 0 && (j.stats.speed || 0) < line * 0.25; };
+    const next = jobs.filter((j) => j.status === "queued" && (copying.length === 0 || small(j) || idleLine(copying[0])) && !busyDisks.has(diskOf(j))).sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
     if (next) void runCopy(next);
   }
 
@@ -371,6 +375,8 @@ export function createDrives(deps: DrivesDeps) {
   const restarting = new Set<string>();
   /** Uploads whose rclone just started: its first count follows the last run's. */
   const freshRun = new Set<string>();
+  // When each running copy started (this run, not the job's first).
+  const runAt = new Map<string, number>();
   const RETRY_DELAYS = [5, 15, 60, 360].map((m) => m * 60_000);
   function failed(job: OffloadJob, why: string) {
     job.status = "failed";
@@ -707,6 +713,7 @@ export function createDrives(deps: DrivesDeps) {
       ...excludeArgs(), ...dupeArgs(job)];
     const proc = spawn(bin, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     running.set(job.id, proc);
+    runAt.set(job.id, Date.now());
     freshRun.add(job.id);
     let buf = "";
     const onData = (d: Buffer) => {

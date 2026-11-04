@@ -61,7 +61,21 @@ export function createHotCache(deps: HotCacheDeps) {
     try {
       const rows = JSON.parse(await readFile(indexFile(), "utf8")) as Entry[];
       for (const e of rows) if (e?.src && e.file && existsSync(e.file)) index.set(keyOf(e.src), e);
-    } catch { /* empty */ }
+    } catch { return; /* no readable index: sweeping would drop every copy */ }
+    // Copies the index never heard of (the server stopped before saving it)
+    // and half-done .part files: nothing counted them, so the cache grew past
+    // its size (35 GB in a 30 GB cache, 2026-11-04).
+    const known = new Set([...index.values()].map((e) => path.resolve(e.file).toLowerCase()));
+    let swept = 0;
+    for (const sub of await readdir(settings.dir).catch(() => [] as string[])) {
+      if (!/^[0-9a-f]{2}$/.test(sub)) continue;
+      for (const name of await readdir(path.join(settings.dir, sub)).catch(() => [] as string[])) {
+        const f = path.join(settings.dir, sub, name);
+        if (known.has(path.resolve(f).toLowerCase())) continue;
+        try { swept += (await stat(f)).size; await rm(f, { force: true }); } catch { /* in use */ }
+      }
+    }
+    if (swept) deps.log("INFO", `hot cache: removed ${(swept / GB).toFixed(1)} GB of copies it had lost track of`);
   }
   const saveIndex = async () => {
     if (!dirty) return;
@@ -210,6 +224,7 @@ export function createHotCache(deps: HotCacheDeps) {
           await utimes(file, st.atime, st.mtime).catch(() => {});
           index.set(k, { src: job.src, size: st.size, mtimeMs: st.mtimeMs, file, addedAt: Date.now(), usedAt: Date.now(), reason: job.reason, hits: 0 });
           dirty = true;
+          void saveIndex(); // now, not in 30 s: a restart in between lost the copy
           copiedBytes += st.size;
         } catch (e: any) {
           lastError = `${path.basename(job.src)}: ${String(e?.message ?? e).slice(0, 140)}`;

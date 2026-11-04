@@ -587,7 +587,16 @@ export function createVideoPrep(deps: VideoPrepDeps) {
     if (deps.converter) for (const r of [...rows.values()].filter((x) => x.status === "working")) await save(r.rel, { status: "queued", progress: null });
     if (!deps.converter) return;
     // The copies go to the Drive account the library lives on: no account, no work.
-    const { remotes = [] } = await deps.rc("config/listremotes").catch(() => ({ remotes: [] as string[] }));
+    // rclone not answering yet (a busy start: 41 s freezes on 2026-11-04) is
+    // asked again each minute; it used to switch video prep off until a restart.
+    let remotes: string[] | null = null;
+    for (let tries = 0; remotes === null; tries++) {
+      remotes = await deps.rc("config/listremotes").then((r: { remotes?: string[] }) => r.remotes ?? [], () => null);
+      if (remotes === null) {
+        if (tries === 2) deps.log("WARN", "video prep: rclone is not answering yet; trying again every minute");
+        await new Promise((r) => setTimeout(r, 60_000));
+      }
+    }
     if (!remotes.includes(deps.remote)) { deps.log("WARN", `video prep: rclone has no "${deps.remote}" account on this host; films are not prepared here`); return; }
     deps.log("INFO", `video prep: this host prepares films (${await pickEncoder()})`);
     void loop();
