@@ -1942,6 +1942,9 @@ function scannedRomName(filename: string, detected: string): { title: string; pl
   return { title, platform: detected, year: "", named: false };
 }
 
+// Cartridge systems whose ROM dumps are plain .bin files (no .cue).
+const BIN_CARTRIDGE_PLATFORMS = new Set(["atari2600", "atari5200", "atari7800", "genesis", "mastersystem", "gamegear", "32x", "colecovision", "intellivision", "odyssey2", "vectrex", "channelf"]);
+
 async function scanVaultDir(root: string) {
   const results: { filename: string; fullPath: string; relativePath: string; size: number }[] = [];
 
@@ -1957,9 +1960,16 @@ async function scanVaultDir(root: string) {
       return /\/ps3_game\/usrdir\/eboot\.bin$/.test(rel);
     }
 
+    // Geolith romsets hold .neo files that only the Geolith core loads; Neo Geo
+    // games launch with FinalBurn Neo, so these copies could never start (and
+    // the same games come in the pack's FBNeo/MAME sets anyway).
+    if (/(^|\/)geolith[^/]*\//.test(rel)) return false;
+
     // Raw .bin should usually be paired with a .cue sidecar (disc image).
-    // Skip random binary payload files when no cue exists.
-    if (ext === '.bin') {
+    // Skip random binary payload files when no cue exists — except in a
+    // cartridge console's folder, where a lone .bin is the ROM itself
+    // (every Atari 2600 dump is one).
+    if (ext === '.bin' && !BIN_CARTRIDGE_PLATFORMS.has(detectPlatform(path.basename(fullPath), relPath))) {
       const cuePath = fullPath.slice(0, -4) + '.cue';
       try {
         await fsAccess(cuePath);
@@ -3038,6 +3048,8 @@ function displayGameTitle(title: unknown, relativePath: unknown): string {
 function isPlayableEntry(game: { platform?: string; relativePath?: string }): boolean {
   const rel = String(game.relativePath ?? "").replace(/\\/g, "/").toLowerCase();
   if (/\.(rar|txt|nfo|jpg|png|url|md)$/.test(rel)) return false;
+  // Geolith .neo sets: FinalBurn Neo can't load them (see scanVaultDir).
+  if (/(^|\/)geolith[^/]*\//.test(rel)) return false;
   if (String(game.platform ?? "").toLowerCase() === "switch" && /(^|\/)(updates?|dlc)\//.test(rel)) return false;
   // Arcade BIOS sets sit next to the games (FinalBurn Neo looks for them
   // there) but aren't games: "Neo Geo System" was offered as one.
@@ -6775,6 +6787,11 @@ async function startServer() {
     // Read the disc header before trusting the path: this decides which folder
     // the file is physically moved into, so a wrong guess here is what actually
     // files a PS2 game under GAMECUBE (and then boots it with the wrong core).
+    // Only a file dropped loose into the library folder is sorted. Anything in
+    // a sub-folder is already filed — and "ROMS (E)" and the like are upload
+    // copies of a PC folder: moving their files out made each upload find them
+    // missing and send them again, which is how Drive filled with duplicates.
+    if (path.resolve(path.dirname(filePath)).toLowerCase() !== path.resolve(vaultRoot).toLowerCase()) return filePath;
     const platform = await detectPlatformWithHeader(path.basename(filePath), relForDetect, filePath);
     if (platform === "unknown") return filePath;
     const platformDir = path.join(vaultRoot, platform.toUpperCase());
