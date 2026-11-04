@@ -328,7 +328,12 @@ export function createDrives(deps: DrivesDeps) {
     // A big copy that has used under a quarter of the line for 5 minutes does
     // not hold up the next one either: ROMS (E), thousands of tiny files, sent
     // 0.18 MB/s on a 15 MB/s line all night while 400 GB waited (2026-11-04).
-    const idleLine = (j: OffloadJob) => { const t = runAt.get(j.id); const line = lineSpeed(); return !!t && now - t > 5 * 60_000 && line > 0 && (j.stats.speed || 0) < line * 0.25; };
+    // Still looking for duplicates (no rclone yet) for 3 minutes counts as idle too.
+    const idleLine = (j: OffloadJob) => {
+      if (!running.has(j.id)) return !!j.lastProgressAt && now - j.lastProgressAt > 3 * 60_000;
+      const t = runAt.get(j.id); const line = lineSpeed();
+      return !!t && now - t > 5 * 60_000 && line > 0 && (j.stats.speed || 0) < line * 0.25;
+    };
     const next = jobs.filter((j) => j.status === "queued" && (copying.length === 0 || small(j) || idleLine(copying[0])) && !busyDisks.has(diskOf(j))).sort((a, b) => (b.upNextAt ?? 0) - (a.upNextAt ?? 0) || isRom(b) - isRom(a) || left(a) - left(b))[0];
     if (next) void runCopy(next);
   }
@@ -378,6 +383,9 @@ export function createDrives(deps: DrivesDeps) {
   // When each running copy started (this run, not the job's first).
   const runAt = new Map<string, number>();
   const RETRY_DELAYS = [5, 15, 60, 360].map((m) => m * 60_000);
+  const keepFree = () => (Number(process.env.NEXUS_DRIVE_KEEP_FREE_GB) || 60) * 1024 ** 3;
+  const driveFullMsg = (keep: number, free?: number) =>
+    `Google Drive is nearly full${free !== undefined ? ` (${Math.floor(free / 1024 ** 3)} GB free)` : ""}. Uploads stop with ${Math.round(keep / 1024 ** 3)} GB left so phone backups and your own uploads still fit; free some space on Drive and this carries on by itself.`;
   function failed(job: OffloadJob, why: string) {
     job.status = "failed";
     job.lastError = why;
@@ -691,9 +699,21 @@ export function createDrives(deps: DrivesDeps) {
     job.lastProgressAt = Date.now();
     if (job.lastError !== "Stalled; restarted automatically") job.lastError = null;
     saveNow();
-    await findDupes(job, bin).catch((e) => deps.log("WARN", `Upload ${job.id}: duplicate check skipped: ${e?.message ?? e}`));
+    // At most 5 minutes: walking E:\ROMS inside the server hung for over 10
+    // (2026-11-04) while the upload sat at "copying" with nothing sent.
+    let dupeTimer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      findDupes(job, bin),
+      new Promise((_, reject) => { dupeTimer = setTimeout(() => reject(new Error("it took over 5 minutes")), 5 * 60_000); }),
+    ]).catch((e) => deps.log("WARN", `Upload ${job.id}: duplicate check skipped: ${e?.message ?? e}`)).finally(() => clearTimeout(dupeTimer));
     if (job.status !== "copying") return; // paused or removed while looking
     if (deps.pausedAll?.()) { job.status = "queued"; saveNow(); return; } // Pause all pressed meanwhile
+    // A full Drive is everyone's problem: phone backups and people's own
+    // uploads fail too. Background copies stop short of the space kept free
+    // (381 GB free on Drive for 631 GB queued, 2026-11-04).
+    const keep = keepFree();
+    const free = await rc<{ free?: number }>("operations/about", { fs: `${job.remote}:` }, 30_000).then((a) => (typeof a?.free === "number" ? a.free : null), () => null);
+    if (free !== null && free < keep + 1024 ** 3) { failed(job, driveFullMsg(keep, free)); return saveNow(); }
     deps.log("INFO", `Upload ${job.id}: ${job.source} -> ${job.remote}:${job.dest}`);
     const rcPort = 6100 + Math.floor(Math.random() * 800);
     const rcPass = crypto.randomBytes(12).toString("hex");
@@ -710,6 +730,9 @@ export function createDrives(deps: DrivesDeps) {
       // longer requests (4 at once = 512 MB of buffer at most).
       `--transfers=${job.kind === "movies" || job.kind === "tv" ? 4 : 8}`, "--checkers=16", "--fast-list", `--drive-chunk-size=${job.kind === "movies" || job.kind === "tv" ? "128M" : "64M"}`,
       "--retries=10", "--low-level-retries=20", "--use-json-log", "--log-level=NOTICE", "--stats=4s", "--stats-log-level=NOTICE",
+      // Half each (two copies can run at once), so together they can't pass it;
+      // the next run asks Drive again and takes half of what is left.
+      ...(free !== null ? [`--max-transfer=${Math.floor((free - keep) / 2 / 1024 ** 2)}M`, "--cutoff-mode=soft"] : []),
       ...excludeArgs(), ...dupeArgs(job)];
     const proc = spawn(bin, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     running.set(job.id, proc);
@@ -739,6 +762,9 @@ export function createDrives(deps: DrivesDeps) {
         void runVerify(job, only);
         return;
       }
+      // 8 = stopped at its share of Drive's free space: back in the queue, and
+      // the next run asks Drive again (and stops for good when it is full).
+      if (code === 8) { job.status = "queued"; job.lastError = null; saveNow(); return pump(); }
       failed(job, job.lastError ?? `rclone stopped with code ${code}`);
       saveNow();
       pump();
