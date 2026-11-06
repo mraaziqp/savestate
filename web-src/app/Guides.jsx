@@ -330,6 +330,8 @@ const GUIDES = [
           <p>Some systems need files from your own console (PS1, PS2, Neo Geo, Switch keys). The game page says exactly which file and where it goes; <b>Emulation Setup</b> explains each system.</p></div>
         <div className="nxg-sec"><h4>"This game loaded but isn't running"</h4>
           <p>That copy of the game doesn't work in a browser. Press <b>Back — play it another way</b> and choose <b>Stream from the host PC</b> or <b>Play on this PC</b>.</p></div>
+        <div className="nxg-sec"><h4>A game seems stuck on the first talking scene</h4>
+          <p>It's waiting for the <b>A</b> button; <b>Enter</b> is Start, which doesn't move text on. On a keyboard, press <b>X</b> or <b>Space</b> for A when the game runs on this PC, or <b>Z</b> in the browser player. When a game opens, a message shows its keys; on this PC, Esc &gt; Keyboard keys lets you change them.</p></div>
         <div className="nxg-sec"><h4>Video buffers</h4>
           <p>Move closer to the Wi-Fi, or pause other big downloads on the same line. Playing several things at once on a slow line also slows each one.</p></div>
         <div className="nxg-sec"><h4>Still stuck</h4>

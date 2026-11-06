@@ -11,6 +11,44 @@ import { loadEmulatorPlayer } from "emulator-player";
 
 const BrowserPlayer = lazy(loadEmulatorPlayer);
 
+// Which keys do what in the browser player, read from the player itself (its
+// keys differ from the engine's: Z is A here). Without this, Enter reached a
+// game's first talking scene and then did nothing, which looked like a freeze:
+// Start doesn't move text on, and nothing said which key is A. Shown for the
+// first few games, and again if Start is pressed over and over without A or B.
+const KEY_NAMES = { 13: "Enter", 32: "Space", 16: "Shift", 8: "Backspace", 9: "Tab" };
+const keyNameOf = (code) => KEY_NAMES[code] ?? (code >= 65 && code <= 90 ? String.fromCharCode(code) : code >= 48 && code <= 57 ? String.fromCharCode(code) : null);
+function BrowserKeysHint() {
+  const [text, setText] = useState(null);
+  useEffect(() => {
+    if (matchMedia("(hover: none)").matches) return undefined;
+    let hide = 0, poll = 0, starts = 0, usedAB = false, keys = null;
+    const show = (t) => { setText(t); clearTimeout(hide); hide = setTimeout(() => setText(null), 9000); };
+    const describe = () => [[keys.a, "A"], [keys.b, "B"], [keys.start, "Start"]].filter(([c]) => keyNameOf(c)).map(([c, n]) => `${keyNameOf(c)} = ${n}`).join(" · ");
+    let waited = 0;
+    poll = setInterval(() => {
+      const c = window.EJS_emulator?.controls?.[0];
+      if (!c && ++waited < 90) return;
+      clearInterval(poll);
+      if (!c) return;
+      keys = { a: c[8]?.value, b: c[0]?.value, start: c[3]?.value };
+      if ([...(navigator.getGamepads?.() ?? [])].some(Boolean)) return;
+      let seen = 0;
+      try { seen = Number(localStorage.getItem("nx_browser_keyhint")) || 0; localStorage.setItem("nx_browser_keyhint", String(seen + 1)); } catch { /* private mode */ }
+      if (seen < 5) show(`Keyboard: ${describe()} · Arrows = move`);
+    }, 1000);
+    const onKey = (e) => {
+      if (!keys || e.repeat) return;
+      if (e.keyCode === keys.a || e.keyCode === keys.b) usedAB = true;
+      else if (e.keyCode === keys.start && !usedAB && ++starts >= 3) { starts = 0; show(`Nothing happening? Try A or B. ${describe()}`); }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => { clearInterval(poll); clearTimeout(hide); window.removeEventListener("keydown", onKey, true); };
+  }, []);
+  if (!text) return null;
+  return <div style={{ position: "fixed", left: "50%", top: 84, transform: "translateX(-50%)", zIndex: 5600, width: "max-content", maxWidth: "calc(100vw - 32px)", textAlign: "center", background: "rgba(0,0,0,.82)", color: "#fff", padding: "9px 14px", borderRadius: 12, font: "600 13px system-ui,sans-serif", pointerEvents: "none" }}>{text}</div>;
+}
+
 const LAUNCHER = "http://127.0.0.1:17373";
 const EMULATOR = {
   ps2: "PCSX2", ps3: "RPCS3", switch: "Ryujinx", gamecube: "Dolphin", wii: "Dolphin", wiiu: "Cemu",
@@ -163,7 +201,8 @@ export function PlayOverlay() {
   // 1. In-browser play view (EmulatorJS)
   if (phase === "browser" && game) {
     return (
-      <div className="fixed inset-0 z-[5500] bg-black">
+      <div style={{ position: "fixed", inset: 0, zIndex: 5500, background: "#000" }}>
+        <BrowserKeysHint />
         <Suspense fallback={
           <div className="nxplay">
             <style>{CSS}</style>

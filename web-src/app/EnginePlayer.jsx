@@ -60,7 +60,7 @@ const CSS = `
 .nxe-key.wait kbd{background:#6d5dfc}
 .nxe-stats{font:12px ui-monospace,monospace;color:#9ab;display:grid;gap:2px}
 .nxe-stuck{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);max-width:380px;background:rgba(10,12,20,.92);border:1px solid rgba(255,255,255,.14);border-radius:16px;padding:18px 20px;display:grid;gap:12px;text-align:center;font:600 14px/1.5 system-ui,sans-serif}
-.nxe-toast{position:absolute;left:50%;bottom:28px;transform:translateX(-50%);background:rgba(0,0,0,.78);padding:9px 14px;border-radius:12px;font:600 13px system-ui,sans-serif;pointer-events:none}
+.nxe-toast{position:absolute;left:50%;bottom:28px;transform:translateX(-50%);width:max-content;max-width:calc(100vw - 32px);text-align:center;background:rgba(0,0,0,.78);padding:9px 14px;border-radius:12px;font:600 13px system-ui,sans-serif;pointer-events:none}
 .nxe-chip{position:absolute;right:14px;bottom:14px;background:rgba(0,0,0,.7);border:1px solid rgba(255,255,255,.15);padding:8px 12px;border-radius:12px;font:600 13px system-ui,sans-serif;cursor:pointer}
 .nxe-wait{position:absolute;inset:0;display:grid;place-items:center;color:#aab;font:600 14px system-ui,sans-serif}
 .nxe-rw{position:absolute;top:14px;right:14px;background:rgba(0,0,0,.65);padding:6px 10px;border-radius:10px;font:700 13px system-ui,sans-serif}
@@ -75,7 +75,7 @@ const CSS = `
 const BUTTONS = ["B", "Y", "Select", "Start", "Up", "Down", "Left", "Right", "A", "X", "L", "R", "L2", "R2", "L3", "R3"];
 export const DEFAULT_KEYS = {
   ArrowUp: 4, ArrowDown: 5, ArrowLeft: 6, ArrowRight: 7,
-  KeyZ: 0, KeyX: 8, KeyA: 1, KeyS: 9, KeyQ: 10, KeyW: 11, KeyE: 12, KeyR: 13,
+  KeyZ: 0, KeyX: 8, Space: 8, KeyA: 1, KeyS: 9, KeyQ: 10, KeyW: 11, KeyE: 12, KeyR: 13,
   Enter: 3, ShiftRight: 2, Backspace: 2, KeyC: 14, KeyV: 15,
 };
 // Standard-mapping gamepad button -> libretro id. By position, the bottom
@@ -227,6 +227,11 @@ const moveFocus = (dir) => {
 const load = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
 const loadKeys = () => { try { const k = JSON.parse(localStorage.getItem("nx_engine_keys") ?? "null"); return k && typeof k === "object" ? k : { ...DEFAULT_KEYS }; } catch { return { ...DEFAULT_KEYS }; } };
 const keyName = (code) => code.replace(/^Key/, "").replace(/^Digit/, "").replace(/^Arrow/, "").replace("Right", " R").replace("Left", " L").replace("Shift R", "R-Shift").trim();
+// "X or Space = A · Z = B · Enter = Start · Esc = menu", from the player's own keys.
+const keysHint = (keymap) => {
+  const of = (id) => Object.entries(keymap).filter(([, v]) => v === id).map(([c]) => keyName(c)).join(" or ");
+  return [[8, "A"], [0, "B"], [3, "Start"]].filter(([id]) => of(id)).map(([id, n]) => `${of(id)} = ${n}`).concat("Esc = menu").join(" · ");
+};
 const ago = (secs) => {
   const d = Date.now() / 1000 - secs;
   if (d < 60) return "just now";
@@ -278,7 +283,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
   // Menu actions the controllers use (set every render: they close over current state).
   st.current.menuBack = () => { if (versions) setVersions(null); else if (keysPanel) setKeysPanel(false); else setMenu(false); };
   st.current.stepSlot = (d) => { const n = ((prefs.current.slot - 1 + d + 4) % 4) + 1; setSlot(n); save("nx_engine_slot", String(n)); send({ t: "slot", n }); flash(`Slot ${n}`); };
-  const flash = useCallback((text) => { setToast(text); clearTimeout(flash.t); flash.t = setTimeout(() => setToast(null), 2200); }, []);
+  const flash = useCallback((text, ms = 2200) => { setToast(text); clearTimeout(flash.t); flash.t = setTimeout(() => setToast(null), ms); }, []);
 
   // ── Socket, picture, sound and controls ───────────────────────────────
   useEffect(() => {
@@ -366,6 +371,18 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         let m; try { m = JSON.parse(e.data); } catch { return; }
         if (m.type === "ready") {
           S.info = m.info; setInfo(m.info);
+          // Which keys do what, for someone playing on a keyboard. Without it,
+          // Enter reached the first talking scene of a game and then did nothing
+          // (Start doesn't move text on, and nothing said X is A), which looked
+          // like the game had frozen. Shown for a player's first few games.
+          if (!S.toldKeys) {
+            S.toldKeys = true;
+            const seen = Number(load("nx_engine_keyhint", "0")) || 0;
+            setTimeout(() => {
+              const pad = S.nativeCount > 0 || [...(navigator.getGamepads?.() ?? [])].some(Boolean);
+              if (seen < 5 && !pad && !matchMedia("(hover: none)").matches) { save("nx_engine_keyhint", String(seen + 1)); flash(`Keyboard: ${keysHint(S.keymap)}`, 9000); }
+            }, 1500);
+          }
           // The battery save came from another device (it was newer).
           if (m.info?.saveFrom && !S.toldSaveFrom) { S.toldSaveFrom = true; setTimeout(() => flash(`Your save came from ${m.info.saveFrom.device ?? "another device"} (it was newer)${m.info.saveFrom.backup ? "; this PC's copy is kept as a backup" : ""}`), 1200); }
         }
@@ -574,6 +591,12 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
       const id = S.keymap[e.code];
       if (id === undefined || S.menuOpen) return;
       e.preventDefault();
+      // Start pressed again and again, A and B never: they're trying to get
+      // past something only A or B moves on (a game's talking scenes).
+      if (down && !e.repeat) {
+        if (id === 8 || id === 0) { if (!S.usedAB) setToast(null); S.usedAB = true; } // the hint sits over the game's text
+        else if (id === 3 && !S.usedAB && (S.startCount = (S.startCount ?? 0) + 1) >= 3) { S.startCount = 0; flash(`Nothing happening? Try A or B. ${keysHint(S.keymap)}`, 9000); }
+      }
       S.keys = down ? S.keys | (1 << id) : S.keys & ~(1 << id);
     };
     const kd = onKey(true), ku = onKey(false);
