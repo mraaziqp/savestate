@@ -216,7 +216,7 @@ const PLATFORM_CORES = {
   nes: 'fceumm', famicom: 'fceumm', snes: 'snes9x', n64: 'mupen64plus_next',
   gba: 'mgba', gbc: 'mgba', gb: 'mgba', nds: 'melondsds', '3ds': 'citra',
   ps1: 'pcsx_rearmed', psx: 'pcsx_rearmed', playstation: 'pcsx_rearmed',
-  ps2: 'pcsx2', psp: 'ppsspp',
+  psp: 'ppsspp',
   genesis: 'genesis_plus_gx', megadrive: 'genesis_plus_gx', 'sega genesis': 'genesis_plus_gx',
   gamegear: 'genesis_plus_gx', mastersystem: 'genesis_plus_gx', sms: 'genesis_plus_gx',
   sega32x: 'picodrive', '32x': 'picodrive',
@@ -253,7 +253,8 @@ const CORE_EXT = IS_WIN ? '.dll' : IS_MAC ? '.dylib' : '.so';
 // installed — getEmulatorPath() checks it before reaching this fallback.
 const STANDALONE_ONLY_PLATFORMS = new Set(['ps2', 'wiiu', 'psp', 'ps3', 'switch', 'xbox', 'xbox360', 'x360']);
 // Consoles with a standalone emulator AND a libretro core: the core (in SaveState's engine) wins when present.
-const ENGINE_FIRST = new Set(['gamecube', 'wii', 'ps2', 'psp']);
+// Note: PS2 strictly requires standalone PCSX2 (or its capture bridge) — lrps2/pcsx2_libretro is abandoned and broken.
+const ENGINE_FIRST = new Set(['gamecube', 'wii', 'psp']);
 
 // Recognized ROM/disc-image extensions for the multi-drive scan — same list
 // shape as quickstart-zorin-host.sh's host-side ROM_EXT_REGEX, so a file this
@@ -3564,9 +3565,18 @@ async function ensureEngineSystemFiles(coreId) {
       try { if (fs.statSync(path.join(dir, ent.name)).size < 64 * 1024 * 1024) fs.copyFileSync(path.join(dir, ent.name), to); } catch { /* skip */ }
     }
   }
-  // PlayStation 2 BIOS for the PCSX2 core.
+  // PlayStation 2 BIOS for PCSX2.
   const ps2 = raSystem && path.join(raSystem, 'pcsx2', 'bios');
-  if (ps2 && fs.existsSync(ps2)) { try { fs.cpSync(ps2, path.join(engineSystemDir, 'pcsx2', 'bios'), { recursive: true, force: false }); } catch { /* skip */ } }
+  if (ps2 && fs.existsSync(ps2)) {
+    try { fs.cpSync(ps2, path.join(engineSystemDir, 'pcsx2', 'bios'), { recursive: true, force: false }); } catch { /* skip */ }
+    const pEmu = getEmulatorPath('ps2');
+    if (pEmu && !isRetroArch(pEmu)) {
+      const pBios = pcsx2BiosDir(pEmu);
+      if (pBios && !dirHasFiles(pBios)) {
+        try { ensureDirSync(pBios); fs.cpSync(ps2, pBios, { recursive: true, force: false }); } catch { /* skip */ }
+      }
+    }
+  }
 
   // GameCube & Wii Dolphin controller mappings and core config.
   if (coreId === 'dolphin') {
@@ -3992,7 +4002,8 @@ async function handleLaunch(body, origin) {
         const run = await startCapture(exe, emu, args, { origin: origin && isTrustedOrigin(origin) ? origin : null, title });
         lap(run.ok ? 'capture ready' : 'capture failed');
         if (run.ok) {
-          return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: emu, usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
+          const emuName = EMULATOR_NAMES[path.basename(emu, path.extname(emu)).toLowerCase()] || path.basename(emu, path.extname(emu));
+          return { status: 200, json: { success: true, launched: true, pid: run.pid, file: romFile, emulator: emuName, usedCache, engine: { port: run.port, key: run.key, ready: run.ready } } };
         }
         engineError = run.error;
         console.error(`[engine] capturing ${path.basename(emu)}: ${run.error}; opening it on its own`);

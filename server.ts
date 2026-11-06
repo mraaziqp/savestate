@@ -3945,6 +3945,10 @@ const RPCS3_CANDIDATES: string[] = [
 // PCSX2 detection — Windows exe via LaunchBox/Wine + Linux native
 const PCSX2_CANDIDATES: string[] = [
   process.env.PCSX2_PATH,
+  path.join(process.env.PROGRAMFILES ?? "C:\\Program Files", "PCSX2", "pcsx2-qt.exe"),
+  path.join(process.env.PROGRAMFILES ?? "C:\\Program Files", "PCSX2", "pcsx2.exe"),
+  path.join(process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)", "PCSX2", "pcsx2-qt.exe"),
+  path.join(process.env["PROGRAMFILES(X86)"] ?? "C:\\Program Files (x86)", "PCSX2", "pcsx2.exe"),
   ...emulatorCandidatePaths(["PCSX2", "pcsx2"], ["pcsx2-qt.exe", "pcsx2.exe"]),
   '/snap/bin/pcsx2',
   '/usr/bin/pcsx2',
@@ -5264,24 +5268,31 @@ async function startServer() {
   }
 
   async function detectPcsx2PathNow(): Promise<{ path: string; isWine: boolean; isRetroArchCore: boolean } | null> {
-    // 1. Check if pcsx2_libretro core is available (best on Linux — no Wine needed)
+    // 1. Standalone PCSX2 binary first (official native standalone PCSX2 is vastly superior to broken libretro cores)
+    if (process.platform === 'win32') {
+      for (const candidate of PCSX2_CANDIDATES.filter(c => c.endsWith('.exe'))) {
+        try { await fsAccess(candidate); return { path: candidate, isWine: false, isRetroArchCore: false }; } catch { /* no */ }
+      }
+    } else {
+      for (const candidate of PCSX2_CANDIDATES.filter(c => !c.endsWith('.exe'))) {
+        try { await fsAccess(candidate); return { path: candidate, isWine: false, isRetroArchCore: false }; } catch { /* no */ }
+      }
+      // Windows exe via wine on Linux
+      const wineAvail = await execAsync('which wine', { timeout: 3000 }).then(r => !!r.stdout.trim()).catch(() => false);
+      if (wineAvail) {
+        for (const candidate of PCSX2_CANDIDATES.filter(c => c.endsWith('.exe'))) {
+          try { await fsAccess(candidate); return { path: candidate, isWine: true, isRetroArchCore: false }; } catch { /* no */ }
+        }
+      }
+    }
+
+    // 2. Fallback to pcsx2_libretro core only if standalone PCSX2 is not installed anywhere
     const coresDir = await getCoresDir().catch(() => null);
     if (coresDir) {
       const corePath = path.join(coresDir, `pcsx2_libretro.so`);
       try { await fsAccess(corePath); return { path: corePath, isWine: false, isRetroArchCore: true }; } catch { /* no */ }
       const coreDll = path.join(coresDir, `pcsx2_libretro.dll`);
       try { await fsAccess(coreDll); return { path: coreDll, isWine: false, isRetroArchCore: true }; } catch { /* no */ }
-    }
-    // 2. Check native PCSX2 binary
-    for (const candidate of PCSX2_CANDIDATES.filter(c => !c.endsWith('.exe'))) {
-      try { await fsAccess(candidate); return { path: candidate, isWine: false, isRetroArchCore: false }; } catch { /* no */ }
-    }
-    // 3. Windows exe via wine
-    const wineAvail = await execAsync('which wine', { timeout: 3000 }).then(r => !!r.stdout.trim()).catch(() => false);
-    if (wineAvail || process.platform === 'win32') {
-      for (const candidate of PCSX2_CANDIDATES.filter(c => c.endsWith('.exe'))) {
-        try { await fsAccess(candidate); return { path: candidate, isWine: process.platform !== 'win32', isRetroArchCore: false }; } catch { /* no */ }
-      }
     }
     return null;
   }
