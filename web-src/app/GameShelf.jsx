@@ -8,6 +8,7 @@
 import React, { useState, useEffect, useMemo, useRef, useDeferredValue } from "react";
 import { SYSTEMS } from "./systems.js";
 import { norm } from "./devices.js";
+import { isSplitScreenGame } from "./Where.jsx";
 
 const CSS = `
 .nxs{display:flex;flex-direction:column;gap:12px}
@@ -17,9 +18,10 @@ const CSS = `
 .nxs-sort{padding:10px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.35);color:#fff;font-size:14px}
 .nxs-count{color:rgba(255,255,255,.45);font-size:13px;white-space:nowrap}
 .nxs-chips{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 6px;scrollbar-width:thin}
-.nxs-chip{flex:0 0 auto;padding:7px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:rgba(255,255,255,.75);font-size:13px;cursor:pointer;white-space:nowrap}
+.nxs-chip{flex:0 0 auto;padding:7px 12px;border-radius:999px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:rgba(255,255,255,.75);font-size:13px;cursor:pointer;white-space:nowrap;transition:all .15s ease}
 .nxs-chip b{color:rgba(255,255,255,.4);font-weight:500;margin-left:6px}
 .nxs-chip[aria-pressed=true]{background:rgba(34,211,238,.16);border-color:rgba(34,211,238,.5);color:#fff}
+.nxs-chip[data-special="split"][aria-pressed=true]{background:rgba(168,85,247,.22);border-color:rgba(192,132,252,.6);color:#f5f3ff}
 .nxs-letters{position:sticky;top:0;z-index:5;display:flex;gap:2px;flex-wrap:wrap;padding:6px 4px;background:rgba(8,8,16,.85);backdrop-filter:blur(8px);border-radius:10px}
 .nxs-letter{min-width:28px;padding:5px 6px;border:0;border-radius:7px;background:transparent;color:rgba(255,255,255,.6);font:600 12px/1 system-ui;cursor:pointer}
 .nxs-letter:hover,.nxs-letter[aria-current=true]{background:rgba(34,211,238,.18);color:#fff}
@@ -32,6 +34,7 @@ const CSS = `
 .nxs-art img{width:100%;height:100%;object-fit:cover;display:block}
 .nxs-ph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:10px;text-align:center;font:700 14px/1.2 system-ui;color:rgba(255,255,255,.8)}
 .nxs-sys{position:absolute;left:6px;bottom:6px;padding:2px 6px;border-radius:6px;background:rgba(0,0,0,.65);font:600 10px/1.4 system-ui;color:rgba(255,255,255,.85)}
+.nxs-multi{position:absolute;right:6px;bottom:6px;padding:2px 6px;border-radius:6px;background:rgba(147,51,234,.88);font:700 9.5px/1.4 system-ui;color:#fff;backdrop-filter:blur(4px);box-shadow:0 2px 6px rgba(0,0,0,.45)}
 .nxs-title{font-size:13px;line-height:1.25;color:rgba(255,255,255,.88);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .nxs-empty{padding:40px 0;text-align:center;color:rgba(255,255,255,.5)}
 `;
@@ -45,10 +48,12 @@ const store = { get: (k, d) => { try { return localStorage.getItem(k) ?? d; } ca
 function Cover({ g }) {
   const [bad, setBad] = useState(false);
   const src = g.boxArt && !bad ? (window.nxThumb ? window.nxThumb(g.boxArt) : g.boxArt) : "";
+  const isMulti = isSplitScreenGame(g);
   return (
     <div className="nxs-art" style={{ background: g.dominantColor || "#1a1a2e" }}>
       {src ? <img src={src} alt="" loading="lazy" decoding="async" onError={() => setBad(true)} /> : <div className="nxs-ph">{g.title}</div>}
       <span className="nxs-sys">{sysName(g.platform)}</span>
+      {isMulti && <span className="nxs-multi" title="Split-screen or local multiplayer">👥 2-4P</span>}
     </div>
   );
 }
@@ -71,10 +76,12 @@ export function GameShelf({ games = [], platform = null, loading = false, onSele
     return [...n.entries()].sort((a, b) => b[1] - a[1]);
   }, [games]);
   const recent = useMemo(() => games.filter(played).length, [games]);
+  const multiCount = useMemo(() => games.filter(isSplitScreenGame).length, [games]);
 
   const list = useMemo(() => {
     let l = games;
     if (system === "@recent") l = l.filter(played);
+    else if (system === "@splitscreen") l = l.filter(isSplitScreenGame);
     else if (system) l = l.filter((g) => g.platform === system);
     if (q) l = l.filter((g) => String(g.title).toLowerCase().includes(q) || sysName(g.platform).toLowerCase().includes(q));
     l = [...l];
@@ -130,6 +137,11 @@ export function GameShelf({ games = [], platform = null, loading = false, onSele
       </div>
       <div className="nxs-chips" role="group" aria-label="Systems">
         <button className="nxs-chip" aria-pressed={!system} onClick={() => setSystem("")}>All<b>{games.length.toLocaleString()}</b></button>
+        {multiCount > 0 && (
+          <button className="nxs-chip" data-special="split" aria-pressed={system === "@splitscreen"} onClick={() => setSystem(system === "@splitscreen" ? "" : "@splitscreen")}>
+            👥 Split-Screen<b>{multiCount.toLocaleString()}</b>
+          </button>
+        )}
         {recent > 0 && <button className="nxs-chip" aria-pressed={system === "@recent"} onClick={() => setSystem("@recent")}>Recently played<b>{recent}</b></button>}
         {systems.map(([p, n]) => (
           <button key={p} className="nxs-chip" aria-pressed={system === p} onClick={() => setSystem(p)}>{sysName(p)}<b>{n}</b></button>

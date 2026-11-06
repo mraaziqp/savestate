@@ -534,6 +534,13 @@ shell = patch(shell, "add games title", `addgames:"Add games",`, `ql={help:"Help
 shell = patch(shell, "game shelf", "render:nxG=>(0,e.jsx)(NxShelf,{games:nxG,platform:Bn?.[0]?.platform??null,",
   "NxWhere,{games:Bn??at,render:nxG=>(0,e.jsx)(Nl,{games:nxG,loading:Pt,isScanning:sa,gpFocusIdx:ft,",
   "NxWhere,{games:at,render:nxG=>(0,e.jsx)(NxShelf,{games:nxG,platform:Bn?.[0]?.platform??null,loading:Pt,isScanning:sa,");
+// Split-screen & local multiplayer in Game Hub genres:
+shell = patch(shell, "split-screen in genre list", 'key:"splitscreen"',
+  'Us=[{label:"🥊 Beat-em-up",key:"beat",',
+  'Us=[{label:"👥 Split-Screen & Co-Op",key:"splitscreen",terms:["kart","smash","goldeneye","perfect dark","timesplitters","halo","battlefront","burnout","gran turismo","tekken","street fighter","mortal kombat","contra","metal slug","streets of rage","bomberman","party","fifa","nba","wwe","wwf","worms","double dragon","battletoads","turtles","gauntlet","tony hawk","twisted metal","split screen","splitscreen","multiplayer","f-zero","wipeout","ridge racer","micro machines","quake","unreal","doom","soulcalibur","virtua fighter","bloody roar","marvel vs","capcom vs","king of fighters","power stone","super monkey ball","crash team","ctr","diddy kong"]},{label:"🥊 Beat-em-up",key:"beat",');
+shell = patch(shell, "genre click can trigger split-screen where mode", 'onClick:g.key==="splitscreen"?',
+  'children:Us.map(g=>{const E=p[g.key]??0;return E===0?null:(0,e.jsxs)("button",{onClick:r,',
+  'children:Us.map(g=>{const E=p[g.key]??0;return E===0?null:(0,e.jsxs)("button",{onClick:g.key==="splitscreen"?(ev)=>{try{window.dispatchEvent(new CustomEvent("nexus:where",{detail:"splitscreen"}))}catch{}r(ev)}:r,');
 // Connections (admins): Jarvis, the Agent Builder and the NAS, live, with
 // the log of what passes between them and SaveState (Connections.jsx).
 shell = patch(shell, "connections tab", `x==="connections"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxConnections,{})}),`,

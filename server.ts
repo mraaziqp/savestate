@@ -31583,8 +31583,18 @@ Format as JSON:
     res.json({ ok: true });
   });
 
-  // Co-Op game library — filtered to games known to support multiplayer
-  const COOP_KEYWORDS_SRV = ['mario','sonic','street fighter','mortal kombat','tekken','smash','double dragon','contra','turtles','streets of rage','golden axe','bomberman','kirby','battletoads','metal slug','nba','fifa','soccer','worms','diablo','gauntlet','castle crashers','river city','final fight','x-men','crash','racing','kirby','punch-out','bubble bobble','raiden','gunstar','sunset riders','captain commando'];
+  // Co-Op game library — filtered to games known to support multiplayer and split-screen
+  const COOP_KEYWORDS_SRV = [
+    'mario','sonic','street fighter','mortal kombat','tekken','smash','double dragon','contra',
+    'turtles','streets of rage','golden axe','bomberman','kirby','battletoads','metal slug','nba','fifa',
+    'soccer','worms','diablo','gauntlet','castle crashers','river city','final fight','x-men','crash',
+    'racing','punch-out','bubble bobble','raiden','gunstar','sunset riders','captain commando',
+    'kart','goldeneye','perfect dark','timesplitters','halo','battlefront','gran turismo','burnout',
+    'need for speed','f-zero','wipeout','ridge racer','micro machines','twisted metal','split screen',
+    'splitscreen','tony hawk','smackdown','wwe','wwf','def jam','nfl blitz','nba jam','ssx','quake',
+    'unreal','doom','duke nukem','soulcalibur','virtua fighter','dead or alive','bloody roar','marvel vs',
+    'capcom vs','king of fighters','power stone','party','super monkey ball','multiplayer','2 player','4 player'
+  ];
   app.get("/api/coop/games", async (_req, res) => {
     // The keyword match MUST run across the whole library, in SQL.
     // This previously selected "ORDER BY title ASC LIMIT 500" and filtered those
@@ -31607,7 +31617,7 @@ Format as JSON:
         const r = await pool.query(
           `SELECT id, title, platform, box_art FROM games
             WHERE relative_path IS NOT NULL AND relative_path <> ''
-              AND title ILIKE ANY ($1::text[])
+              AND (title ILIKE ANY ($1::text[]) OR players LIKE '%2%' OR players LIKE '%4%')
             ORDER BY title ASC
             LIMIT 2000`,
           [patterns],
