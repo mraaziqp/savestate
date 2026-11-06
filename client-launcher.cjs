@@ -2381,6 +2381,282 @@ function ensureStandaloneDolphinControllerConfig(emuPath) {
   }
 }
 
+const PCSX2_DEFAULT_INI = `[UI]
+SetupWizardIncomplete = false
+ConfirmShutdown = false
+InhibitScreensaver = true
+StartFullscreen = false
+HideMouseCursor = true
+
+[Folders]
+Bios = bios
+Snapshots = snaps
+Savestates = sstates
+MemoryCards = memcards
+Logs = logs
+Cheats = cheats
+Patches = patches
+
+[Filenames]
+Bios = SCPH-70012_BIOS_V12_USA_200.BIN
+
+[EmuCore]
+EnableCheats = true
+
+[Pad]
+MultitapPort1 = false
+MultitapPort2 = false
+
+[Pad1]
+Type = DualShock2
+InvertL = 0
+InvertR = 0
+Deadzone = 0
+AxisScale = 1.33
+LargeMotorScale = 1
+SmallMotorScale = 1
+ButtonDeadzone = 0
+PressureModifier = 0.5
+Up = XInput-0/DPadUp
+Right = XInput-0/DPadRight
+Down = XInput-0/DPadDown
+Left = XInput-0/DPadLeft
+Triangle = XInput-0/Y
+Circle = XInput-0/B
+Cross = XInput-0/A
+Square = XInput-0/X
+Select = XInput-0/Back
+Start = XInput-0/Start
+L1 = XInput-0/LeftShoulder
+L2 = XInput-0/+LeftTrigger
+R1 = XInput-0/RightShoulder
+R2 = XInput-0/+RightTrigger
+L3 = XInput-0/LeftStick
+R3 = XInput-0/RightStick
+LUp = XInput-0/-LeftY
+LRight = XInput-0/+LeftX
+LDown = XInput-0/+LeftY
+LLeft = XInput-0/-LeftX
+RUp = XInput-0/-RightY
+RRight = XInput-0/+RightX
+RDown = XInput-0/+RightY
+RLeft = XInput-0/-RightX
+LargeMotor = XInput-0/LargeMotor
+SmallMotor = XInput-0/SmallMotor
+
+[Pad2]
+Type = DualShock2
+InvertL = 0
+InvertR = 0
+Deadzone = 0
+AxisScale = 1.33
+LargeMotorScale = 1
+SmallMotorScale = 1
+ButtonDeadzone = 0
+PressureModifier = 0.5
+Up = XInput-1/DPadUp
+Right = XInput-1/DPadRight
+Down = XInput-1/DPadDown
+Left = XInput-1/DPadLeft
+Triangle = XInput-1/Y
+Circle = XInput-1/B
+Cross = XInput-1/A
+Square = XInput-1/X
+Select = XInput-1/Back
+Start = XInput-1/Start
+L1 = XInput-1/LeftShoulder
+L2 = XInput-1/+LeftTrigger
+R1 = XInput-1/RightShoulder
+R2 = XInput-1/+RightTrigger
+L3 = XInput-1/LeftStick
+R3 = XInput-1/RightStick
+LUp = XInput-1/-LeftY
+LRight = XInput-1/+LeftX
+LDown = XInput-1/+LeftY
+LLeft = XInput-1/-LeftX
+RUp = XInput-1/-RightY
+RRight = XInput-1/+RightX
+RDown = XInput-1/+RightY
+RLeft = XInput-1/-RightX
+LargeMotor = XInput-1/LargeMotor
+SmallMotor = XInput-1/SmallMotor
+
+[Pad3]
+Type = DualShock2
+Up = XInput-2/DPadUp
+Right = XInput-2/DPadRight
+Down = XInput-2/DPadDown
+Left = XInput-2/DPadLeft
+Triangle = XInput-2/Y
+Circle = XInput-2/B
+Cross = XInput-2/A
+Square = XInput-2/X
+Select = XInput-2/Back
+Start = XInput-2/Start
+L1 = XInput-2/LeftShoulder
+L2 = XInput-2/+LeftTrigger
+R1 = XInput-2/RightShoulder
+R2 = XInput-2/+RightTrigger
+L3 = XInput-2/LeftStick
+R3 = XInput-2/RightStick
+LUp = XInput-2/-LeftY
+LRight = XInput-2/+LeftX
+LDown = XInput-2/+LeftY
+LLeft = XInput-2/-LeftX
+RUp = XInput-2/-RightY
+RRight = XInput-2/+RightX
+RDown = XInput-2/+RightY
+RLeft = XInput-2/-RightX
+
+[Pad4]
+Type = DualShock2
+Up = XInput-3/DPadUp
+Right = XInput-3/DPadRight
+Down = XInput-3/DPadDown
+Left = XInput-3/DPadLeft
+Triangle = XInput-3/Y
+Circle = XInput-3/B
+Cross = XInput-3/A
+Square = XInput-3/X
+Select = XInput-3/Back
+Start = XInput-3/Start
+L1 = XInput-3/LeftShoulder
+L2 = XInput-3/+LeftTrigger
+R1 = XInput-3/RightShoulder
+R2 = XInput-3/+RightTrigger
+L3 = XInput-3/LeftStick
+R3 = XInput-3/RightStick
+LUp = XInput-3/-LeftY
+LRight = XInput-3/+LeftX
+LDown = XInput-3/+LeftY
+LLeft = XInput-3/-LeftX
+RUp = XInput-3/-RightY
+RRight = XInput-3/+RightX
+RDown = XInput-3/+RightY
+RLeft = XInput-3/-RightX
+`;
+
+function ensureStandalonePcsx2Config(emuPath) {
+  try {
+    const home = os.homedir();
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+
+    // 1. Candidate directories where BIOS files might exist
+    const ra = installedRetroArch();
+    const raBios = ra ? path.join(path.dirname(ra), 'system', 'pcsx2', 'bios') : null;
+    const biosSourceDirs = [
+      raBios,
+      path.join(engineSystemDir, 'pcsx2', 'bios'),
+      path.join(home, 'Documents', 'PCSX2', 'bios'),
+      path.join(appData, 'PCSX2', 'bios'),
+      emuPath ? path.join(path.dirname(emuPath), 'bios') : null,
+      'C:\\\\RetroArch-Win64\\\\system\\\\pcsx2\\\\bios',
+    ].filter(Boolean);
+
+    // Find the best available BIOS file
+    let bestBiosFile = '';
+    let bestBiosDir = '';
+    for (const bDir of biosSourceDirs) {
+      if (!fs.existsSync(bDir)) continue;
+      try {
+        const files = fs.readdirSync(bDir);
+        const match = files.find((f) => /\\.(bin|rom\\d?)$/i.test(f) && fs.statSync(path.join(bDir, f)).size > 100_000);
+        if (match) {
+          bestBiosFile = match;
+          bestBiosDir = bDir;
+          break;
+        }
+      } catch {}
+    }
+
+    // 2. Target PCSX2 directories: Documents, AppData, and (if portable) emulator dir
+    const targetBaseDirs = [
+      path.join(home, 'Documents', 'PCSX2'),
+      path.join(appData, 'PCSX2'),
+    ];
+    if (emuPath && (fs.existsSync(path.join(path.dirname(emuPath), 'portable.ini')) || fs.existsSync(path.join(path.dirname(emuPath), 'portable.txt')))) {
+      targetBaseDirs.push(path.dirname(emuPath));
+    }
+
+    // 3. Ensure BIOS is present in all target directories
+    for (const base of targetBaseDirs) {
+      const bDest = path.join(base, 'bios');
+      try {
+        ensureDirSync(bDest);
+        if (bestBiosDir && bestBiosFile && !fs.existsSync(path.join(bDest, bestBiosFile))) {
+          for (const ent of fs.readdirSync(bestBiosDir)) {
+            const src = path.join(bestBiosDir, ent);
+            const dst = path.join(bDest, ent);
+            if (!fs.existsSync(dst) && fs.statSync(src).isFile()) {
+              try { fs.copyFileSync(src, dst); } catch {}
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // 4. Ensure PCSX2.ini is initialized in each config directory to bypass setup wizard
+    for (const base of targetBaseDirs) {
+      const inisDir = path.join(base, 'inis');
+      try {
+        ensureDirSync(inisDir);
+        const iniPath = path.join(inisDir, 'PCSX2.ini');
+        let iniText = fs.existsSync(iniPath) ? fs.readFileSync(iniPath, 'utf8') : '';
+
+        const biosName = bestBiosFile || 'SCPH-70012_BIOS_V12_USA_200.BIN';
+
+        if (!iniText || iniText.length < 50 || !iniText.includes('SetupWizardIncomplete')) {
+          let content = PCSX2_DEFAULT_INI;
+          if (bestBiosFile) {
+            content = content.replace('SCPH-70012_BIOS_V12_USA_200.BIN', bestBiosFile);
+          }
+          fs.writeFileSync(iniPath, content, 'utf8');
+        } else {
+          let modified = false;
+          if (/SetupWizardIncomplete\\s*=\\s*true/i.test(iniText)) {
+            iniText = iniText.replace(/SetupWizardIncomplete\\s*=\\s*true/gi, 'SetupWizardIncomplete = false');
+            modified = true;
+          }
+          if (!iniText.includes('SetupWizardIncomplete')) {
+            if (iniText.includes('[UI]')) {
+              iniText = iniText.replace('[UI]', '[UI]\\nSetupWizardIncomplete = false');
+            } else {
+              iniText = `[UI]\\nSetupWizardIncomplete = false\\nConfirmShutdown = false\\n${iniText}`;
+            }
+            modified = true;
+          }
+          if (/ConfirmShutdown\\s*=\\s*true/i.test(iniText)) {
+            iniText = iniText.replace(/ConfirmShutdown\\s*=\\s*true/gi, 'ConfirmShutdown = false');
+            modified = true;
+          }
+          if (!iniText.includes('[Filenames]')) {
+            iniText += `\\n[Filenames]\\nBios = ${biosName}\\n`;
+            modified = true;
+          } else if (!iniText.includes('Bios =') || /Bios\\s*=\\s*$/m.test(iniText)) {
+            iniText = iniText.replace('[Filenames]', `[Filenames]\\nBios = ${biosName}`);
+            modified = true;
+          }
+          if (!iniText.includes('[Pad1]') || !iniText.includes('XInput-0')) {
+            iniText += `\\n[Pad1]\\nType = DualShock2\\nUp = XInput-0/DPadUp\\nRight = XInput-0/DPadRight\\nDown = XInput-0/DPadDown\\nLeft = XInput-0/DPadLeft\\nTriangle = XInput-0/Y\\nCircle = XInput-0/B\\nCross = XInput-0/A\\nSquare = XInput-0/X\\nSelect = XInput-0/Back\\nStart = XInput-0/Start\\nL1 = XInput-0/LeftShoulder\\nL2 = XInput-0/+LeftTrigger\\nR1 = XInput-0/RightShoulder\\nR2 = XInput-0/+RightTrigger\\nL3 = XInput-0/LeftStick\\nR3 = XInput-0/RightStick\\nLUp = XInput-0/-LeftY\\nLRight = XInput-0/+LeftX\\nLDown = XInput-0/+LeftY\\nLLeft = XInput-0/-LeftX\\nRUp = XInput-0/-RightY\\nRRight = XInput-0/+RightX\\nRDown = XInput-0/+RightY\\nRLeft = XInput-0/-RightX\\nLargeMotor = XInput-0/LargeMotor\\nSmallMotor = XInput-0/SmallMotor\\n`;
+            modified = true;
+          }
+          if (!iniText.includes('[Pad2]') || !iniText.includes('XInput-1')) {
+            iniText += `\\n[Pad2]\\nType = DualShock2\\nUp = XInput-1/DPadUp\\nRight = XInput-1/DPadRight\\nDown = XInput-1/DPadDown\\nLeft = XInput-1/DPadLeft\\nTriangle = XInput-1/Y\\nCircle = XInput-1/B\\nCross = XInput-1/A\\nSquare = XInput-1/X\\nSelect = XInput-1/Back\\nStart = XInput-1/Start\\nL1 = XInput-1/LeftShoulder\\nL2 = XInput-1/+LeftTrigger\\nR1 = XInput-1/RightShoulder\\nR2 = XInput-1/+RightTrigger\\nL3 = XInput-1/LeftStick\\nR3 = XInput-1/RightStick\\nLUp = XInput-1/-LeftY\\nLRight = XInput-1/+LeftX\\nLDown = XInput-1/+LeftY\\nLLeft = XInput-1/-LeftX\\nRUp = XInput-1/-RightY\\nRRight = XInput-1/+RightX\\nRDown = XInput-1/+RightY\\nRLeft = XInput-1/-RightX\\nLargeMotor = XInput-1/LargeMotor\\nSmallMotor = XInput-1/SmallMotor\\n`;
+            modified = true;
+          }
+          if (modified) {
+            fs.writeFileSync(iniPath, iniText, 'utf8');
+          }
+        }
+      } catch (e) {
+        console.error('[engine] ensureStandalonePcsx2Config failed for', base, e && e.message ? e.message : e);
+      }
+    }
+  } catch (e) {
+    console.error('[engine] ensureStandalonePcsx2Config error:', e && e.message ? e.message : e);
+  }
+}
+
 async function ensureCoreSystemFiles(retroarchPath, coreId) {
   const spec = CORE_SYSTEM_FILES[coreId];
   if (!spec) return { ok: true, detail: 'No system files needed' };
@@ -3954,6 +4230,9 @@ async function handleLaunch(body, origin) {
     if (plat === 'gamecube' || plat === 'wii' || /dolphin/i.test(path.basename(emu))) {
       ensureStandaloneDolphinControllerConfig(emu);
     }
+    if (plat === 'ps2' || /pcsx2/i.test(path.basename(emu))) {
+      ensureStandalonePcsx2Config(emu);
+    }
     if (isRetroArch(emu)) {
       ensureSaneVideoDriver(emu);
       const core = getCorePath(emu, platform);
@@ -3987,11 +4266,9 @@ async function handleLaunch(body, origin) {
       // STANDALONE_LAUNCHERS does for this platform.
       args.push('-dvd_path');
     } else if (String(platform || '').toLowerCase() === 'ps2') {
-      // Standalone PCSX2-QT: without -batch, passing just the ROM path can load
-      // the game behind PCSX2's own library/main window instead of actually
-      // booting into it fullscreen — from the outside that looks exactly like
-      // "the game window is just black," which is what this was reported as.
-      args.push('-batch', '-fullscreen', '-nogui');
+      // Standalone PCSX2-QT: -batch exits completely on close, '--' separates
+      // flags from the ROM path so disc names aren't parsed as options.
+      args.push('-batch', '-fullscreen', '--');
     }
     args.push(romFile);
     // A standalone emulator inside SaveState (capture bridge), when the page asks.

@@ -491,6 +491,16 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         const P = (S.pads[g.index] ??= { prev: 0, used: false, combo: false, hkLt: false, hkRt: false, rawLt: false, rawRt: false });
         let bits = 0;
         g.buttons.forEach((btn, k) => { if (btn.pressed && k < 17) bits |= 1 << k; });
+        // POV hat fallback for generic controllers mapping D-pad to axes[9]
+        if (!(bits & 0xF000) && g.axes.length > 9) {
+          const hat = g.axes[9];
+          if (hat !== undefined && Math.abs(hat) <= 1.0) {
+            if (hat >= -1.05 && hat <= -0.6) bits |= (1 << 12);
+            if (hat >= -0.8 && hat <= -0.05) bits |= (1 << 15);
+            if (hat >= 0.05 && hat <= 0.6) bits |= (1 << 13);
+            if (hat >= 0.35 && hat <= 1.05) bits |= (1 << 14);
+          }
+        }
         const pressed = bits & ~P.prev;
         const guide = !!(bits & (1 << 16)), back = !!(bits & (1 << 8));
         const lt = !!(bits & (1 << 6)), rt = !!(bits & (1 << 7));
@@ -528,9 +538,21 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         const a = [0, 0, 0, 0], tr = [0, 0];
         if (!hidden) {
           for (let k = 0; k < 16; k++) if (bits & (1 << k)) b |= 1 << map[k];
-          for (let k = 0; k < 4; k++) { const v = g.axes[k] ?? 0; a[k] = Math.abs(v) < 0.12 ? 0 : Math.round(v * 32767); }
-          tr[0] = Math.round((g.buttons[6]?.value ?? 0) * 32767);
-          tr[1] = Math.round((g.buttons[7]?.value ?? 0) * 32767);
+          for (let k = 0; k < 4; k++) {
+            const v = g.axes[k] ?? 0;
+            const mag = Math.abs(v);
+            const deadzone = 0.08;
+            if (mag <= deadzone) {
+              a[k] = 0;
+            } else {
+              const scaled = (mag - deadzone) / (1 - deadzone);
+              a[k] = Math.round(Math.sign(v) * Math.min(1, scaled) * 32767);
+            }
+          }
+          const ltVal = g.buttons[6]?.value ?? (g.buttons[6]?.pressed ? 1 : 0);
+          const rtVal = g.buttons[7]?.value ?? (g.buttons[7]?.pressed ? 1 : 0);
+          tr[0] = ltVal < 0.05 ? 0 : Math.round(Math.min(1, (ltVal - 0.05) / 0.95) * 32767);
+          tr[1] = rtVal < 0.05 ? 0 : Math.round(Math.min(1, (rtVal - 0.05) / 0.95) * 32767);
         }
         ports.set(port, { b, a, tr });
         // Rumble the game asked for, renewed while it lasts.
@@ -559,7 +581,9 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
       }
     };
     const onConnect = (e) => { if (!(S.info?.nativeControllers && S.nativeCount > 0 && ENGINE_PAD.test(e.gamepad.id))) flash(`Controller connected: ${e.gamepad.id.split("(")[0].trim().slice(0, 40)}`); };
+    const onDisconnect = (e) => { if (!(S.info?.nativeControllers && S.nativeCount > 0 && ENGINE_PAD.test(e.gamepad.id))) flash(`Controller disconnected: ${e.gamepad.id.split("(")[0].trim().slice(0, 40)}`); };
     window.addEventListener("gamepadconnected", onConnect);
+    window.addEventListener("gamepaddisconnected", onDisconnect);
 
     // Keys belong to the game while it's open: caught first (capture) and kept
     // from the app underneath, whose library would otherwise start the focused
@@ -616,6 +640,7 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
       window.removeEventListener("keydown", kd, true);
       window.removeEventListener("keyup", ku, true);
       window.removeEventListener("gamepadconnected", onConnect);
+      window.removeEventListener("gamepaddisconnected", onDisconnect);
       window.__nxGameOpen = false;
       window.removeEventListener("blur", blur);
       document.removeEventListener("visibilitychange", vis);
