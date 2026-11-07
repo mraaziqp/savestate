@@ -16507,7 +16507,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const displayName = rawDisplay.trim().slice(0, 48) || null;
     const rawEmail = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
     if (rawEmail && !EMAIL_RE.test(rawEmail)) return res.status(400).json({ error: "That email address doesn't look right.", field: "email" });
-    const email = rawEmail || null;
+    const email = rawEmail || (EMAIL_RE.test(username) ? username : null);
     if (!username || !password) return res.status(400).json({ error: "Choose a username and a password." });
     if (username.length < 3) return res.status(400).json({ error: "Username must be at least 3 characters.", field: "username" });
     if (!USERNAME_RE.test(username)) {
@@ -16619,33 +16619,48 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     try {
       const u = await pool.query(
-        "SELECT id, username, email FROM users WHERE username=$1 OR lower(email)=$1 ORDER BY (username=$1) DESC LIMIT 1",
+        "SELECT id, username, email FROM users WHERE lower(username)=$1 OR lower(email)=$1 ORDER BY (lower(username)=$1) DESC LIMIT 1",
         [identifier],
       ).then((r) => r.rows[0]).catch(() => null);
       if (!u?.id) return res.json(generic);
 
+      const targetEmail = (u.email && EMAIL_RE.test(u.email))
+        ? u.email
+        : (EMAIL_RE.test(u.username) ? u.username : (EMAIL_RE.test(identifier) ? identifier : null));
+      const deliverable = !!targetEmail && !/@(example\.(com|net|org)|[^@]+\.(test|invalid|example|localhost))$/i.test(targetEmail);
+
       let emailed = false;
-      // Reserved domains (example.com, .test, .invalid) can never receive mail;
-      // those resets go to the admin queue instead of costing a failed send.
-      const deliverable = !!u.email && !/@(example\.(com|net|org)|[^@]+\.(test|invalid|example|localhost))$/i.test(String(u.email));
       if (resendKey() && deliverable) {
+        if (!u.email) {
+          await pool.query("UPDATE users SET email=$1 WHERE id=$2 AND email IS NULL", [targetEmail, u.id]).catch(() => {});
+        }
         const token = await createResetToken(u.id);
         const link = `${RESET_BASE_URL}/?reset=${token}`;
-        const sent = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${resendKey()}` },
-          body: JSON.stringify({
-            from: RESET_RESEND_FROM,
-            to: u.email,
-            subject: "Reset your SaveState password",
-            html: `<p>Hi ${String(u.username).replace(/[<>&"]/g, "")},</p>
-                   <p>Use the link below to set a new password. It expires in 1 hour and works once.</p>
-                   <p><a href="${link}">Reset my password</a></p>
-                   <p>If you didn't ask for this, ignore this email — nothing has changed.</p>`,
-          }),
-          signal: AbortSignal.timeout(10_000),
-        }).catch(() => null);
-        emailed = !!sent?.ok;
+        try {
+          const sent = await fetch("https://api.resend.com/emails", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${resendKey()}` },
+            body: JSON.stringify({
+              from: RESET_RESEND_FROM,
+              to: targetEmail,
+              subject: "Reset your SaveState password",
+              html: `<p>Hi ${String(u.username).replace(/[<>&"]/g, "")},</p>
+                     <p>Use the link below to set a new password. It expires in 1 hour and works once.</p>
+                     <p><a href="${link}">Reset my password</a></p>
+                     <p>If you didn't ask for this, ignore this email — nothing has changed.</p>`,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+          if (sent.ok) {
+            emailed = true;
+            log("INFO", `Password reset email sent to ${targetEmail} for ${u.username}`, "auth");
+          } else {
+            const errBody = await sent.text().catch(() => "");
+            log("WARN", `Resend email failed: HTTP ${sent.status} - ${errBody.slice(0, 200)}`, "auth");
+          }
+        } catch (e: any) {
+          log("WARN", `Resend request threw error: ${e?.message ?? e}`, "auth");
+        }
       }
       if (!emailed) {
         // One open request per account; asking twice does not stack them up.

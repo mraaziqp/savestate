@@ -2547,47 +2547,82 @@ function ensureStandalonePcsx2Config(emuPath) {
     const biosSourceDirs = [
       raBios,
       path.join(engineSystemDir, 'pcsx2', 'bios'),
+      path.join(engineDir, 'bios'),
       path.join(home, 'Documents', 'PCSX2', 'bios'),
       path.join(appData, 'PCSX2', 'bios'),
+      path.join(appData, 'NexusEmuHost', 'bios'),
+      path.join(appData, 'NexusEmuHost', 'bios', 'pcsx2'),
+      'C:\\Users\\mraaz\\AppData\\Roaming\\NexusEmuHost\\bios',
+      'C:\\Users\\mraaz\\AppData\\Roaming\\NexusEmuHost\\bios\\pcsx2',
+      'C:\\Users\\mraaz\\nexus-cloud-media\\roms\\bios',
+      'C:\\Users\\mraaz\\nexus-cloud-media\\roms\\bios\\pcsx2',
       emuPath ? path.join(path.dirname(emuPath), 'bios') : null,
-      'C:\\\\RetroArch-Win64\\\\system\\\\pcsx2\\\\bios',
+      'C:\\RetroArch-Win64\\system\\pcsx2\\bios',
     ].filter(Boolean);
 
-    // Find the best available BIOS file
-    let bestBiosFile = '';
-    let bestBiosDir = '';
-    for (const bDir of biosSourceDirs) {
-      if (!fs.existsSync(bDir)) continue;
+    // Recursively collect all candidate BIOS files
+    function findBiosFiles(dir, depth = 0) {
+      if (!dir || !fs.existsSync(dir) || depth > 2) return [];
+      const res = [];
       try {
-        const files = fs.readdirSync(bDir);
-        const match = files.find((f) => /\\.(bin|rom\\d?)$/i.test(f) && fs.statSync(path.join(bDir, f)).size > 100_000);
-        if (match) {
-          bestBiosFile = match;
-          bestBiosDir = bDir;
-          break;
+        const ents = fs.readdirSync(dir, { withFileTypes: true });
+        for (const ent of ents) {
+          const p = path.join(dir, ent.name);
+          if (ent.isDirectory()) {
+            res.push(...findBiosFiles(p, depth + 1));
+          } else if (/\.(bin|rom\d?)$/i.test(ent.name)) {
+            try {
+              if (fs.statSync(p).size > 100_000) res.push({ name: ent.name, path: p, dir });
+            } catch {}
+          }
         }
       } catch {}
+      return res;
     }
 
-    // 2. Target PCSX2 directories: Documents, AppData, and (if portable) emulator dir
+    let allBios = [];
+    for (const bDir of biosSourceDirs) {
+      allBios.push(...findBiosFiles(bDir));
+    }
+
+    // Pick best BIOS file (favoring US/EU SCPH-70012/SCPH-39001/etc)
+    const bestCandidate = allBios.find((b) => /70012/i.test(b.name)) ||
+      allBios.find((b) => /SCPH/i.test(b.name)) ||
+      allBios[0];
+
+    const bestBiosFile = bestCandidate?.name || 'SCPH-70012_BIOS_V12_USA_200.BIN';
+    const bestBiosDir = bestCandidate?.dir || '';
+
+    // 2. Target PCSX2 directories: Documents, AppData, Engine data/system, and emulator dir
     const targetBaseDirs = [
       path.join(home, 'Documents', 'PCSX2'),
       path.join(appData, 'PCSX2'),
+      path.join(engineDir, 'data', 'pcsx2'),
+      path.join(engineDir, 'data', 'PCSX2'),
+      path.join(engineDir, 'system', 'pcsx2'),
     ];
-    if (emuPath && (fs.existsSync(path.join(path.dirname(emuPath), 'portable.ini')) || fs.existsSync(path.join(path.dirname(emuPath), 'portable.txt')))) {
+    if (emuPath && !/Program Files/i.test(emuPath) && (fs.existsSync(path.join(path.dirname(emuPath), 'portable.ini')) || fs.existsSync(path.join(path.dirname(emuPath), 'portable.txt')))) {
       targetBaseDirs.push(path.dirname(emuPath));
     }
 
-    // 3. Ensure BIOS is present in all target directories
-    for (const base of targetBaseDirs) {
-      const bDest = path.join(base, 'bios');
+    // 3. Ensure BIOS is present in all target directories and Engine dirs
+    const allBiosDestDirs = [
+      ...targetBaseDirs.map((b) => path.join(b, 'bios')),
+      path.join(engineDir, 'bios'),
+      path.join(engineSystemDir, 'pcsx2', 'bios'),
+    ];
+
+    for (const bDest of allBiosDestDirs) {
       try {
         ensureDirSync(bDest);
-        if (bestBiosDir && bestBiosFile && !fs.existsSync(path.join(bDest, bestBiosFile))) {
+        if (bestCandidate && !fs.existsSync(path.join(bDest, bestCandidate.name))) {
+          try { fs.copyFileSync(bestCandidate.path, path.join(bDest, bestCandidate.name)); } catch {}
+        }
+        if (bestBiosDir && fs.existsSync(bestBiosDir)) {
           for (const ent of fs.readdirSync(bestBiosDir)) {
             const src = path.join(bestBiosDir, ent);
             const dst = path.join(bDest, ent);
-            if (!fs.existsSync(dst) && fs.statSync(src).isFile()) {
+            if (!fs.existsSync(dst) && fs.statSync(src).isFile() && /\.(bin|rom\d?|mec|nvm|erom|rom1|rom2)$/i.test(ent)) {
               try { fs.copyFileSync(src, dst); } catch {}
             }
           }
@@ -2595,53 +2630,84 @@ function ensureStandalonePcsx2Config(emuPath) {
       } catch {}
     }
 
-    // 4. Ensure PCSX2.ini is initialized in each config directory to bypass setup wizard
+    // 4. Ensure PCSX2.ini is properly initialized in each config directory with absolute BIOS paths
     for (const base of targetBaseDirs) {
       const inisDir = path.join(base, 'inis');
+      const bDest = path.join(base, 'bios').replace(/\\/g, '/');
       try {
         ensureDirSync(inisDir);
         const iniPath = path.join(inisDir, 'PCSX2.ini');
         let iniText = fs.existsSync(iniPath) ? fs.readFileSync(iniPath, 'utf8') : '';
 
-        const biosName = bestBiosFile || 'SCPH-70012_BIOS_V12_USA_200.BIN';
+        const biosName = bestBiosFile;
 
         if (!iniText || iniText.length < 50 || !iniText.includes('SetupWizardIncomplete')) {
-          let content = PCSX2_DEFAULT_INI;
-          if (bestBiosFile) {
-            content = content.replace('SCPH-70012_BIOS_V12_USA_200.BIN', bestBiosFile);
-          }
+          let content = PCSX2_DEFAULT_INI
+            .replace('Bios = bios', `Bios = ${bDest}`)
+            .replace('SCPH-70012_BIOS_V12_USA_200.BIN', biosName);
           fs.writeFileSync(iniPath, content, 'utf8');
         } else {
           let modified = false;
-          if (/SetupWizardIncomplete\\s*=\\s*true/i.test(iniText)) {
-            iniText = iniText.replace(/SetupWizardIncomplete\\s*=\\s*true/gi, 'SetupWizardIncomplete = false');
+          // Bypass setup wizard completely
+          if (/SetupWizardIncomplete\s*=\\s*true/i.test(iniText)) {
+            iniText = iniText.replace(/SetupWizardIncomplete\s*=\s*true/gi, 'SetupWizardIncomplete = false');
             modified = true;
           }
           if (!iniText.includes('SetupWizardIncomplete')) {
             if (iniText.includes('[UI]')) {
-              iniText = iniText.replace('[UI]', '[UI]\\nSetupWizardIncomplete = false');
+              iniText = iniText.replace('[UI]', '[UI]\nSetupWizardIncomplete = false');
             } else {
-              iniText = `[UI]\\nSetupWizardIncomplete = false\\nConfirmShutdown = false\\n${iniText}`;
+              iniText = `[UI]\nSetupWizardIncomplete = false\nConfirmShutdown = false\n${iniText}`;
             }
             modified = true;
           }
-          if (/ConfirmShutdown\\s*=\\s*true/i.test(iniText)) {
-            iniText = iniText.replace(/ConfirmShutdown\\s*=\\s*true/gi, 'ConfirmShutdown = false');
+          if (/ConfirmShutdown\s*=\s*true/i.test(iniText)) {
+            iniText = iniText.replace(/ConfirmShutdown\s*=\s*true/gi, 'ConfirmShutdown = false');
             modified = true;
           }
+          if (/InhibitScreensaver\s*=\s*false/i.test(iniText)) {
+            iniText = iniText.replace(/InhibitScreensaver\s*=\s*false/gi, 'InhibitScreensaver = true');
+            modified = true;
+          }
+          // Ensure Folders section has absolute BIOS folder
+          if (!iniText.includes('[Folders]')) {
+            iniText += `\n[Folders]\nBios = ${bDest}\nSnapshots = snaps\nSavestates = sstates\nMemoryCards = memcards\nLogs = logs\nCheats = cheats\nPatches = patches\n`;
+            modified = true;
+          } else if (!iniText.includes(`Bios = ${bDest}`)) {
+            iniText = iniText.replace(/\[Folders\][^\[]*/i, (m) => {
+              if (/Bios\s*=/i.test(m)) {
+                return m.replace(/Bios\s*=[^\r\n]*/i, `Bios = ${bDest}`);
+              }
+              return `${m}\nBios = ${bDest}\n`;
+            });
+            modified = true;
+          }
+          // Ensure Filenames section has valid Bios entry
           if (!iniText.includes('[Filenames]')) {
-            iniText += `\\n[Filenames]\\nBios = ${biosName}\\n`;
+            iniText += `\n[Filenames]\nBios = ${biosName}\n`;
             modified = true;
-          } else if (!iniText.includes('Bios =') || /Bios\\s*=\\s*$/m.test(iniText)) {
-            iniText = iniText.replace('[Filenames]', `[Filenames]\\nBios = ${biosName}`);
+          } else if (!iniText.includes('Bios =') || /Bios\s*=\s*$/m.test(iniText) || iniText.includes('Bios = \n')) {
+            iniText = iniText.replace('[Filenames]', `[Filenames]\nBios = ${biosName}`);
+            modified = true;
+          } else if (bestBiosFile && !iniText.includes(bestBiosFile)) {
+            iniText = iniText.replace(/Bios\s*=[^\r\n]*/i, `Bios = ${biosName}`);
             modified = true;
           }
+          // AutoUpdater off so no popups interrupt launch
+          if (!iniText.includes('[AutoUpdater]')) {
+            iniText += `\n[AutoUpdater]\nCheckAtStartup = false\n`;
+            modified = true;
+          } else if (/CheckAtStartup\s*=\s*true/i.test(iniText)) {
+            iniText = iniText.replace(/CheckAtStartup\s*=\s*true/gi, 'CheckAtStartup = false');
+            modified = true;
+          }
+          // Controller bindings
           if (!iniText.includes('[Pad1]') || !iniText.includes('XInput-0')) {
-            iniText += `\\n[Pad1]\\nType = DualShock2\\nUp = XInput-0/DPadUp\\nRight = XInput-0/DPadRight\\nDown = XInput-0/DPadDown\\nLeft = XInput-0/DPadLeft\\nTriangle = XInput-0/Y\\nCircle = XInput-0/B\\nCross = XInput-0/A\\nSquare = XInput-0/X\\nSelect = XInput-0/Back\\nStart = XInput-0/Start\\nL1 = XInput-0/LeftShoulder\\nL2 = XInput-0/+LeftTrigger\\nR1 = XInput-0/RightShoulder\\nR2 = XInput-0/+RightTrigger\\nL3 = XInput-0/LeftStick\\nR3 = XInput-0/RightStick\\nLUp = XInput-0/-LeftY\\nLRight = XInput-0/+LeftX\\nLDown = XInput-0/+LeftY\\nLLeft = XInput-0/-LeftX\\nRUp = XInput-0/-RightY\\nRRight = XInput-0/+RightX\\nRDown = XInput-0/+RightY\\nRLeft = XInput-0/-RightX\\nLargeMotor = XInput-0/LargeMotor\\nSmallMotor = XInput-0/SmallMotor\\n`;
+            iniText += `\n[Pad1]\nType = DualShock2\nInvertL = 0\nInvertR = 0\nDeadzone = 0.05\nAxisScale = 1.33\nLargeMotorScale = 1\nSmallMotorScale = 1\nButtonDeadzone = 0\nPressureModifier = 0.5\nUp = XInput-0/DPadUp\nRight = XInput-0/DPadRight\nDown = XInput-0/DPadDown\nLeft = XInput-0/DPadLeft\nTriangle = XInput-0/Y\nCircle = XInput-0/B\nCross = XInput-0/A\nSquare = XInput-0/X\nSelect = XInput-0/Back\nStart = XInput-0/Start\nL1 = XInput-0/LeftShoulder\nL2 = XInput-0/+LeftTrigger\nR1 = XInput-0/RightShoulder\nR2 = XInput-0/+RightTrigger\nL3 = XInput-0/LeftStick\nR3 = XInput-0/RightStick\nLUp = XInput-0/-LeftY\nLRight = XInput-0/+LeftX\nLDown = XInput-0/+LeftY\nLLeft = XInput-0/-LeftX\nRUp = XInput-0/-RightY\nRRight = XInput-0/+RightX\nRDown = XInput-0/+RightY\nRLeft = XInput-0/-RightX\nLargeMotor = XInput-0/LargeMotor\nSmallMotor = XInput-0/SmallMotor\n`;
             modified = true;
           }
           if (!iniText.includes('[Pad2]') || !iniText.includes('XInput-1')) {
-            iniText += `\\n[Pad2]\\nType = DualShock2\\nUp = XInput-1/DPadUp\\nRight = XInput-1/DPadRight\\nDown = XInput-1/DPadDown\\nLeft = XInput-1/DPadLeft\\nTriangle = XInput-1/Y\\nCircle = XInput-1/B\\nCross = XInput-1/A\\nSquare = XInput-1/X\\nSelect = XInput-1/Back\\nStart = XInput-1/Start\\nL1 = XInput-1/LeftShoulder\\nL2 = XInput-1/+LeftTrigger\\nR1 = XInput-1/RightShoulder\\nR2 = XInput-1/+RightTrigger\\nL3 = XInput-1/LeftStick\\nR3 = XInput-1/RightStick\\nLUp = XInput-1/-LeftY\\nLRight = XInput-1/+LeftX\\nLDown = XInput-1/+LeftY\\nLLeft = XInput-1/-LeftX\\nRUp = XInput-1/-RightY\\nRRight = XInput-1/+RightX\\nRDown = XInput-1/+RightY\\nRLeft = XInput-1/-RightX\\nLargeMotor = XInput-1/LargeMotor\\nSmallMotor = XInput-1/SmallMotor\\n`;
+            iniText += `\n[Pad2]\nType = DualShock2\nInvertL = 0\nInvertR = 0\nDeadzone = 0.05\nAxisScale = 1.33\nLargeMotorScale = 1\nSmallMotorScale = 1\nButtonDeadzone = 0\nPressureModifier = 0.5\nUp = XInput-1/DPadUp\nRight = XInput-1/DPadRight\nDown = XInput-1/DPadDown\nLeft = XInput-1/DPadLeft\nTriangle = XInput-1/Y\nCircle = XInput-1/B\nCross = XInput-1/A\nSquare = XInput-1/X\nSelect = XInput-1/Back\nStart = XInput-1/Start\nL1 = XInput-1/LeftShoulder\nL2 = XInput-1/+LeftTrigger\nR1 = XInput-1/RightShoulder\nR2 = XInput-1/+RightTrigger\nL3 = XInput-1/LeftStick\nR3 = XInput-1/RightStick\nLUp = XInput-1/-LeftY\nLRight = XInput-1/+LeftX\nLDown = XInput-1/+LeftY\nLLeft = XInput-1/-LeftX\nRUp = XInput-1/-RightY\nRRight = XInput-1/+RightX\nRDown = XInput-1/+RightY\nRLeft = XInput-1/-RightX\nLargeMotor = XInput-1/LargeMotor\nSmallMotor = XInput-1/SmallMotor\n`;
             modified = true;
           }
           if (modified) {
@@ -5189,7 +5255,7 @@ function startEmbeddedLauncher(opts = {}) {
 // of them.
 module.exports = {
   startEmbeddedLauncher, LAUNCHER_PORT: PORT, SHARE_PORT, getClientRoot,
-  loadConfig, persistEmulatorPath,
+  loadConfig, persistEmulatorPath, ensureStandalonePcsx2Config,
 };
 
 if (require.main === module) {
