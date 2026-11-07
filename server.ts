@@ -1090,7 +1090,11 @@ async function detectPlatformWithHeader(
   relativePath: string | undefined,
   absolutePath: string | null | undefined,
 ): Promise<string> {
-  const pathBased = detectPlatform(filename, relativePath);
+  let pathBased = detectPlatform(filename, relativePath);
+  if (pathBased === 'unknown' && absolutePath) {
+    const fromAbs = detectPlatform(filename, absolutePath);
+    if (fromAbs !== 'unknown') pathBased = fromAbs;
+  }
   const ext = path.extname(filename).toLowerCase();
 
   // Only worth opening the archive when nothing else identified it — a zip
@@ -32043,22 +32047,53 @@ Format as JSON:
 
         // Batch existence check — one query instead of N
         const allIds = roms.map(rom => crypto.createHash("md5").update(rom.relativePath).digest("hex"));
-        const existingIds = new Set<string>(
-          dbConnected && pool
-            ? (await pool.query(`SELECT id FROM games WHERE id = ANY($1::text[])`, [allIds]).catch(() => ({ rows: [] }))).rows.map((r: any) => String(r.id))
-            : mem.games.map(g => g.id)
-        );
+        const existingDbMap = new Map<string, string>(); // id -> platform
+        if (dbConnected && pool && allIds.length > 0) {
+          try {
+            const batchRes = await pool.query(
+              "SELECT id, platform FROM games WHERE id = ANY($1::text[])",
+              [allIds],
+            );
+            for (const row of batchRes.rows) existingDbMap.set(String(row.id), String(row.platform ?? "unknown"));
+          } catch { /* fall through */ }
+        } else {
+          for (const g of mem.games) existingDbMap.set(g.id, g.platform ?? "unknown");
+        }
 
         let added = 0;
+        let reclassified = 0;
         const known = await knownGameFiles();
         const skips = scanSkips(roms); // the same rules as the scan button
         for (const rom of roms) {
           const gameId = crypto.createHash("md5").update(rom.relativePath).digest("hex");
-          if (existingIds.has(gameId)) continue;
+          const { title: cleanTitle, platform, year } = scannedRomName(rom.filename, await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath));
+
+          if (existingDbMap.has(gameId)) {
+            const currentPlatform = existingDbMap.get(gameId)!;
+            const inferredPlatform = platform !== "unknown"
+              ? platform
+              : inferPlatformFromRecord(currentPlatform, rom.relativePath, cleanTitle);
+            if (inferredPlatform !== "unknown" && inferredPlatform !== currentPlatform) {
+              const repairedCore = (PLATFORM_CORES[inferredPlatform] ?? PLATFORM_CORES.unknown).coreId;
+              if (dbConnected && pool) {
+                pool.query(
+                  "UPDATE games SET platform=$1, core_id=$2, box_art=CASE WHEN box_art='' OR box_art IS NULL THEN $3 ELSE box_art END, updated_at=NOW() WHERE id=$4",
+                  [inferredPlatform, repairedCore, `/api/art/${gameId}`, gameId],
+                ).catch(() => {});
+              }
+              const memRow = mem.games.find((g) => g.id === gameId);
+              if (memRow) {
+                memRow.platform = inferredPlatform;
+                (memRow as any).coreId = repairedCore;
+              }
+              reclassified++;
+            }
+            continue;
+          }
+
           if (known.has(romBasename(rom.relativePath))) continue; // the same game in another folder
           if (skips.has(rom.fullPath)) continue;
           rememberGameFile(rom.relativePath);
-          const { title: cleanTitle, platform, year } = scannedRomName(rom.filename, await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath));
           if (dbConnected && pool) {
             await pool.query(
               `INSERT INTO games (id,title,platform,core_id,relative_path,box_art,hero_image,playtime,sync_status,dominant_color,description,developer,publisher,release_date,genre,players,rating,file_hash)
@@ -32070,7 +32105,7 @@ Format as JSON:
           }
           added++;
         }
-        log("INFO", `Auto-scan complete: ${roms.length} ROMs found, ${added} new added`, "scanner");
+        log("INFO", `Auto-scan complete: ${roms.length} ROMs found, ${added} new added, ${reclassified} reclassified`, "scanner");
       } catch (err) {
         log("WARN", `Auto-scan skipped: ${String(err)}`, "scanner");
       }
