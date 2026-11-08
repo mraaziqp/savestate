@@ -23,10 +23,16 @@ export function LibraryManager() {
   // Filters
   const [typeFilter, setTypeFilter] = useState("all"); // "all" | "games" | "media"
   const [driveFilter, setDriveFilter] = useState("all");
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState("size_desc");
   const [offset, setOffset] = useState(0);
   const limit = 50;
+
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput), 250);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   // Selected items: Set of item IDs
   const [selectedIds, setSelectedIds] = useState(new Set());
@@ -315,8 +321,8 @@ export function LibraryManager() {
         <input
           type="text"
           placeholder="Filter by title or file path..."
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setOffset(0); }}
+          value={searchInput}
+          onChange={(e) => { setSearchInput(e.target.value); setOffset(0); }}
           style={{
             height: 36,
             background: "rgba(255,255,255,0.06)",

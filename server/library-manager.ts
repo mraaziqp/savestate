@@ -1,7 +1,8 @@
 import type express from "express";
 import path from "node:path";
 import { statfs, stat, unlink, rm, rename, copyFile, mkdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { execFile } from "node:child_process";
 
 export type LibraryManagerDeps = {
   app: express.Express;
@@ -33,10 +34,55 @@ function isCloud(p: string): boolean {
 
 function getDriveLetter(p: string): string {
   if (!p) return "Unknown";
+  if (isCloud(p)) return "Google Drive";
   const m = /^([A-Za-z]:)/.exec(p);
   if (m) return m[1].toUpperCase();
-  if (isCloud(p)) return "Google Drive";
   return "Local";
+}
+
+let gdriveQuotaCache: { at: number; data: { total: number; free: number; used: number } } | null = null;
+let gdriveFetching = false;
+
+function refreshGdriveQuotaInBackground(): void {
+  if (gdriveFetching) return;
+  gdriveFetching = true;
+  execFile("rclone", ["about", "gdrive:", "--json"], { timeout: 10000 }, (err, stdout) => {
+    gdriveFetching = false;
+    if (!err && stdout) {
+      try {
+        const json = JSON.parse(stdout.trim());
+        const total = Number(json.total) || 0;
+        const free = Number(json.free) || 0;
+        const used = Number(json.used) || 0;
+        if (total > 0) {
+          gdriveQuotaCache = { at: Date.now(), data: { total, free, used } };
+        }
+      } catch {}
+    }
+  });
+}
+
+// Pre-seed Google Drive quota cache on boot
+refreshGdriveQuotaInBackground();
+
+async function getGdriveCloudQuota(): Promise<{ total: number; free: number; used: number } | null> {
+  if (!gdriveQuotaCache || Date.now() - gdriveQuotaCache.at > 300_000) {
+    refreshGdriveQuotaInBackground();
+  }
+  return gdriveQuotaCache?.data ?? null;
+}
+
+let cachedGamesCount: { at: number; count: number } | null = null;
+async function getGamesTotal(pool: any, whereSql: string, params: any[]): Promise<number> {
+  if (whereSql === "WHERE 1=1" && cachedGamesCount && Date.now() - cachedGamesCount.at < 60_000) {
+    return cachedGamesCount.count;
+  }
+  const countRes = await pool.query(`SELECT COUNT(*)::int AS count FROM games ${whereSql}`, params);
+  const count = Number(countRes.rows[0]?.count ?? 0);
+  if (whereSql === "WHERE 1=1") {
+    cachedGamesCount = { at: Date.now(), count };
+  }
+  return count;
 }
 
 export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
@@ -47,18 +93,30 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
     try {
       const candidates = ["C:\\", "E:\\", "F:\\", "I:\\"];
       const drives: Array<{ drive: string; label: string; totalBytes: number; freeBytes: number; usedBytes: number; totalFormatted: string; freeFormatted: string; percentUsed: number; isCloud: boolean }> = [];
+      let hasGoogleDrive = false;
 
       for (const d of candidates) {
         try {
           const s = await statfs(d);
-          const total = Number(s.bsize) * Number(s.blocks);
-          const free = Number(s.bsize) * Number(s.bavail);
-          const used = Math.max(0, total - free);
+          let total = Number(s.bsize) * Number(s.blocks);
+          let free = Number(s.bsize) * Number(s.bavail);
+          let used = Math.max(0, total - free);
           const isCl = d.startsWith("I:") || isCloud(d);
-          const label = d.startsWith("C:") ? "SSD (System C:)"
+          let label = d.startsWith("C:") ? "SSD (System C:)"
             : d.startsWith("E:") ? "External Storage (E:)"
             : d.startsWith("F:") ? "Storage (F:)"
             : "Google Drive (I:)";
+
+          if (d.startsWith("I:") || isCl) {
+            hasGoogleDrive = true;
+            const gquota = await getGdriveCloudQuota();
+            if (gquota && gquota.total > 0) {
+              total = gquota.total;
+              free = gquota.free;
+              used = gquota.used;
+              label = "Google Drive (Cloud)";
+            }
+          }
 
           drives.push({
             drive: d.replace(/\\$/, ""),
@@ -73,6 +131,23 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
           });
         } catch {
           // Drive not mounted / unreachable
+        }
+      }
+
+      if (!hasGoogleDrive) {
+        const gquota = await getGdriveCloudQuota();
+        if (gquota && gquota.total > 0) {
+          drives.push({
+            drive: "Google Drive",
+            label: "Google Drive (Cloud)",
+            totalBytes: gquota.total,
+            freeBytes: gquota.free,
+            usedBytes: gquota.used,
+            totalFormatted: humanBytes(gquota.total),
+            freeFormatted: humanBytes(gquota.free),
+            percentUsed: Math.round((gquota.used / gquota.total) * 100),
+            isCloud: true,
+          });
         }
       }
 
@@ -123,158 +198,250 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
       const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? "50"), 10) || 50));
       const offset = Math.max(0, parseInt(String(req.query.offset ?? "0"), 10) || 0);
 
-      const items: Array<{
-        id: string;
-        type: "game" | "media";
-        title: string;
-        platform?: string;
-        category?: string;
-        path: string;
-        relativePath?: string;
-        drive: string;
-        size: number;
-        sizeFormatted: string;
-        isCloud: boolean;
-        boxArt?: string | null;
-        updatedAt?: string | null;
-      }> = [];
+      log("INFO", `[items-query] start: type=${type} limit=${limit} offset=${offset}`, "library");
 
       const cfg = await getVaultConfig().catch(() => ({ root_path: "C:\\Users\\mraaz\\nexus-cloud-media\\roms" }));
       const extraRoots = getExtraRoots(cfg);
 
-      // Collect Games
-      if (type === "all" || type === "games") {
-        let gameRows: any[] = [];
-        if (pool) {
-          try {
-            let sql = "SELECT id, title, platform, relative_path, file_size, box_art, updated_at FROM games WHERE 1=1";
-            const params: any[] = [];
-            if (platformFilter) {
-              params.push(platformFilter);
-              sql += ` AND LOWER(platform) = $${params.length}`;
-            }
-            if (search) {
-              params.push(`%${search}%`);
-              sql += ` AND (LOWER(title) LIKE $${params.length} OR LOWER(relative_path) LIKE $${params.length})`;
-            }
-            sql += " ORDER BY file_size DESC NULLS LAST, title ASC LIMIT 3000";
-            const r = await pool.query(sql, params);
-            gameRows = r.rows;
-          } catch {
-            gameRows = mem.games;
-          }
+      const candRoots = [
+        "E:\\ROMS",
+        cfg.root_path || "C:\\Users\\mraaz\\nexus-cloud-media\\roms",
+        ...extraRoots,
+        "F:\\SaveState\\client-roms",
+      ].filter((r) => r && !isCloud(r));
+
+      function formatGameRow(g: any) {
+        const rel = String(g.relative_path ?? g.relativePath ?? "").trim();
+        const cleanRel = rel.replace(/^\.\//, "").replace(/\//g, path.sep);
+        let absPath = "";
+        let drv = "E:";
+        let isCl = false;
+
+        if (path.isAbsolute(rel)) {
+          absPath = rel;
+          drv = getDriveLetter(absPath);
+          isCl = isCloud(absPath);
+        } else if (cleanRel.toLowerCase().includes("nexus-cloud-media") || cleanRel.toLowerCase().includes("drive")) {
+          absPath = path.resolve(cfg.root_path || "C:\\Users\\mraaz\\nexus-cloud-media\\roms", cleanRel);
+          drv = "Google Drive";
+          isCl = true;
         } else {
-          gameRows = mem.games;
+          absPath = path.resolve("E:\\ROMS", cleanRel);
+          drv = "E:";
+          isCl = false;
         }
 
-        for (const g of gameRows) {
-          const rel = String(g.relative_path ?? g.relativePath ?? "");
-          let absPath = "";
-          // Fast resolution: check if already absolute, or under root/extraRoots
-          if (path.isAbsolute(rel) && existsSync(rel)) {
-            absPath = rel;
-          } else {
-            // Check common roots
-            const cand = path.resolve(cfg.root_path || "E:\\ROMS", rel.replace(/^\.\//, ""));
-            if (existsSync(cand)) {
-              absPath = cand;
-            } else {
-              absPath = rel; // fallback
-            }
-          }
+        const sz = Number(g.file_size) || 0;
 
-          const drv = getDriveLetter(absPath);
-          const isCl = isCloud(absPath);
+        return {
+          id: String(g.id),
+          type: "game" as const,
+          title: g.title,
+          platform: g.platform,
+          path: absPath,
+          relativePath: rel,
+          drive: drv,
+          size: sz,
+          sizeFormatted: humanBytes(sz),
+          isCloud: isCl,
+          boxArt: g.box_art || `/api/art/${g.id}`,
+          updatedAt: g.updated_at ? new Date(g.updated_at).toISOString() : null,
+        };
+      }
 
-          if (driveFilter !== "ALL") {
-            if (driveFilter === "I:" || driveFilter === "CLOUD" || driveFilter === "GOOGLE DRIVE") {
-              if (!isCl && drv !== "I:") continue;
-            } else if (drv !== driveFilter) {
-              continue;
-            }
-          }
+      function formatMediaRow(m: any) {
+        const title = m.seriesTitle ? `${m.seriesTitle} S${String(m.season).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}` : (m.name || path.basename(m.path));
+        const drv = getDriveLetter(m.path);
+        const sz = Number(m.size) || 0;
+        return {
+          id: String(m.id),
+          type: "media" as const,
+          title,
+          category: m.category,
+          path: m.path,
+          relativePath: m.relPath,
+          drive: drv,
+          size: sz,
+          sizeFormatted: humanBytes(sz),
+          isCloud: isCloud(m.path),
+          boxArt: m.relatedCoverRelPath ? `/api/media/cover/${encodeURIComponent(m.id)}` : null,
+          updatedAt: m.updatedAt ? new Date(m.updatedAt).toISOString() : null,
+        };
+      }
 
-          const sz = Number(g.file_size) || 0;
-
-          items.push({
-            id: String(g.id),
-            type: "game",
-            title: g.title,
-            platform: g.platform,
-            path: absPath,
-            relativePath: rel,
-            drive: drv,
-            size: sz,
-            sizeFormatted: humanBytes(sz),
-            isCloud: isCl,
-            boxArt: g.box_art || `/api/art/${g.id}`,
-            updatedAt: g.updated_at ? new Date(g.updated_at).toISOString() : null,
+      function filterMediaList() {
+        let list = (mem.media || []).filter((m: any) => m.kind === "video");
+        if (search) {
+          list = list.filter((m: any) => {
+            const title = m.seriesTitle ? `${m.seriesTitle} S${String(m.season).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}` : (m.name || path.basename(m.path));
+            return title.toLowerCase().includes(search) || (m.path && m.path.toLowerCase().includes(search));
           });
+        }
+        if (categoryFilter) {
+          list = list.filter((m: any) => m.category === categoryFilter);
+        }
+        if (driveFilter !== "ALL") {
+          list = list.filter((m: any) => {
+            const drv = getDriveLetter(m.path);
+            const isCl = isCloud(m.path);
+            if (driveFilter === "I:" || driveFilter === "CLOUD" || driveFilter === "GOOGLE DRIVE") {
+              return isCl || drv === "I:";
+            }
+            return drv === driveFilter;
+          });
+        }
+        return list;
+      }
+
+      function sortMediaList(list: any[]) {
+        if (sort === "size_desc") {
+          list.sort((a: any, b: any) => (Number(b.size) || 0) - (Number(a.size) || 0));
+        } else if (sort === "size_asc") {
+          list.sort((a: any, b: any) => (Number(a.size) || 0) - (Number(b.size) || 0));
+        } else if (sort === "title_asc") {
+          list.sort((a: any, b: any) => {
+            const at = a.seriesTitle || a.name || path.basename(a.path);
+            const bt = b.seriesTitle || b.name || path.basename(b.path);
+            return at.localeCompare(bt);
+          });
+        } else if (sort === "date_desc") {
+          list.sort((a: any, b: any) => (b.updatedAt ? new Date(b.updatedAt).getTime() : 0) - (a.updatedAt ? new Date(a.updatedAt).getTime() : 0));
+        }
+        return list;
+      }
+
+      // CASE 1: Games only (Pushdown to Neon DB)
+      if (type === "games") {
+        if (pool) {
+          let whereSql = "WHERE 1=1";
+          const params: any[] = [];
+          if (platformFilter) {
+            params.push(platformFilter);
+            whereSql += ` AND LOWER(platform) = $${params.length}`;
+          }
+          if (search) {
+            params.push(`%${search}%`);
+            whereSql += ` AND (LOWER(title) LIKE $${params.length} OR LOWER(relative_path) LIKE $${params.length})`;
+          }
+          if (driveFilter !== "ALL") {
+            if (driveFilter === "E:") {
+              whereSql += " AND (file_size > 0 OR relative_path LIKE 'E:%')";
+            } else if (driveFilter === "C:") {
+              whereSql += " AND relative_path LIKE 'C:%'";
+            } else if (driveFilter === "I:" || driveFilter === "CLOUD" || driveFilter === "GOOGLE DRIVE") {
+              whereSql += " AND (relative_path LIKE 'I:%' OR relative_path ILIKE '%cloud%')";
+            }
+          }
+
+          let orderSql = "ORDER BY file_size DESC NULLS LAST, title ASC";
+          if (sort === "size_asc") orderSql = "ORDER BY file_size ASC NULLS LAST, title ASC";
+          else if (sort === "title_asc") orderSql = "ORDER BY title ASC";
+          else if (sort === "date_desc") orderSql = "ORDER BY updated_at DESC NULLS LAST, id DESC";
+
+          const total = await getGamesTotal(pool, whereSql, params);
+
+          params.push(limit);
+          const limitIdx = params.length;
+          params.push(offset);
+          const offsetIdx = params.length;
+
+          const dataRes = await pool.query(
+            `SELECT id, title, platform, relative_path, file_size, box_art, updated_at FROM games ${whereSql} ${orderSql} LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+            params
+          );
+
+          const items = dataRes.rows.map(formatGameRow);
+          return res.json({ ok: true, total, offset, limit, items });
+        } else {
+          let gList = [...mem.games];
+          if (platformFilter) gList = gList.filter((g) => (g.platform || "").toLowerCase() === platformFilter);
+          if (search) gList = gList.filter((g) => (g.title || "").toLowerCase().includes(search));
+          const total = gList.length;
+          const items = gList.slice(offset, offset + limit).map(formatGameRow);
+          return res.json({ ok: true, total, offset, limit, items });
         }
       }
 
-      // Collect Media
-      if (type === "all" || type === "media") {
-        const mediaList = (mem.media || []).filter(m => m.kind === "video");
-        for (const m of mediaList) {
-          const title = m.seriesTitle ? `${m.seriesTitle} S${String(m.season).padStart(2, "0")}E${String(m.episode).padStart(2, "0")}` : (m.name || path.basename(m.path));
-          if (search && !title.toLowerCase().includes(search) && !m.path.toLowerCase().includes(search)) {
-            continue;
-          }
-          if (categoryFilter && m.category !== categoryFilter) {
-            continue;
-          }
-
-          const drv = getDriveLetter(m.path);
-          const isCl = isCloud(m.path);
-
-          if (driveFilter !== "ALL") {
-            if (driveFilter === "I:" || driveFilter === "CLOUD" || driveFilter === "GOOGLE DRIVE") {
-              if (!isCl && drv !== "I:") continue;
-            } else if (drv !== driveFilter) {
-              continue;
-            }
-          }
-
-          const sz = Number(m.size) || 0;
-
-          items.push({
-            id: String(m.id),
-            type: "media",
-            title,
-            category: m.category,
-            path: m.path,
-            relativePath: m.relPath,
-            drive: drv,
-            size: sz,
-            sizeFormatted: humanBytes(sz),
-            isCloud: isCl,
-            boxArt: m.relatedCoverRelPath ? `/api/media/cover/${encodeURIComponent(m.id)}` : null,
-            updatedAt: m.updatedAt ? new Date(m.updatedAt).toISOString() : null,
-          });
-        }
+      // CASE 2: Media only
+      if (type === "media") {
+        const filtered = filterMediaList();
+        sortMediaList(filtered);
+        const total = filtered.length;
+        const items = filtered.slice(offset, offset + limit).map(formatMediaRow);
+        return res.json({ ok: true, total, offset, limit, items });
       }
 
-      // Sort
+      // CASE 3: Both Games and Media
+      let gamesTotal = 0;
+      let gameItems: any[] = [];
+
+      if (pool) {
+        let whereSql = "WHERE 1=1";
+        const params: any[] = [];
+        if (platformFilter) {
+          params.push(platformFilter);
+          whereSql += ` AND LOWER(platform) = $${params.length}`;
+        }
+        if (search) {
+          params.push(`%${search}%`);
+          whereSql += ` AND (LOWER(title) LIKE $${params.length} OR LOWER(relative_path) LIKE $${params.length})`;
+        }
+        if (driveFilter !== "ALL") {
+          if (driveFilter === "E:") {
+            whereSql += " AND (file_size > 0 OR relative_path LIKE 'E:%')";
+          } else if (driveFilter === "C:") {
+            whereSql += " AND relative_path LIKE 'C:%'";
+          } else if (driveFilter === "I:" || driveFilter === "CLOUD" || driveFilter === "GOOGLE DRIVE") {
+            whereSql += " AND (relative_path LIKE 'I:%' OR relative_path ILIKE '%cloud%')";
+          }
+        }
+
+        let orderSql = "ORDER BY file_size DESC NULLS LAST, title ASC";
+        if (sort === "size_asc") orderSql = "ORDER BY file_size ASC NULLS LAST, title ASC";
+        else if (sort === "title_asc") orderSql = "ORDER BY title ASC";
+        else if (sort === "date_desc") orderSql = "ORDER BY updated_at DESC NULLS LAST, id DESC";
+
+        gamesTotal = await getGamesTotal(pool, whereSql, params);
+
+        const fetchMax = Math.min(500, offset + limit);
+        params.push(fetchMax);
+        const limitIdx = params.length;
+
+        const dataRes = await pool.query(
+          `SELECT id, title, platform, relative_path, file_size, box_art, updated_at FROM games ${whereSql} ${orderSql} LIMIT $${limitIdx}`,
+          params
+        );
+        gameItems = dataRes.rows.map(formatGameRow);
+      } else {
+        gamesTotal = mem.games.length;
+        gameItems = mem.games.slice(0, offset + limit).map(formatGameRow);
+      }
+
+      const mediaFiltered = filterMediaList();
+      sortMediaList(mediaFiltered);
+      const mediaTotal = mediaFiltered.length;
+      const mediaItems = mediaFiltered.slice(0, offset + limit).map(formatMediaRow);
+
+      const combined = [...gameItems, ...mediaItems];
       if (sort === "size_desc") {
-        items.sort((a, b) => b.size - a.size);
+        combined.sort((a, b) => b.size - a.size);
       } else if (sort === "size_asc") {
-        items.sort((a, b) => a.size - b.size);
+        combined.sort((a, b) => a.size - b.size);
       } else if (sort === "title_asc") {
-        items.sort((a, b) => a.title.localeCompare(b.title));
+        combined.sort((a, b) => a.title.localeCompare(b.title));
       } else if (sort === "date_desc") {
-        items.sort((a, b) => (b.updatedAt ? new Date(b.updatedAt).getTime() : 0) - (a.updatedAt ? new Date(a.updatedAt).getTime() : 0));
+        combined.sort((a, b) => (b.updatedAt ? new Date(b.updatedAt).getTime() : 0) - (a.updatedAt ? new Date(a.updatedAt).getTime() : 0));
       }
 
-      const total = items.length;
-      const paginated = items.slice(offset, offset + limit);
+      const total = gamesTotal + mediaTotal;
+      const items = combined.slice(offset, offset + limit);
 
       return res.json({
         ok: true,
         total,
         offset,
         limit,
-        items: paginated,
+        items,
       });
     } catch (err: any) {
       log("ERROR", `library items query failed: ${err.message}`, "library");

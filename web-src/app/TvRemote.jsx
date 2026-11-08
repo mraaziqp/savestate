@@ -79,6 +79,7 @@ export function TvRemote() {
         if (msg.type === "paired") {
           setStatus("connected");
           setPairedDisplay({ displayId: msg.displayId, pin: msg.pin, name: msg.displayDevice });
+          try { localStorage.setItem("nx_tv_remote_pin", msg.pin); } catch {}
           vibrate(40);
         } else if (msg.type === "media_status") {
           setMediaState({
@@ -165,12 +166,25 @@ export function TvRemote() {
     return () => window.removeEventListener("nexus:open-remote", onOpen);
   }, [connectToDisplay]);
 
-  // If user opens ?remote=1 on phone, keep remote open by default
+  // If user opens ?remote=1 on phone or passes pin in URL, connect immediately
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("remote") || window.location.hash.includes("remote")) {
+    const sp = new URLSearchParams(window.location.search);
+    const isRemoteUrl = sp.has("remote") || window.location.hash.includes("remote");
+    const pinParam = sp.get("pin");
+
+    if (isRemoteUrl || pinParam) {
       setIsOpen(true);
-      // Auto-connect if active displays exist
-      if (displays.length === 1 && status === "disconnected") {
+    }
+
+    if (pinParam) {
+      setPinInput(pinParam);
+      connectToDisplay(pinParam);
+    } else if (isRemoteUrl && status === "disconnected") {
+      const saved = localStorage.getItem("nx_tv_remote_pin");
+      if (saved && displays.some(d => d.pin === saved)) {
+        setPinInput(saved);
+        connectToDisplay(saved);
+      } else if (displays.length === 1) {
         connectToDisplay(displays[0].pin);
       }
     }
@@ -600,6 +614,7 @@ export function TvRemote() {
  */
 export function TvDisplayListener({ onOpenRemote }) {
   const [pin, setPin] = useState(null);
+  const [qrData, setQrData] = useState(null);
   const [controllerCount, setControllerCount] = useState(0);
   const [showPairModal, setShowPairModal] = useState(false);
   const wsRef = useRef(null);
@@ -610,6 +625,30 @@ export function TvDisplayListener({ onOpenRemote }) {
 
     let ws = null;
     let keepAlive = null;
+
+    const pushVideoStatus = () => {
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      const v = document.querySelector("video");
+      if (!v) return;
+      try {
+        wsRef.current.send(JSON.stringify({
+          type: "media_status",
+          playing: !v.paused,
+          currentTime: Math.round(v.currentTime),
+          duration: Math.round(v.duration || 0),
+          title: document.title,
+          isVideo: true,
+        }));
+      } catch {}
+    };
+
+    // Attach video status listeners across DOM
+    const onPlay = () => pushVideoStatus();
+    const onPause = () => pushVideoStatus();
+    const onSeeked = () => pushVideoStatus();
+    document.addEventListener("play", onPlay, true);
+    document.addEventListener("pause", onPause, true);
+    document.addEventListener("seeked", onSeeked, true);
 
     const connectDisplay = () => {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -624,13 +663,19 @@ export function TvDisplayListener({ onOpenRemote }) {
           const msg = JSON.parse(evt.data);
           if (msg.type === "registered") {
             setPin(msg.pin);
+            if (msg.qrData) setQrData(msg.qrData);
           } else if (msg.type === "controller_joined") {
             setControllerCount(msg.controllerCount || 1);
+            pushVideoStatus();
           } else if (msg.type === "controller_left") {
             setControllerCount(msg.controllerCount || 0);
           } else if (msg.type === "nav") {
             // Directional gamepad navigation
-            if (window.__nxGamepadNav) {
+            if (msg.action === "home") {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+              const b = document.querySelector("main button, [tabindex='0']");
+              b?.focus();
+            } else if (window.__nxGamepadNav) {
               window.__nxGamepadNav(msg.action, {});
             }
           } else if (msg.type === "scroll") {
@@ -650,6 +695,7 @@ export function TvDisplayListener({ onOpenRemote }) {
                 if (document.fullscreenElement) document.exitFullscreen?.();
                 else video.requestFullscreen?.() || video.parentElement?.requestFullscreen?.();
               }
+              setTimeout(pushVideoStatus, 50);
             }
           } else if (msg.type === "input") {
             // Search / text input
@@ -689,6 +735,9 @@ export function TvDisplayListener({ onOpenRemote }) {
 
     return () => {
       clearInterval(keepAlive);
+      document.removeEventListener("play", onPlay, true);
+      document.removeEventListener("pause", onPause, true);
+      document.removeEventListener("seeked", onSeeked, true);
       try { ws?.close(); } catch {}
     };
   }, []);
@@ -778,11 +827,36 @@ export function TvDisplayListener({ onOpenRemote }) {
               alignItems: "center",
               gap: 8,
             }}>
-              <div style={{ fontSize: 13, color: "#cbd5e1" }}>On your phone browser, open:</div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: "#60a5fa" }}>
-                {window.location.origin}/?remote=1
-              </div>
-              <div style={{ fontSize: 13, color: "#cbd5e1", marginTop: 8 }}>Enter this 4-digit PIN:</div>
+              {qrData ? (
+                <div style={{ marginBottom: 12, textAlign: "center" }}>
+                  <img
+                    src={qrData}
+                    alt="Scan QR Code to Pair"
+                    style={{
+                      width: 170,
+                      height: 170,
+                      borderRadius: 12,
+                      background: "#fff",
+                      padding: 8,
+                      display: "block",
+                      margin: "0 auto 6px",
+                      boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
+                    }}
+                  />
+                  <div style={{ fontSize: 12, color: "#38bdf8", fontWeight: 600 }}>
+                    📷 Scan with phone camera to connect
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 13, color: "#cbd5e1" }}>On your phone browser, open:</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: "#60a5fa" }}>
+                    {window.location.origin}/?remote=1
+                  </div>
+                </>
+              )}
+
+              <div style={{ fontSize: 13, color: "#cbd5e1", marginTop: 4 }}>Or enter this 4-digit PIN:</div>
               <div style={{
                 fontSize: 38,
                 fontWeight: 900,

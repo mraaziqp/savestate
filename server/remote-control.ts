@@ -1,6 +1,7 @@
 import type express from "express";
 import type http from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
+import QRCode from "qrcode";
 
 export type RemoteControlDeps = {
   httpServer: http.Server;
@@ -91,12 +92,34 @@ export function registerRemoteControl(deps: RemoteControlDeps) {
 
       log("INFO", `TV Display connected: ${displayId} (PIN: ${assignedPin})`, "remote");
 
-      ws.send(JSON.stringify({
-        type: "registered",
-        displayId,
-        pin: assignedPin,
-        deviceName,
-      }));
+      const host = req.headers.host || "localhost:3000";
+      const proto = req.headers["x-forwarded-proto"] || "http";
+      const remoteUrl = `${proto}://${host}/?remote=1&pin=${assignedPin}`;
+
+      void QRCode.toDataURL(remoteUrl, { margin: 1, width: 220 })
+        .then((qrData) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: "registered",
+              displayId,
+              pin: assignedPin,
+              deviceName,
+              remoteUrl,
+              qrData,
+            }));
+          }
+        })
+        .catch(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({
+              type: "registered",
+              displayId,
+              pin: assignedPin,
+              deviceName,
+              remoteUrl,
+            }));
+          }
+        });
 
       ws.on("message", (raw: string) => {
         try {
