@@ -6015,6 +6015,34 @@ async function startServer() {
     publicToNas = (req, res, next) => toNas(req, res, () => toPc(req, res, next));
   }
 
+  // A host made with install-host.ps1 has no app installers or SaveState
+  // Engine of its own (they would add ~180 MB to every host): when one of
+  // those downloads isn't here, it comes from savestate.co.za instead of
+  // failing. Off on savestate.co.za itself (and its NAS), so it never loops.
+  {
+    const upstream = String(process.env.NEXUS_UPSTREAM_URL ?? "https://savestate.co.za").replace(/\/+$/, "");
+    const hostOf = (u: string) => { try { return new URL(u).host.toLowerCase(); } catch { return ""; } };
+    const self = hostOf(String(process.env.NEXUS_PUBLIC_URL ?? ""));
+    const upstreamFor = !!upstream && !!self && self !== hostOf(upstream);
+    const FROM_UPSTREAM = /^\/(api\/downloads\/|api\/client-launcher\/engine)/;
+    if (upstreamFor) {
+      app.use((req, res, next) => {
+        if (req.method !== "GET" || !FROM_UPSTREAM.test(req.path)) return next();
+        // A "not here" answer becomes a redirect; anything chained after
+        // res.status(404) (.json, .send, .type().send) then does nothing.
+        const status = res.status.bind(res);
+        const sink: any = new Proxy(function () {}, { get: () => sink, apply: () => sink });
+        (res as any).status = (code: number) => {
+          if (code === 404 && !res.headersSent) { res.redirect(302, upstream + req.originalUrl); return sink; }
+          return status(code);
+        };
+        next();
+      });
+      (app as any).locals.nxUpstream = upstream;
+      log("INFO", `Downloads this host doesn't have come from ${upstream}`, "kernel");
+    }
+  }
+
   const PUBLIC_API_PREFIXES = [
     "/api/health",              // includes /api/health/full
     "/api/auth/login",
@@ -22721,11 +22749,70 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return candidateDefault;
   }
 
+  // The same lookup without blocking: request handlers use this one. A file
+  // the library index doesn't know (a series' poster.jpg) was checked with
+  // existsSync on Google Drive, and a page of posters froze the whole server,
+  // every stream with it, for up to 203 s (2026-11-08). Each answer is kept
+  // like existsMemo's, and many requests for one file share a single check.
+  const _existsPending = new Map<string, Promise<boolean>>();
+  function existsAsync(p: string): Promise<boolean> {
+    const hit = _existsMemo.get(p);
+    if (hit && Date.now() - hit.at < (hit.ok ? 300_000 : 30_000)) return Promise.resolve(hit.ok);
+    const pending = _existsPending.get(p);
+    if (pending) return pending;
+    const check = fsAccess(p).then(() => true, () => false).then((ok) => {
+      if (_existsMemo.size > 5000) _existsMemo.clear();
+      _existsMemo.set(p, { ok, at: Date.now() });
+      _existsPending.delete(p);
+      return ok;
+    });
+    _existsPending.set(p, check);
+    return check;
+  }
+
+  async function resolveMediaTargetAsync(rel: string): Promise<string> {
+    let raw = String(rel ?? "").trim();
+    if (!raw) return "";
+    raw = raw.replace(/^[/\\]+([a-zA-Z]:)/, "$1");
+
+    // 1. A file the library knows (by path, relative path, id or name).
+    const memFound = mediaIndex().get(raw) ?? mediaIndex().get(raw.replace(/\\/g, "/"));
+    if (memFound?.path && isAllowedMediaPath(memFound.path)) return memFound.path;
+
+    // 2. An absolute path to an allowed folder.
+    if (path.isAbsolute(raw) && isAllowedMediaPath(raw) && await existsAsync(raw)) return raw;
+
+    // 3. Check current mediaRoot
+    const defaultRoot = path.resolve(mediaRoot || DEFAULT_MEDIA_ROOT);
+    const candidateDefault = path.resolve(defaultRoot, raw);
+    if (isAllowedMediaPath(candidateDefault) && await existsAsync(candidateDefault)) {
+      return candidateDefault;
+    }
+
+    // 4. Search across all MEDIA_DRIVE_ROOTS and standard subdirectories
+    for (const driveRoot of MEDIA_DRIVE_ROOTS) {
+      const absRoot = path.resolve(driveRoot);
+      const candidates = [
+        path.resolve(absRoot, raw),
+        path.resolve(absRoot, 'TV Shows', raw),
+        path.resolve(absRoot, 'Movies', raw),
+      ];
+      for (const cand of candidates) {
+        if (isAllowedMediaPath(cand) && await existsAsync(cand)) {
+          return cand;
+        }
+      }
+    }
+
+    // Fall back to candidateDefault
+    return candidateDefault;
+  }
+
   app.get("/api/media/file", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
 
-    let target = resolveMediaTarget(rel);
+    let target = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
     // A film with a prepared copy (server/videoprep.ts) plays that: an MP4 every browser opens.
     if (VIDEO_EXT.has(path.extname(target).toLowerCase())) target = videoPrep.copyFor(target) ?? target;
@@ -22906,7 +22993,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
 
-    const original = resolveMediaTarget(rel);
+    const original = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(original)) return res.status(403).json({ error: "Path outside media root" });
 
     try {
@@ -23883,7 +23970,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.post("/api/media/prewarm", express.json(), async (req, res) => {
     const rel = String(req.body?.rel ?? req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
-    const target = resolveMediaTarget(rel);
+    const target = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(target)) return res.status(403).json({ error: "Path outside media root" });
     const audioTrack = Math.max(0, parseInt(String(req.body?.audio_track ?? "0"), 10) || 0);
     const resumeAt = Number(req.body?.start ?? 0) || 0;
@@ -23894,7 +23981,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get("/api/media/hls/playlist.m3u8", async (req, res) => {
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel query required" });
-    const original = resolveMediaTarget(rel);
+    const original = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(original)) return res.status(403).json({ error: "Path outside media root" });
     try {
       const st = await stat(original);
@@ -24014,7 +24101,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     const n = Math.max(0, parseInt(String(req.query.n ?? "0"), 10) || 0);
     if (!rel) return res.status(400).json({ error: "rel query required" });
-    const original = resolveMediaTarget(rel);
+    const original = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(original)) return res.status(403).json({ error: "Path outside media root" });
     if (await viaHelper(req, res, original)) return;
     const target = videoPrep.copyFor(original) ?? original;
@@ -24306,7 +24393,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const rel = String(req.query.rel ?? "").trim();
     if (!rel) return res.status(400).json({ error: "rel required" });
 
-    const original = resolveMediaTarget(rel);
+    const original = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(original)) return res.status(403).json({ error: "Forbidden" });
     const target = videoPrep.copyFor(original) ?? original;
 
@@ -24614,7 +24701,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     };
     for (const rel of safeRels) {
-      const target = resolveMediaTarget(rel);
+      const target = await resolveMediaTargetAsync(rel);
       if (!isAllowedMediaPath(target)) { errors.push(`Blocked: ${rel}`); continue; }
       if (await removeOne(target)) deleted++;
       // A film's prepared copy for other devices goes with it.
@@ -24624,7 +24711,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
     }
     // The film disappears from the list at once; the rescan follows on its own.
-    const gone = new Set(safeRels.map((r) => resolveMediaTarget(r)));
+    const gone = new Set(await Promise.all(safeRels.map((r) => resolveMediaTargetAsync(r))));
     mem.media = mem.media.filter((m) => !gone.has(m.path) && !safeRels.includes(m.relPath));
     void refreshMediaLibrary().catch(() => {});
     log("INFO", `Media delete: ${deleted} file(s) removed${errors.length ? `, ${errors.length} failed` : ""}`, "media");
@@ -24966,7 +25053,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const trackIndex = Math.max(0, parseInt(String(req.query.track ?? "0"), 10) || 0);
     if (!rel) return res.status(400).json({ error: "rel required" });
 
-    const target = resolveMediaTarget(rel);
+    const target = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(target)) return res.status(403).json({ error: "Forbidden" });
 
     try {
@@ -25358,8 +25445,10 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
    */
   async function borrowIntroFromSibling(absPath: string, cache: Record<string, any>) {
     const dir = path.dirname(absPath);
-    const candidates = Object.entries(cache).filter(([rel, v]) =>
-      v && typeof v === 'object' && v.endMs > v.startMs && path.dirname(resolveMediaTarget(rel)) === dir);
+    // Resolved without blocking (one check per cached episode added up).
+    const withIntro = Object.entries(cache).filter(([, v]) => v && typeof v === 'object' && v.endMs > v.startMs);
+    const where = await Promise.all(withIntro.map(([rel]) => resolveMediaTargetAsync(rel)));
+    const candidates = withIntro.filter((_, i) => path.dirname(where[i]) === dir);
     if (!candidates.length) return null;
     // Prefer a marker that was directly detected over one already borrowed, so
     // a mistake cannot propagate through a whole season.
@@ -25371,7 +25460,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   app.get('/api/media/intro-markers', async (req, res) => {
     const rel = String(req.query.rel ?? '').trim();
     if (!rel) return res.status(400).json({ error: 'rel required' });
-    const target = resolveMediaTarget(rel);
+    const target = await resolveMediaTargetAsync(rel);
     if (!isServableMediaPath(target)) return res.status(403).json({ error: 'Path outside media root' });
 
     const cache = await loadIntroCache();
@@ -30117,6 +30206,12 @@ Format as JSON:
     // desktop offers to install it.
     setHeaders: (res, file) => { if (/\.deb$/i.test(file)) res.setHeader('Content-Type', 'application/vnd.debian.binary-package'); },
   }));
+  // Not on this host: from savestate.co.za (see "Downloads this host doesn't have").
+  app.use('/updates', (req, res, next) => {
+    const up = (app as any).locals.nxUpstream;
+    if (up && req.method === 'GET') return res.redirect(302, `${up}/updates${req.url}`);
+    next();
+  });
 
   // Installer downloads are served from OUTSIDE the web bundle.
   //
@@ -30379,6 +30474,9 @@ Format as JSON:
     const platform = normalizeDesktopPlatform(raw);
     const installer = await findLatestDesktopInstaller(platform);
     if (installer) return res.redirect(302, `/updates/${encodeURIComponent(installer.fileName)}`);
+    // A host made with install-host.ps1: the real app from savestate.co.za.
+    const up = (app as any).locals.nxUpstream;
+    if (up) return res.redirect(302, `${up}${req.originalUrl}`);
     // No packaged desktop build is published from this host, but on Windows
     // the one-click client installer does the same job (it sets up the local
     // launcher, RetroArch and the cores). "Get the App > Windows" used to 404.

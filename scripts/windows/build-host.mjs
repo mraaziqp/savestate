@@ -31,6 +31,16 @@ cpSync(path.join(root, "dist"), path.join(stage, "dist"), {
   filter: (src) => { const b = path.basename(src); return !(b === "windows-host" || b.endsWith(".map") || /^server\.mjs\.(prev|new)/.test(b)); },
 });
 cpSync(path.join(root, "host", "host.mjs"), path.join(stage, "host.mjs"));
+// What the server reads from its own folder besides dist/: the Files page
+// (web/), the TV, watch and launcher pages (public/), the launcher it hands to
+// PCs, the install scripts it serves, and the co-op list. Without web/ the
+// Files section answered 404 on a new host.
+for (const item of ["web", "public", "client-launcher.cjs", "nucleus-compatibility.json",
+  "scripts/install.sh", "scripts/install-host.ps1", "scripts/client-install-linux.sh", "scripts/gamepad-bridge.py"]) {
+  const from = path.join(root, item);
+  if (existsSync(from)) cpSync(from, path.join(stage, item), { recursive: true });
+  else console.log(`note: ${item} is missing, left out`);
+}
 
 // 2. Only the packages the server really loads, plus the database. package.json
 //    also lists the website's build tools (bundlers, CSS compilers, a PDF
