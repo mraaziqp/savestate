@@ -1373,10 +1373,26 @@ export function createDrives(deps: DrivesDeps) {
       res.send(head + body.replace(/\r?\n/g, "\r\n"));
     });
 
-    app.get("/api/admin/offload/suggestions", async (_req, res) => {
+    // Finding the suggestions scans folders and checks each one, which took
+    // over 100 s and Cloudflare cut the page off (HTTP 524, 2026-11-08). The
+    // list is kept for 10 minutes, and a page waits at most 15 s: past that it
+    // gets the last list while the new one finishes in the background.
+    let sugg: { at: number; list: any[] } | null = null;
+    let suggBuilding: Promise<any[]> | null = null;
+    const buildSuggestions = () => (suggBuilding ??= (async () => {
       const list = (await deps.suggestions?.().catch(() => [])) ?? [];
       const ok = await Promise.all(list.map((s) => reachable(s.source)));
-      const out = list.filter((_, i) => ok[i]).map((s) => {
+      const kept = list.filter((_, i) => ok[i]);
+      sugg = { at: Date.now(), list: kept };
+      return kept;
+    })().finally(() => { suggBuilding = null; }));
+    app.get("/api/admin/offload/suggestions", async (_req, res) => {
+      let list = sugg && Date.now() - sugg.at < 10 * 60_000 ? sugg.list : null;
+      if (!list) {
+        const building = buildSuggestions();
+        list = await Promise.race([building, new Promise<null>((r) => setTimeout(() => r(null), 15_000))]) ?? sugg?.list ?? [];
+      }
+      const out = list.map((s) => {
         const job = jobs.find((j) => j.source.toLowerCase() === path.resolve(s.source).toLowerCase());
         return { ...s, status: job?.status ?? null };
       });
