@@ -10,6 +10,15 @@ const vibrate = (ms = 25) => {
   } catch {}
 };
 
+function formatTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return `${m}:${String(sec).padStart(2, "0")}`;
+}
+
 /**
  * TV Remote Component:
  * - When in Remote mode (on phone or when explicitly opened): Full tactile TV remote pad.
@@ -410,7 +419,7 @@ export function TvRemote() {
                     background: mode === "dpad" ? "#3b82f6" : "transparent",
                     color: "#fff",
                     fontWeight: 700,
-                    fontSize: 13,
+                    fontSize: 12,
                     cursor: "pointer",
                   }}
                 >
@@ -426,11 +435,11 @@ export function TvRemote() {
                     background: mode === "trackpad" ? "#3b82f6" : "transparent",
                     color: "#fff",
                     fontWeight: 700,
-                    fontSize: 13,
+                    fontSize: 12,
                     cursor: "pointer",
                   }}
                 >
-                  🖱️ Swipe Pad
+                  🖱️ Swipe
                 </button>
                 <button
                   onClick={() => setMode("media")}
@@ -442,11 +451,27 @@ export function TvRemote() {
                     background: mode === "media" ? "#3b82f6" : "transparent",
                     color: "#fff",
                     fontWeight: 700,
-                    fontSize: 13,
+                    fontSize: 12,
                     cursor: "pointer",
                   }}
                 >
                   🎬 Media
+                </button>
+                <button
+                  onClick={() => setMode("gamepad")}
+                  style={{
+                    flex: 1,
+                    padding: "8px 0",
+                    border: "none",
+                    borderRadius: 10,
+                    background: mode === "gamepad" ? "#3b82f6" : "transparent",
+                    color: "#fff",
+                    fontWeight: 700,
+                    fontSize: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  🕹️ Gamepad
                 </button>
               </div>
 
@@ -615,8 +640,29 @@ export function TvRemote() {
                     </div>
 
                     {mediaState.duration > 0 && (
-                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
-                        {Math.floor(mediaState.currentTime / 60)}:{String(mediaState.currentTime % 60).padStart(2, "0")} / {Math.floor(mediaState.duration / 60)}:{String(mediaState.duration % 60).padStart(2, "0")}
+                      <div style={{ marginTop: 12, padding: "0 4px" }}>
+                        <input
+                          type="range"
+                          min={0}
+                          max={mediaState.duration}
+                          value={mediaState.currentTime}
+                          onChange={(e) => {
+                            const val = Number(e.target.value);
+                            setMediaState((s) => ({ ...s, currentTime: val }));
+                            media("seek_to", val);
+                          }}
+                          style={{
+                            width: "100%",
+                            accentColor: "#38bdf8",
+                            cursor: "pointer",
+                            height: 6,
+                            borderRadius: 3,
+                          }}
+                        />
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94a3b8", marginTop: 4, fontFamily: "monospace" }}>
+                          <span>{formatTime(mediaState.currentTime)}</span>
+                          <span>{formatTime(mediaState.duration)}</span>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -647,20 +693,66 @@ export function TvRemote() {
                     </button>
                   </div>
 
-                  {/* Volume & Fullscreen */}
-                  <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-                    <button onClick={() => media("volume", -0.1)} style={pillControlBtn}>
+                  {/* Subtitles, Speed & Fullscreen */}
+                  <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                    <button onClick={() => media("subtitles")} style={{ ...pillControlBtn, flex: 1 }} title="Toggle Subtitles">
+                      💬 CC
+                    </button>
+                    <button onClick={() => media("speed")} style={{ ...pillControlBtn, flex: 1 }} title="Cycle Speed">
+                      ⏩ Speed
+                    </button>
+                    <button onClick={() => media("fullscreen")} style={{ ...pillControlBtn, flex: 1 }} title="Toggle Fullscreen">
+                      ⛶ Screen
+                    </button>
+                  </div>
+
+                  {/* Volume Controls */}
+                  <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
+                    <button onClick={() => media("volume", -0.1)} style={{ ...pillControlBtn, flex: 1 }}>
                       🔉 Vol -
                     </button>
-                    <button onClick={() => media("mute")} style={pillControlBtn}>
+                    <button onClick={() => media("mute")} style={{ ...pillControlBtn, flex: 1 }}>
                       🔇 Mute
                     </button>
-                    <button onClick={() => media("volume", 0.1)} style={pillControlBtn}>
+                    <button onClick={() => media("volume", 0.1)} style={{ ...pillControlBtn, flex: 1 }}>
                       🔊 Vol +
                     </button>
-                    <button onClick={() => media("fullscreen")} style={pillControlBtn}>
-                      ⛶ Fullscreen
-                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Mode 4: Virtual Gamepad */}
+              {mode === "gamepad" && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center" }}>
+                  {/* Top Bumpers L1 / R1 */}
+                  <div style={{ display: "flex", width: "100%", justifyContent: "space-between", padding: "0 10px" }}>
+                    <button onClick={() => send({ type: "gamepad", button: "L1" })} style={{ ...pillControlBtn, width: 85, padding: "8px 0" }}>L1</button>
+                    <button onClick={() => send({ type: "gamepad", button: "R1" })} style={{ ...pillControlBtn, width: 85, padding: "8px 0" }}>R1</button>
+                  </div>
+
+                  {/* Main Pad Area: Left D-Pad + Right Action Buttons */}
+                  <div style={{ display: "flex", width: "100%", justifyContent: "space-between", alignItems: "center", padding: "0 10px" }}>
+                    {/* Left Cross D-Pad */}
+                    <div style={{ width: 130, height: 130, position: "relative" }}>
+                      <button onClick={() => nav("up")} style={{ ...gamepadDpadBtn, top: 0, left: 45 }}>▲</button>
+                      <button onClick={() => nav("left")} style={{ ...gamepadDpadBtn, top: 45, left: 0 }}>◀</button>
+                      <button onClick={() => nav("right")} style={{ ...gamepadDpadBtn, top: 45, right: 0 }}>▶</button>
+                      <button onClick={() => nav("down")} style={{ ...gamepadDpadBtn, bottom: 0, left: 45 }}>▼</button>
+                    </div>
+
+                    {/* Right Diamond ABXY Buttons */}
+                    <div style={{ width: 130, height: 130, position: "relative" }}>
+                      <button onClick={() => send({ type: "gamepad", button: "Y" })} style={{ ...gamepadActionBtn, top: 0, left: 45, background: "#f59e0b" }}>Y</button>
+                      <button onClick={() => send({ type: "gamepad", button: "X" })} style={{ ...gamepadActionBtn, top: 45, left: 0, background: "#3b82f6" }}>X</button>
+                      <button onClick={() => send({ type: "gamepad", button: "B" })} style={{ ...gamepadActionBtn, top: 45, right: 0, background: "#ef4444" }}>B</button>
+                      <button onClick={() => send({ type: "gamepad", button: "A" })} style={{ ...gamepadActionBtn, bottom: 0, left: 45, background: "#10b981" }}>A</button>
+                    </div>
+                  </div>
+
+                  {/* Center Select & Start */}
+                  <div style={{ display: "flex", gap: 14, justifyContent: "center" }}>
+                    <button onClick={() => send({ type: "gamepad", button: "SELECT" })} style={{ ...pillControlBtn, fontSize: 11, padding: "6px 14px" }}>SELECT</button>
+                    <button onClick={() => send({ type: "gamepad", button: "START" })} style={{ ...pillControlBtn, fontSize: 11, padding: "6px 14px", background: "rgba(59,130,246,0.25)", color: "#60a5fa" }}>START</button>
                   </div>
                 </div>
               )}
@@ -941,11 +1033,44 @@ export function TvDisplayListener({ onOpenRemote }) {
                 if (video.paused) video.play(); else video.pause();
               } else if (msg.action === "seek") {
                 video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + (msg.value || 0)));
+              } else if (msg.action === "seek_to") {
+                video.currentTime = Math.max(0, Math.min(video.duration || 0, Number(msg.value || 0)));
+              } else if (msg.action === "subtitles") {
+                let anyActive = false;
+                const tracks = Array.from(video.textTracks || []);
+                for (const t of tracks) {
+                  if (t.mode === "showing") anyActive = true;
+                }
+                const newMode = anyActive ? "disabled" : "showing";
+                for (const t of tracks) {
+                  t.mode = newMode;
+                }
+                const subBtn = document.querySelector("button[title*='subtitle' i], button[aria-label*='subtitle' i]");
+                if (subBtn) subBtn.click();
+                showVolumeToast(`Subtitles: ${anyActive ? "Off" : "On"}`, "💬");
+              } else if (msg.action === "speed") {
+                const currentRate = video.playbackRate || 1;
+                const nextRate = currentRate >= 2 ? 1 : currentRate >= 1.5 ? 2 : currentRate >= 1.25 ? 1.5 : currentRate >= 1 ? 1.25 : 1;
+                video.playbackRate = nextRate;
+                showVolumeToast(`Speed: ${nextRate}x`, "⏩");
               } else if (msg.action === "fullscreen") {
                 if (document.fullscreenElement) document.exitFullscreen?.();
                 else video.requestFullscreen?.() || video.parentElement?.requestFullscreen?.();
               }
               setTimeout(pushVideoStatus, 50);
+            }
+          } else if (msg.type === "gamepad") {
+            const btn = msg.button;
+            if (btn === "A") {
+              if (window.__nxGamepadNav) window.__nxGamepadNav("confirm", {});
+              else document.activeElement?.click?.();
+            } else if (btn === "B") {
+              if (window.__nxGamepadNav) window.__nxGamepadNav("cancel", {});
+              else window.history.back();
+            } else if (btn === "START") {
+              if (window.__nxGamepadNav) window.__nxGamepadNav("home", {});
+            } else if (btn === "SELECT") {
+              goTab("games");
             }
           } else if (msg.type === "input") {
             // Search / text input
@@ -1234,4 +1359,37 @@ const quickTabBtnStyle = {
   flexDirection: "column",
   alignItems: "center",
   gap: 2,
+};
+
+const gamepadDpadBtn = {
+  position: "absolute",
+  width: 40,
+  height: 40,
+  borderRadius: 10,
+  background: "rgba(255, 255, 255, 0.12)",
+  border: "1px solid rgba(255, 255, 255, 0.2)",
+  color: "#fff",
+  fontSize: 16,
+  fontWeight: 800,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  boxShadow: "0 4px 10px rgba(0,0,0,0.4)",
+};
+
+const gamepadActionBtn = {
+  position: "absolute",
+  width: 40,
+  height: 40,
+  borderRadius: "50%",
+  border: "1px solid rgba(255, 255, 255, 0.3)",
+  color: "#fff",
+  fontSize: 16,
+  fontWeight: 800,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  cursor: "pointer",
+  boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
 };

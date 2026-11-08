@@ -2136,6 +2136,16 @@ function normalizeSeriesTitle(input: string | null | undefined): string {
   if (lower === "power") return "Power";
   if (lower === "spider noir" || lower === "spider-noir") return "Spider-Noir";
   if (lower === "the middle") return "The Middle";
+  if (lower === "mha" || lower === "my hero academia") return "My Hero Academia";
+  if (lower === "dbz super" || lower === "dragon ball super") return "Dragon Ball Super";
+  if (lower === "op" || lower === "one piece") return "One Piece";
+  if (lower === "ds" || lower === "demon slayer") return "Demon Slayer";
+  if (lower === "attack on titans") return "Attack on Titan";
+  if (lower === "eminance in the shadows" || lower === "eminence in the shadows") return "The Eminence in Shadow";
+  if (lower === "mob pysco" || lower === "mob syco" || lower === "mob psycho") return "Mob Psycho 100";
+  if (lower === "theoriginals") return "The Originals";
+  if (lower === "hilda") return "Hilda";
+  if (lower.startsWith("shuumatsu no harem")) return "World's End Harem";
 
   const words = sanitized.split(" ").map(w => w.length > 0 ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w);
   return words.join(" ");
@@ -2909,7 +2919,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
     }
     if (best && bestScore >= 3) {
       item.relatedVideoId = best.id;
-      if (item.kind === "image" && !best.relatedCoverRelPath) {
+      if (item.kind === "image" && !best.relatedCoverRelPath && best.category !== "series") {
         best.relatedCoverRelPath = item.relPath;
       }
       if (item.kind === "subtitle") {
@@ -2971,32 +2981,36 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
   const seriesCoverByTitle = new Map<string, string>();
   for (const item of out) {
     if (item.kind !== "image") continue;
-    const rel = item.relPath.replace(/\\/g, "/");
-    const parts = rel.split("/");
-    if (parts.length < 3) continue;
-    if (parts[0] !== "Series" && parts[0] !== "TV Shows") continue;
-    const seriesTitle = normalizeSeriesTitle(parts[1]);
-    if (!seriesTitle) continue;
     const stem = path.basename(item.name, path.extname(item.name));
     const coverLike = /(?:poster|cover|box\s*art|boxart|thumb|thumbnail|folder)/i.test(stem);
-    // Prefer explicit cover files in the series root.
-    if (parts.length === 3 && coverLike) {
-      seriesCoverByTitle.set(seriesTitle.toLowerCase(), item.relPath);
-      continue;
-    }
-    // Fallback to first root-level image if no explicit cover exists.
-    if (parts.length === 3 && !seriesCoverByTitle.has(seriesTitle.toLowerCase())) {
-      seriesCoverByTitle.set(seriesTitle.toLowerCase(), item.relPath);
+    if (!coverLike) continue;
+
+    const rel = item.relPath.replace(/\\/g, "/");
+    const parts = rel.split("/").filter(Boolean);
+    // Walk upwards to find the series folder name
+    for (let i = parts.length - 2; i >= 0; i--) {
+      const seg = parts[i];
+      if (/^(series|tv[\s._-]*shows?|media|movies|downloads|nexus-media)$/i.test(seg)) continue;
+      if (/^season[\s._-]*\d+$/i.test(seg)) continue;
+      const sTitle = normalizeSeriesTitle(seg);
+      if (sTitle && sTitle.length > 1) {
+        const k = sTitle.toLowerCase();
+        if (!seriesCoverByTitle.has(k) || stem.toLowerCase().includes("poster")) {
+          seriesCoverByTitle.set(k, item.relPath);
+        }
+        break;
+      }
     }
   }
 
   for (const video of out) {
     if (video.kind !== "video" || video.category !== "series") continue;
-    if (video.relatedCoverRelPath) continue;
     const key = normalizeSeriesTitle(video.seriesTitle).toLowerCase();
     if (!key) continue;
     const cover = seriesCoverByTitle.get(key);
-    if (cover) video.relatedCoverRelPath = cover;
+    if (cover) {
+      video.relatedCoverRelPath = cover;
+    }
   }
 
   // ── Fifth pass: backfill rich metadata from each title's metadata.json ────
@@ -24703,19 +24717,31 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }, 60_000).unref?.();
   const posterSearches = new Map<string, Promise<PosterHit[]>>();
   async function posterSearch(title: string, type: string): Promise<PosterHit[]> {
+    const isTv = type === "series" || type === "tv";
+    const endpoint = isTv ? "search/tv" : type === "movie" ? "search/movie" : "search/multi";
     const search = async (q: string) => {
-      const r = await fetch(`https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(q)}&api_key=${TMDB_KEY_MEDIA}&language=en-US&page=1`, { signal: AbortSignal.timeout(15_000) });
+      const r = await fetch(`https://api.themoviedb.org/3/${endpoint}?query=${encodeURIComponent(q)}&api_key=${TMDB_KEY_MEDIA}&language=en-US&page=1`, { signal: AbortSignal.timeout(15_000) });
       if (!r.ok) throw new Error(`TMDB answered ${r.status}`);
-      return ((await r.json()) as { results?: { poster_path?: string; name?: string; title?: string; media_type?: string }[] }).results ?? [];
+      const data: any = await r.json();
+      return (data.results ?? []).map((item: any) => ({
+        ...item,
+        media_type: item.media_type || (isTv ? "tv" : type === "movie" ? "movie" : "tv"),
+      }));
     };
     let found = await search(title);
     if (!found.length && /\b(19|20)\d{2}\b|\(|\)/.test(title)) {
       const bare = title.replace(/\s*\(\d{4}\)$/g, "").replace(/\b(19|20)\d{2}\b/g, "").trim();
       if (bare && bare !== title) found = await search(bare);
     }
-    const want = type === "series" || type === "tv" ? "tv" : type === "movie" ? "movie" : "";
-    if (want) found = [...found.filter((i) => i.media_type === want), ...found.filter((i) => i.media_type !== want)];
-    return found.slice(0, 5).map((item) => ({
+    const cleanTitle = title.trim().toLowerCase();
+    found.sort((a: any, b: any) => {
+      const aName = (a.name || a.title || "").trim().toLowerCase();
+      const bName = (b.name || b.title || "").trim().toLowerCase();
+      if (aName === cleanTitle && bName !== cleanTitle) return -1;
+      if (bName === cleanTitle && aName !== cleanTitle) return 1;
+      return 0;
+    });
+    return found.slice(0, 5).map((item: any) => ({
       title: item.title ?? item.name ?? "",
       type: item.media_type,
       posterUrl: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,

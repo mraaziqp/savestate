@@ -690,5 +690,25 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
     }
   });
 
+  // 5. Media cover image endpoint: streams the cover image for a media item
+  app.get("/api/media/cover/:id", async (req, res) => {
+    try {
+      const id = String(req.params.id ?? "");
+      const item = (mem.media || []).find((m: any) => String(m.id) === id);
+      if (!item || !item.relatedCoverRelPath || !existsSync(item.relatedCoverRelPath)) {
+        return res.status(404).send("Cover not found");
+      }
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      const ext = path.extname(item.relatedCoverRelPath).toLowerCase();
+      const mime = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
+      res.setHeader("Content-Type", mime);
+      const { createReadStream } = await import("fs");
+      const stream = createReadStream(item.relatedCoverRelPath);
+      stream.pipe(res);
+    } catch {
+      res.status(404).send("Cover error");
+    }
+  });
+
   log("INFO", "Library Manager API registered (/api/library/...)", "library");
 }
