@@ -503,6 +503,19 @@ function TvControlMirrorDock({
  * - Control Mirror Mode: browse normally on smartphone with lightweight WebSocket intent syncing (no screenshare lag).
  * - Background TV Display Listener on big screens.
  */
+// A screen that can be a TV for the remote: not the remote page itself, and
+// not a phone (small screen) unless it says it's a TV (Android TV, Fire TV and
+// smart TVs also report "Android" or a small CSS width).
+function canBeTv() {
+  if (typeof window === "undefined") return false;
+  const sp = new URLSearchParams(window.location.search);
+  if (sp.has("remote") || window.location.hash.includes("remote")) return false;
+  const ua = navigator.userAgent;
+  if (/\b(tv|aft\w*|bravia|smart-?tv|googletv|crkey|web0s|tizen)\b/i.test(ua)) return true;
+  const short = Math.min(window.screen?.width ?? window.innerWidth, window.screen?.height ?? window.innerHeight);
+  return !(/iphone|ipod|mobile/i.test(ua) || (/android/i.test(ua) && short < 600) || short < 500);
+}
+
 export function TvRemote() {
   useStyles();
   const [isOpen, setIsOpen] = useState(false);
@@ -558,8 +571,13 @@ export function TvRemote() {
 
   // Connect to WebSocket as controller
   const connectToDisplay = useCallback((targetPin) => {
-    if (wsRef.current) {
-      try { wsRef.current.close(); } catch {}
+    // The old connection is silenced before it closes: its close event used to
+    // land after the new one connected and mark the phone "not paired", which
+    // made the page connect again, closing that one, over and over.
+    const old = wsRef.current;
+    if (old) {
+      old.onmessage = old.onclose = old.onerror = null;
+      try { old.close(); } catch {}
     }
 
     setStatus("connecting");
@@ -573,6 +591,7 @@ export function TvRemote() {
     wsRef.current = ws;
 
     ws.onmessage = (evt) => {
+      if (wsRef.current !== ws) return;
       try {
         const msg = JSON.parse(evt.data);
         if (msg.type === "paired") {
@@ -598,10 +617,11 @@ export function TvRemote() {
     };
 
     ws.onclose = () => {
-      setStatus("disconnected");
+      if (wsRef.current === ws) setStatus("disconnected");
     };
 
     ws.onerror = () => {
+      if (wsRef.current !== ws) return;
       setStatus("disconnected");
       setError("Failed to connect to TV remote service");
     };
@@ -773,24 +793,29 @@ export function TvRemote() {
   }, [connectToDisplay]);
 
   // If user opens ?remote=1 on phone or passes pin in URL, connect immediately
+  const autoTried = useRef(false);
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
     const isRemoteUrl = sp.has("remote") || window.location.hash.includes("remote");
     const pinParam = sp.get("pin");
+    if (autoTried.current) return;
 
     if (isRemoteUrl || pinParam) {
       setIsOpen(true);
     }
 
     if (pinParam) {
+      autoTried.current = true;
       setPinInput(pinParam);
       connectToDisplay(pinParam);
     } else if (isRemoteUrl && status === "disconnected") {
       const saved = localStorage.getItem("nx_tv_remote_pin");
       if (saved && displays.some(d => d.pin === saved)) {
+        autoTried.current = true;
         setPinInput(saved);
         connectToDisplay(saved);
       } else if (displays.length === 1) {
+        autoTried.current = true;
         connectToDisplay(displays[0].pin);
       }
     }
@@ -798,8 +823,10 @@ export function TvRemote() {
 
   return (
     <>
-      {/* TV Display sidecar: always active on big screens to receive commands */}
-      <TvDisplayListener onOpenRemote={() => setIsOpen(true)} />
+      {/* TV Display sidecar: on screens that can be a TV, never on the phone
+          doing the controlling. Every page used to register, phones included,
+          so a phone was offered itself (and other phones) as a TV to pair. */}
+      {canBeTv() && <TvDisplayListener onOpenRemote={() => setIsOpen(true)} />}
 
       {/* Floating Control Mirror Dock: persists at bottom while browsing app normally */}
       {status === "connected" && !isOpen && (
@@ -1742,7 +1769,12 @@ export function TvDisplayListener({ onOpenRemote }) {
       if (!token()) { setTimeout(connectDisplay, 30000); return; }
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
-      const url = `${protocol}//${host}/ws/remote?role=display&token=${encodeURIComponent(token())}&name=${encodeURIComponent(document.title || "SaveState TV")}`;
+      // A name people recognise in the phone's list (the page title said
+      // "SaveState | Your Media & Games Hub" for every screen).
+      const ua = navigator.userAgent;
+      const deviceName = /\b(aft\w*|fire ?tv)\b/i.test(ua) ? "Fire TV" : /android/i.test(ua) ? "Android TV" : /\b(web0s|tizen|smart-?tv|bravia)\b/i.test(ua) ? "Smart TV"
+        : /cros/i.test(ua) ? "Chromebook" : /mac os/i.test(ua) ? "Mac" : /windows/i.test(ua) ? "Windows PC" : /linux/i.test(ua) ? "Linux PC" : "TV";
+      const url = `${protocol}//${host}/ws/remote?role=display&token=${encodeURIComponent(token())}&name=${encodeURIComponent(deviceName)}`;
 
       ws = new WebSocket(url);
       wsRef.current = ws;

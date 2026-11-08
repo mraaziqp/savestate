@@ -494,11 +494,17 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
         // POV hat fallback for generic controllers mapping D-pad to axes[9]
         if (!(bits & 0xF000) && g.axes.length > 9) {
           const hat = g.axes[9];
-          if (hat !== undefined && Math.abs(hat) <= 1.0) {
-            if (hat >= -1.05 && hat <= -0.6) bits |= (1 << 12);
-            if (hat >= -0.8 && hat <= -0.05) bits |= (1 << 15);
-            if (hat >= 0.05 && hat <= 0.6) bits |= (1 << 13);
-            if (hat >= 0.35 && hat <= 1.05) bits |= (1 << 14);
+          // The hat reports one value per direction, clockwise from up:
+          // up -1, up-right -0.71, right -0.43, down-right -0.14, down 0.14,
+          // down-left 0.43, left 0.71, up-left 1; above 1 means centred. Each
+          // diagonal sets both of its directions (down-right and up-left used to
+          // give only right and only left).
+          if (hat !== undefined && Math.abs(hat) <= 1.05 && Math.abs(hat) >= 0.05) {
+            const step = Math.round((hat + 1) / (2 / 7)); // 0 = up ... 7 = up-left
+            if (step === 0 || step === 1 || step === 7) bits |= (1 << 12);
+            if (step >= 1 && step <= 3) bits |= (1 << 15);
+            if (step >= 3 && step <= 5) bits |= (1 << 13);
+            if (step >= 5 && step <= 7) bits |= (1 << 14);
           }
         }
         const pressed = bits & ~P.prev;
