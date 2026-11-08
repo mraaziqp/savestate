@@ -91,6 +91,11 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
   // 1. Storage summary across all physical and cloud drives
   app.get("/api/library/storage-summary", async (req, res) => {
     try {
+      // Admins only: the list holds every file path in the library and the
+      // drives' sizes, and was open to anyone on the internet until 2026-11-08.
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can see the installed library." });
       const candidates = ["C:\\", "E:\\", "F:\\", "I:\\"];
       const drives: Array<{ drive: string; label: string; totalBytes: number; freeBytes: number; usedBytes: number; totalFormatted: string; freeFormatted: string; percentUsed: number; isCloud: boolean }> = [];
       let hasGoogleDrive = false;
@@ -189,6 +194,11 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
   // 2. Query items (Games and Media) with filtering, sorting, and pagination
   app.get("/api/library/items", async (req, res) => {
     try {
+      // Admins only: the list holds every file path in the library and the
+      // drives' sizes, and was open to anyone on the internet until 2026-11-08.
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can see the installed library." });
       const type = String(req.query.type ?? "all").toLowerCase(); // "all" | "games" | "media"
       const driveFilter = String(req.query.drive ?? "all").toUpperCase(); // "ALL", "C:", "E:", "I:", etc.
       const search = String(req.query.search ?? "").trim().toLowerCase();
@@ -490,9 +500,18 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
             const resolved = await resolveRomPath(cfg.root_path, gRow, extraRoots);
             const absPath = resolved.absolutePath;
 
-            if (absPath && existsSync(absPath)) {
+            if (absPath && (await stat(absPath).then(() => true, () => false))) {
               // Safety check: ensure file path is in a designated storage directory
               const norm = path.resolve(absPath);
+              // Never a whole drive, a library root, or a folder holding one
+              // (a game row with path "./" resolved to the root itself, and the
+              // recursive delete below would have emptied it).
+              const roots = [cfg.root_path, ...extraRoots].filter(Boolean).map((r: string) => path.resolve(r).toLowerCase());
+              const n = norm.toLowerCase();
+              if (path.parse(norm).root.toLowerCase() === n || roots.some((r) => r === n || r.startsWith(n + path.sep))) {
+                errors.push(`${norm} is a library folder, not one game; it was left alone`);
+                continue;
+              }
               const isSafe = /^[E-Z]:[\\/]|nexus-cloud-media|videos|media|nexusarchive/i.test(norm) && !/windows|system32|program files/i.test(norm);
               if (isSafe) {
                 const st = await stat(norm).catch(() => null);
@@ -524,7 +543,7 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
 
             const norm = path.resolve(mItem.path);
             const isSafe = /^[E-Z]:[\\/]|nexus-cloud-media|videos|media|nexusarchive/i.test(norm) && !/windows|system32|program files/i.test(norm);
-            if (isSafe && existsSync(norm)) {
+            if (isSafe && (await stat(norm).then(() => true, () => false))) {
               const st = await stat(norm).catch(() => null);
               const fileSz = st?.size || Number(mItem.size) || 0;
               await unlink(norm);
@@ -600,7 +619,7 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
 
             const resolved = await resolveRomPath(cfg.root_path, gRow, extraRoots);
             const sourcePath = resolved.absolutePath;
-            if (!sourcePath || !existsSync(sourcePath)) {
+            if (!sourcePath || !(await stat(sourcePath).then(() => true, () => false))) {
               errors.push(`ROM for ${gRow.title} not found on disk`);
               continue;
             }
@@ -641,7 +660,7 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
             movedCount++;
           } else if (item.type === "media") {
             const mItem = (mem.media || []).find(m => String(m.id) === String(item.id));
-            if (!mItem || !mItem.path || !existsSync(mItem.path)) {
+            if (!mItem || !mItem.path || !(await stat(mItem.path).then(() => true, () => false))) {
               errors.push(`Media item ${item.id} not found on disk`);
               continue;
             }
@@ -691,19 +710,28 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
   });
 
   // 5. Media cover image endpoint: streams the cover image for a media item
+  // Covers that weren't there, so a grid of tiles doesn't ask Drive again for each one.
+  const coverMissing = new Map<string, number>();
+
   app.get("/api/media/cover/:id", async (req, res) => {
     try {
       const id = String(req.params.id ?? "");
       const item = (mem.media || []).find((m: any) => String(m.id) === id);
-      if (!item || !item.relatedCoverRelPath || !existsSync(item.relatedCoverRelPath)) {
-        return res.status(404).send("Cover not found");
-      }
+      const file = item?.relatedCoverRelPath ? String(item.relatedCoverRelPath) : "";
+      // Never existsSync here: covers live on Google Drive, a grid asks for
+      // hundreds at once, and each sync check could hold the whole server
+      // (every film playing included) for seconds (213 s, 2026-11-08).
+      const missedAt = coverMissing.get(file);
+      if (!file || (missedAt && Date.now() - missedAt < 10 * 60_000)) return res.status(404).send("Cover not found");
+      const st = await stat(file).catch(() => null);
+      if (!st?.isFile()) { coverMissing.set(file, Date.now()); return res.status(404).send("Cover not found"); }
       res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-      const ext = path.extname(item.relatedCoverRelPath).toLowerCase();
+      const ext = path.extname(file).toLowerCase();
       const mime = ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg";
       res.setHeader("Content-Type", mime);
       const { createReadStream } = await import("fs");
-      const stream = createReadStream(item.relatedCoverRelPath);
+      const stream = createReadStream(file);
+      stream.on("error", () => { if (!res.headersSent) res.status(404).end(); else res.destroy(); });
       stream.pipe(res);
     } catch {
       res.status(404).send("Cover error");

@@ -2,12 +2,15 @@ import type express from "express";
 import type http from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import QRCode from "qrcode";
+import { randomInt } from "node:crypto";
 
 export type RemoteControlDeps = {
   httpServer: http.Server;
   app: express.Express;
   log: (level: string, msg: string, subsystem?: string) => void;
   getOptionalAuthUser?: (req: express.Request) => any;
+  /** The signed-in user a token belongs to, or null. */
+  userFromToken: (token: string) => string | null;
 };
 
 type DisplaySession = {
@@ -22,9 +25,16 @@ type DisplaySession = {
 };
 
 export function registerRemoteControl(deps: RemoteControlDeps) {
-  const { httpServer, app, log, getOptionalAuthUser } = deps;
+  const { httpServer, app, log, getOptionalAuthUser, userFromToken } = deps;
 
-  const wss = new WebSocketServer({ noServer: true });
+  // Commands are small; nothing bigger is needed (and nothing bigger is relayed).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+
+  // Wrong PINs per address: 8 in 10 minutes, then pairing by PIN is refused.
+  const pinFails = new Map<string, { n: number; until: number }>();
+  const ipOf = (req: http.IncomingMessage) => String(req.headers["cf-connecting-ip"] ?? req.headers["x-forwarded-for"] ?? req.socket.remoteAddress ?? "").split(",")[0].trim();
+  const pinBlocked = (ip: string) => { const f = pinFails.get(ip); return !!f && f.until > Date.now() && f.n >= 8; };
+  const pinFailed = (ip: string) => { const f = pinFails.get(ip); const now = Date.now(); if (!f || f.until <= now) pinFails.set(ip, { n: 1, until: now + 10 * 60_000 }); else f.n++; };
 
   const displays = new Map<string, DisplaySession>(); // displayId -> DisplaySession
   const pinMap = new Map<string, string>(); // PIN -> displayId
@@ -32,10 +42,10 @@ export function registerRemoteControl(deps: RemoteControlDeps) {
 
   function generatePin(): string {
     for (let attempts = 0; attempts < 100; attempts++) {
-      const pin = Math.floor(1000 + Math.random() * 9000).toString();
+      const pin = String(randomInt(100000, 1000000));
       if (!pinMap.has(pin)) return pin;
     }
-    return Math.floor(1000 + Math.random() * 9000).toString();
+    return String(randomInt(100000, 1000000));
   }
 
   function cleanDeadSessions() {
@@ -62,7 +72,16 @@ export function registerRemoteControl(deps: RemoteControlDeps) {
     const url = new URL(req.url ?? "", `http://${req.headers.host ?? "localhost"}`);
     const role = url.searchParams.get("role") ?? "display"; // "display" or "controller"
     const pin = url.searchParams.get("pin") ?? "";
-    const userId = url.searchParams.get("userId") ?? null;
+    // Who this is comes from their sign-in, never from the address: before
+    // 2026-11-08 anyone could connect, read every TV's PIN from the public
+    // /api/remote/active-displays, and type into or move around a signed-in
+    // SaveState on someone else's TV.
+    const userId = userFromToken(url.searchParams.get("token") ?? "");
+    if (!userId) {
+      try { ws.send(JSON.stringify({ type: "error", error: "Sign in to SaveState first." })); } catch {}
+      ws.close(1008, "Sign in required");
+      return;
+    }
     const deviceName = url.searchParams.get("name") ?? (role === "display" ? "Living Room TV" : "Smartphone");
 
     if (role === "display") {
@@ -155,22 +174,23 @@ export function registerRemoteControl(deps: RemoteControlDeps) {
 
     } else if (role === "controller") {
       // Find matching display
+      // The PIN shown on the TV pairs any signed-in phone (wrong guesses are
+      // limited); without one, only a TV signed in to the same account.
       let targetDisplayId = "";
+      const ip = ipOf(req);
       if (pin) {
-        targetDisplayId = pinMap.get(pin.trim()) || "";
-      } else if (userId) {
-        // Auto-match display for same user
-        for (const [id, s] of displays.entries()) {
-          if (s.userId && s.userId === userId) {
-            targetDisplayId = id;
-            break;
-          }
+        if (pinBlocked(ip)) {
+          try { ws.send(JSON.stringify({ type: "error", error: "Too many wrong PINs. Try again in 10 minutes." })); } catch {}
+          ws.close(1008, "Too many attempts");
+          return;
         }
-      }
-
-      // If no pin or userId match, but there's exactly one display active on server, auto-connect
-      if (!targetDisplayId && displays.size === 1) {
-        targetDisplayId = Array.from(displays.keys())[0];
+        targetDisplayId = pinMap.get(pin.trim()) || "";
+        if (!targetDisplayId) pinFailed(ip);
+      } else {
+        let newest = 0;
+        for (const [id, s] of displays.entries()) {
+          if (s.userId === userId && s.ws.readyState === WebSocket.OPEN && s.lastPing >= newest) { targetDisplayId = id; newest = s.lastPing; }
+        }
       }
 
       const session = targetDisplayId ? displays.get(targetDisplayId) : null;
@@ -242,10 +262,14 @@ export function registerRemoteControl(deps: RemoteControlDeps) {
 
   // REST API helper to discover active TV sessions
   app.get("/api/remote/active-displays", (req, res) => {
+    // Only this account's own TVs (with their PINs).
+    const raw = String(req.headers.authorization ?? "").replace(/^Bearer /i, "").trim() || String(req.query.token ?? "");
+    const me = userFromToken(raw);
+    if (!me) return res.status(401).json({ ok: false, error: "Sign in required" });
     const list: Array<{ displayId: string; pin: string; name: string; ageSec: number }> = [];
     const now = Date.now();
     for (const [id, s] of displays.entries()) {
-      if (s.ws.readyState === WebSocket.OPEN) {
+      if (s.ws.readyState === WebSocket.OPEN && s.userId === me) {
         list.push({
           displayId: id,
           pin: s.pin,

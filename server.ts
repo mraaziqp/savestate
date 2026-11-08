@@ -6106,8 +6106,6 @@ async function startServer() {
     "/api/integrations/ecosystem/", // AwehChat ecosystem contacts & invites
     "/api/sync/scan",             // Smart client deduplication scanner
     "/api/games/recommendations", // Gemini AI game recommendation engine
-    "/api/remote/",               // TV Remote pairing & active displays discovery
-    "/api/library/",              // Installed Library Manager endpoints (auth verified in handler)
   ];
   app.use((req, res, next) => {
     if (!req.path.startsWith("/api/")) return next();
@@ -24035,7 +24033,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     if (!servedFromCache) {
       const goneAt = hlsSourceGone.get(target) ?? 0;
       if (Date.now() - goneAt < 30_000) return res.status(404).json({ error: "Media file not found", gone: true });
-      if (!(await fsAccess(target).then(() => true).catch(() => false))) {
+      // Only "no such file", seen twice two seconds apart. Drive for Desktop
+      // fails a check now and then while busy, and each such blip ended a
+      // Snowfall episode mid-play although the file was there (2026-11-08).
+      const missing = async () => (await fsAccess(target).then(() => null, (e: any) => e?.code ?? "ERR")) === "ENOENT";
+      if (await missing() && await new Promise((r) => setTimeout(r, 2000)).then(missing)) {
         hlsSourceGone.set(target, Date.now());
         if (hlsSourceGone.size > 200) hlsSourceGone.clear();
         log("WARN", `HLS source is gone: ${rel}`, "media");
@@ -32019,6 +32021,10 @@ Format as JSON:
     app,
     log: (lvl, msg, sub) => log(lvl, msg, sub ?? "remote"),
     getOptionalAuthUser,
+    userFromToken: (tok: string) => {
+      if (!tok) return null;
+      try { const p = jwt.verify(tok, JWT_SECRET, { algorithms: ["HS256"] }) as any; return p?.userId ? String(p.userId) : null; } catch { return null; }
+    },
   });
 
   // Route WebSocket upgrades manually — multiple noServer instances on one httpServer
@@ -32133,6 +32139,11 @@ Format as JSON:
         const skips = scanSkips(roms); // the same rules as the scan button
         for (const rom of roms) {
           const gameId = crypto.createHash("md5").update(rom.relativePath).digest("hex");
+          // A game already listed with a known console is left alone before its
+          // file is opened: reading every ROM's header on each start (~8,000,
+          // Drive ones fetched from Google) slowed every restart for nothing.
+          const listedAs = existingDbMap.get(gameId);
+          if (listedAs !== undefined && listedAs !== "unknown") continue;
           const { title: cleanTitle, platform, year } = scannedRomName(rom.filename, await detectPlatformWithHeader(rom.filename, rom.relativePath, rom.fullPath));
 
           if (existingDbMap.has(gameId)) {

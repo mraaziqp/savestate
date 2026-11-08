@@ -567,7 +567,7 @@ export function TvRemote() {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    const url = `${protocol}//${host}/ws/remote?role=controller&pin=${encodeURIComponent(targetPin || "")}&name=${encodeURIComponent(navigator.userAgent.includes("Android") ? "Android Phone" : "Smartphone")}`;
+    const url = `${protocol}//${host}/ws/remote?role=controller&token=${encodeURIComponent(token())}&pin=${encodeURIComponent(targetPin || "")}&name=${encodeURIComponent(navigator.userAgent.includes("Android") ? "Android Phone" : "Smartphone")}`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
@@ -947,7 +947,7 @@ export function TvRemote() {
               <div style={{ fontSize: 48, marginBottom: 10 }}>📱 ➔ 📺</div>
               <h2 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 6px" }}>Connect to TV</h2>
               <p style={{ fontSize: 14, color: "#94a3b8", margin: "0 0 20px" }}>
-                Scan the QR code on your TV or enter the 4-digit PIN below.
+                Scan the QR code on your TV or enter the 6-digit PIN below.
               </p>
 
               {/* One-Tap Connect if exactly 1 TV detected on network */}
@@ -990,7 +990,7 @@ export function TvRemote() {
               <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 20 }}>
                 <input
                   type="text"
-                  maxLength={4}
+                  maxLength={6}
                   placeholder="PIN"
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value.replace(/\D/g, ""))}
@@ -1010,17 +1010,17 @@ export function TvRemote() {
                 />
                 <button
                   onClick={() => connectToDisplay(pinInput)}
-                  disabled={pinInput.length < 4 || status === "connecting"}
+                  disabled={pinInput.length < 6 || status === "connecting"}
                   style={{
                     padding: "0 22px",
                     height: 52,
-                    background: pinInput.length === 4 ? "#3b82f6" : "rgba(255,255,255,0.1)",
+                    background: pinInput.length === 6 ? "#3b82f6" : "rgba(255,255,255,0.1)",
                     border: "none",
                     borderRadius: 14,
                     color: "#fff",
                     fontWeight: 700,
                     fontSize: 15,
-                    cursor: pinInput.length === 4 ? "pointer" : "default",
+                    cursor: pinInput.length === 6 ? "pointer" : "default",
                   }}
                 >
                   {status === "connecting" ? "Pairing..." : "Connect"}
@@ -1738,9 +1738,11 @@ export function TvDisplayListener({ onOpenRemote }) {
     document.addEventListener("seeked", onSeeked, true);
 
     const connectDisplay = () => {
+      // Remote control needs a signed-in TV (the server refuses others).
+      if (!token()) { setTimeout(connectDisplay, 30000); return; }
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const host = window.location.host;
-      const url = `${protocol}//${host}/ws/remote?role=display&name=${encodeURIComponent(document.title || "SaveState TV")}`;
+      const url = `${protocol}//${host}/ws/remote?role=display&token=${encodeURIComponent(token())}&name=${encodeURIComponent(document.title || "SaveState TV")}`;
 
       ws = new WebSocket(url);
       wsRef.current = ws;
@@ -1891,8 +1893,9 @@ export function TvDisplayListener({ onOpenRemote }) {
         } catch {}
       };
 
-      ws.onclose = () => {
-        setTimeout(connectDisplay, 5000);
+      ws.onclose = (e) => {
+        // Refused (signed out, or the sign-in expired): try again much later.
+        setTimeout(connectDisplay, e && e.code === 1008 ? 60000 : 5000);
       };
     };
 
@@ -2076,7 +2079,7 @@ export function TvDisplayListener({ onOpenRemote }) {
                 </>
               )}
 
-              <div style={{ fontSize: 13, color: "#cbd5e1", marginTop: 4 }}>Or enter this 4-digit PIN:</div>
+              <div style={{ fontSize: 13, color: "#cbd5e1", marginTop: 4 }}>Or enter this 6-digit PIN:</div>
               <div style={{
                 fontSize: 38,
                 fontWeight: 900,
