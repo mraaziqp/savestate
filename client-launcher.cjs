@@ -216,7 +216,7 @@ const PLATFORM_CORES = {
   nes: 'fceumm', famicom: 'fceumm', snes: 'snes9x', n64: 'mupen64plus_next',
   gba: 'mgba', gbc: 'mgba', gb: 'mgba', nds: 'melondsds', '3ds': 'citra',
   ps1: 'pcsx_rearmed', psx: 'pcsx_rearmed', playstation: 'pcsx_rearmed',
-  psp: 'ppsspp',
+  ps2: 'pcsx2', psp: 'ppsspp',
   genesis: 'genesis_plus_gx', megadrive: 'genesis_plus_gx', 'sega genesis': 'genesis_plus_gx',
   gamegear: 'genesis_plus_gx', mastersystem: 'genesis_plus_gx', sms: 'genesis_plus_gx',
   sega32x: 'picodrive', '32x': 'picodrive',
@@ -253,8 +253,11 @@ const CORE_EXT = IS_WIN ? '.dll' : IS_MAC ? '.dylib' : '.so';
 // installed — getEmulatorPath() checks it before reaching this fallback.
 const STANDALONE_ONLY_PLATFORMS = new Set(['ps2', 'wiiu', 'psp', 'ps3', 'switch', 'xbox', 'xbox360', 'x360']);
 // Consoles with a standalone emulator AND a libretro core: the core (in SaveState's engine) wins when present.
-// Note: PS2 strictly requires standalone PCSX2 (or its capture bridge) — lrps2/pcsx2_libretro is abandoned and broken.
-const ENGINE_FIRST = new Set(['gamecube', 'wii', 'psp']);
+// PS2 is back in the engine (2026-11-08): LRPS2 plays fine there (Shrek 2 at
+// 640x448 with sound). It had been taken out on the belief that the core was
+// broken, but the failure was the engine refusing a BIOS under another name.
+// A standalone PCSX2, shown inside SaveState, is only the fallback.
+const ENGINE_FIRST = new Set(['gamecube', 'wii', 'ps2', 'psp']);
 
 // Recognized ROM/disc-image extensions for the multi-drive scan — same list
 // shape as quickstart-zorin-host.sh's host-side ROM_EXT_REGEX, so a file this
@@ -519,7 +522,7 @@ async function extract7z(file, dest) {
 const DRIVE_LETTERS = IS_WIN ? 'CDEFGHIJ'.split('') : [];
 const onDrives = (...rel) => DRIVE_LETTERS.flatMap((d) => [path.join(`${d}:\\`, ...rel), path.join(`${d}:\\`, 'Emulators', ...rel)]);
 
-function getEmulatorPath(platform) {
+function getEmulatorPath(platform, opts = {}) {
   const cfg = loadConfig();
   const p = String(platform || '').toLowerCase();
   const home = os.homedir();
@@ -751,7 +754,7 @@ function getEmulatorPath(platform) {
   // GameCube, Wii, PS2 and PSP run in the engine on RetroArch's core when this
   // PC has it; the standalone programs are only the fallback. Before this, an
   // installed PCSX2 or Dolphin always won, so those games opened outside the app.
-  if (retro && !NO_RETROARCH && ENGINE_FIRST.has(p)) {
+  if (retro && !NO_RETROARCH && !opts.noRetroArch && ENGINE_FIRST.has(p)) {
     const core = PLATFORM_CORES[p];
     if (core && fs.existsSync(path.join(path.dirname(retro), 'cores', `${core}_libretro${CORE_EXT}`))) return retro;
   }
@@ -769,7 +772,7 @@ function getEmulatorPath(platform) {
   // because RetroArch was installed, with no PS2-capable core or emulator
   // anywhere. Launching then either opened RetroArch with no core loaded or
   // crashed, while the UI had already claimed everything was ready.
-  if (retro && !STANDALONE_ONLY_PLATFORMS.has(p) && !NO_RETROARCH) return retro;
+  if (retro && !opts.noRetroArch && !STANDALONE_ONLY_PLATFORMS.has(p) && !NO_RETROARCH) return retro;
   return null;
 }
 
@@ -3090,9 +3093,9 @@ function walkAndCollect(dir, depth, budget, out) {
     if (!entry.isFile()) continue;
     budget.count++;
     if (!ROM_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-    try {
-      if (fs.statSync(path.join(dir, entry.name)).size === 0) continue;
-    } catch { continue; }
+    // No stat per file here: with a torrent writing to the same disk each one
+    // took up to 5 s, and E:\ROMS (6,535 files) took 81 s to list. The file
+    // that is actually chosen is checked instead (findRomAnywhere).
     out.push({
       path: path.join(dir, entry.name),
       nameNoExt: path.parse(entry.name).name,
@@ -3164,7 +3167,8 @@ function findInIndex(entries, gameId, normalizedTitle) {
 // lives on a completely different drive) with fuzzy title matching. This is
 // what lets an existing local ROM get found and launched directly instead of
 // Nexus downloading a duplicate copy from the host every time.
-function findRomAnywhere(cfg, gameId, title, platform) {
+const CLOUD_ROOT = /nexus-cloud-media|google ?drive|[\\/]my drive([\\/]|$)/i;
+function findRomAnywhere(cfg, gameId, title, platform, relativePath) {
   const safeName = sanitizeName(title);
   // Fast path: exact match in the conventional <romDir>/<platform> folder —
   // covers everything Nexus itself has ever downloaded, no directory walk needed.
@@ -3172,11 +3176,36 @@ function findRomAnywhere(cfg, gameId, title, platform) {
   if (flat) return flat;
 
   const normalizedTitle = normalizeForMatch(title);
-  const searchRoots = [resolveRomDirectory(cfg), ...(Array.isArray(cfg.extraRomDirs) ? cfg.extraRomDirs : [])];
-  for (const root of searchRoots) {
-    if (!root || !String(root).trim()) continue;
+  const wantName = relativePath ? String(relativePath).split(/[\\/]/).pop().toLowerCase() : '';
+  // Not Google Drive folders: walking one file by file blocked this launcher
+  // for 284 s (2026-11-08, Drive for Desktop fetching as it went). A game that
+  // is only on Drive comes from the host instead, as on any other PC.
+  const roots = [resolveRomDirectory(cfg), ...(Array.isArray(cfg.extraRomDirs) ? cfg.extraRomDirs : [])]
+    .filter((r) => r && String(r).trim() && !CLOUD_ROOT.test(String(r)));
+  const usable = (p) => { try { return fs.statSync(p).size > 0; } catch { return false; } };
+  // 1. The host's own file, looked up directly (no folder walk): <root>/<its
+  //    path on the host> or <root>/<its file name>.
+  const relParts = relativePath ? String(relativePath).split(/[\\/]/).filter((s) => s && s !== '.' && s !== '..') : [];
+  if (wantName) {
+    for (const root of roots) {
+      for (const p of [path.join(root, ...relParts), path.join(root, relParts[relParts.length - 1] || '')]) {
+        if (relParts.length && usable(p)) return p;
+      }
+    }
+  }
+  // 2. The same file name anywhere in those folders, before any title match:
+  //    by title alone "Shrek 2 (USA).7z" won over "Shrek 2 (USA).iso" beside
+  //    it, the PS2 core can't open an archive, and the game left the engine.
+  if (wantName) {
+    for (const root of roots) {
+      const same = getRomIndex(root).find((e) => path.basename(e.path).toLowerCase() === wantName);
+      if (same && usable(same.path)) return same.path;
+    }
+  }
+  // 3. By title.
+  for (const root of roots) {
     const found = findInIndex(getRomIndex(root), gameId, normalizedTitle);
-    if (found) return found;
+    if (found && usable(found)) return found;
   }
   return null;
 }
@@ -4197,7 +4226,7 @@ async function handleLaunch(body, origin) {
   }
   let romFile = mirroredValid
     ? mirroredFile
-    : findRomAnywhere(cfg, gameId, title, platform);
+    : findRomAnywhere(cfg, gameId, title, platform, relativePath);
 
   // A game kept as a folder (PS3) plays only when the whole folder is here.
   lap('found');
@@ -4283,8 +4312,10 @@ async function handleLaunch(body, origin) {
         engineError = core.error;
       }
       console.error(`[engine] ${path.basename(romFile)}: ${engineError}`);
-      // The installed emulator (RetroArch, or standalone Dolphin) is the
-      // fallback; with none, say why.
+      // Never RetroArch's own window instead (the owner: one app, no outside
+      // emulators): a standalone emulator still plays inside SaveState through
+      // the capture bridge below; with none, say why the engine couldn't.
+      if (emu && isRetroArch(emu)) emu = getEmulatorPath(platform, { noRetroArch: true });
       if (!emu) return { status: 500, json: { success: false, error: `SaveState Engine couldn\u2019t start ${title || 'the game'}: ${engineError}` } };
     }
 
@@ -4707,7 +4738,7 @@ function startEmbeddedLauncher(opts = {}) {
         })();
         const existing = mirroredValid
           ? mirroredFile
-          : findRomAnywhere(cfg, body.gameId, body.title, body.platform);
+          : findRomAnywhere(cfg, body.gameId, body.title, body.platform, body.relativePath);
         // A game kept as a folder (PS3): the whole folder, answered once it's
         // here like a single file (progress through /cache-rom/progress).
         const folderRoot = ps3FolderRoot(mirroredFile) || ps3FolderRoot(existing);

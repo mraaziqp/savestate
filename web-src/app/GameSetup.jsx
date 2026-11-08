@@ -171,14 +171,17 @@ function useLauncher(enabled) {
     if (!enabled) return undefined;
     let live = true;
     const check = async () => {
+      if (document.hidden) return;
       try {
         const h = await launcher("/health", { timeout: 2500 });
         if (live) setState({ status: (h.version ?? 0) >= NEEDS_VERSION ? "ready" : "old", version: h.version ?? 0, health: h });
       } catch { if (live) setState((s) => ({ ...s, status: "missing" })); }
     };
     check();
-    const t = setInterval(check, 3000);
-    return () => { live = false; clearInterval(t); };
+    const t = setInterval(() => { if (!document.hidden) check(); }, 6000);
+    const onFocus = () => { if (!document.hidden) check(); };
+    window.addEventListener("focus", onFocus);
+    return () => { live = false; clearInterval(t); window.removeEventListener("focus", onFocus); };
   }, [enabled]);
   return state;
 }

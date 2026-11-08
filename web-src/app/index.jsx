@@ -39,3 +39,5 @@ export { Where, isSplitScreenGame } from "./Where.jsx";
 export { Connections } from "./Connections.jsx";
 export { GameShelf } from "./GameShelf.jsx";
 export { PauseAll } from "./PauseAll.jsx";
+export { TvRemote } from "./TvRemote.jsx";
+export { LibraryManager } from "./LibraryManager.jsx";

@@ -143,6 +143,22 @@ pub fn ensure(library_name: &str, system_dir: &Path, content_dir: Option<&Path>,
                 break;
             }
         }
+        // A PS2 BIOS works under any name (LRPS2 lists every dump in its
+        // folder): "SCPH-70012_BIOS_V12_USA_200.BIN" was refused for not being
+        // "scph70012.bin", so PS2 games fell back to an outside emulator.
+        if !satisfied && group.any_of.iter().all(|f| f.path.starts_with("pcsx2/bios/")) {
+            if let Ok(entries) = std::fs::read_dir(system_dir.join("pcsx2").join("bios")) {
+                for e in entries.flatten() {
+                    let p = e.path();
+                    let is_bin = p.extension().map(|x| x.eq_ignore_ascii_case("bin")).unwrap_or(false);
+                    if is_bin && e.metadata().map(|m| m.len() == 4 << 20).unwrap_or(false) {
+                        report.present.push((p, None));
+                        satisfied = true;
+                        break;
+                    }
+                }
+            }
+        }
         if !satisfied {
             if let Some(host) = host {
                 for file in group.any_of {

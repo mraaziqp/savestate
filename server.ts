@@ -43,6 +43,8 @@ import { createPerf } from "./server/perf.ts";
 import { installDnsCache } from "./server/dns-cache.ts";
 import { createServing } from "./server/serving.ts";
 import { createPauseAll } from "./server/pause-all.ts";
+import { registerLibraryManagerApi } from "./server/library-manager.ts";
+import { registerRemoteControl } from "./server/remote-control.ts";
 import { createDownloader } from "./server/downloader.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
@@ -6090,6 +6092,8 @@ async function startServer() {
     "/api/integrations/ecosystem/", // AwehChat ecosystem contacts & invites
     "/api/sync/scan",             // Smart client deduplication scanner
     "/api/games/recommendations", // Gemini AI game recommendation engine
+    "/api/remote/",               // TV Remote pairing & active displays discovery
+    "/api/library/",              // Installed Library Manager endpoints (auth verified in handler)
   ];
   app.use((req, res, next) => {
     if (!req.path.startsWith("/api/")) return next();
@@ -31971,6 +31975,26 @@ Format as JSON:
     }
   });
 
+  registerLibraryManagerApi({
+    app,
+    pool,
+    mem,
+    log: (lvl, msg, sub) => log(lvl, msg, sub ?? "library"),
+    requireAuth: requireAuthenticatedUser,
+    isAdmin: isAdminUser,
+    resolveRomPath,
+    getVaultConfig,
+    getExtraRoots,
+    refreshMediaLibrary,
+  });
+
+  const remoteControl = registerRemoteControl({
+    httpServer,
+    app,
+    log: (lvl, msg, sub) => log(lvl, msg, sub ?? "remote"),
+    getOptionalAuthUser,
+  });
+
   // Route WebSocket upgrades manually — multiple noServer instances on one httpServer
   httpServer.on("upgrade", (req, socket, head) => {
     const pathname = (req.url ?? "").split("?")[0];
@@ -31980,6 +32004,8 @@ Format as JSON:
       coopWss.handleUpgrade(req, socket, head, ws => coopWss.emit("connection", ws, req));
     } else if (pathname === REMOTE_PLAY_WS_PATH) {
       remotePlayWss.handleUpgrade(req, socket, head, ws => remotePlayWss.emit("connection", ws, req));
+    } else if (pathname === "/ws/remote") {
+      remoteControl.wss.handleUpgrade(req, socket, head, ws => remoteControl.wss.emit("connection", ws, req));
     } else {
       socket.destroy();
     }

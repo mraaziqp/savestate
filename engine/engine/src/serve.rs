@@ -1159,8 +1159,14 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
             let secs = stat_at.elapsed().as_secs_f64();
             // Measure save states once the game has run a second.
             if cost.is_none() {
-                let c = if session.serialize_size() == 0 {
+                let size = session.serialize_size();
+                let c = if size == 0 {
                     StateCost { bytes: 0, ms: 0.0 }
+                } else if size > 16 << 20 {
+                    // Too big for rewind or run-ahead either way, so not timed:
+                    // one 50 MB PS2 state took 8.7 s and froze the game a second
+                    // in (2026-11-08). Counted as slow so neither is switched on.
+                    StateCost { bytes: size, ms: 1000.0 }
                 } else {
                     // One save to learn the size; two more to time it only when the
                     // state is small enough to rewind (a 92 MB Dolphin state would hitch).

@@ -824,11 +824,33 @@ import "./savesync.js";
     const more = new IntersectionObserver((entries) => {
       for (const en of entries) if (en.isIntersecting && navShown(en.target)) { more.unobserve(en.target); watched.delete(en.target); en.target.click(); }
     }, { rootMargin: "0px 0px 700px 0px" });
-    setInterval(() => {
+
+    const scanButtons = () => {
+      if (document.hidden) return;
       for (const b of document.querySelectorAll("main button")) {
         if (!watched.has(b) && /^show \d+ more$/i.test(b.textContent.trim())) { watched.add(b); more.observe(b); }
       }
-    }, 1200);
+    };
+
+    if ("MutationObserver" in window) {
+      let debounce = null;
+      const obs = new MutationObserver(() => {
+        if (debounce) return;
+        debounce = setTimeout(() => { debounce = null; scanButtons(); }, 300);
+      });
+      const attachObs = () => {
+        const target = document.querySelector("main") || document.body;
+        if (target) {
+          obs.observe(target, { childList: true, subtree: true });
+          scanButtons();
+        } else {
+          setTimeout(attachObs, 100);
+        }
+      };
+      attachObs();
+    } else {
+      setInterval(() => { if (!document.hidden) scanButtons(); }, 2500);
+    }
   }
   const mountArrows = () => document.body ? document.body.appendChild(arrows) : setTimeout(mountArrows, 50);
   mountArrows();
@@ -838,6 +860,6 @@ import "./savesync.js";
   // Sign-in and sign-out happen inside the app (same tab), which fires no
   // storage event, so the token is compared on a slow timer as well.
   window.addEventListener("storage", (e) => { if (e.key === KEY) mirror(); });
-  setInterval(mirror, 4000);
+  setInterval(() => { if (!document.hidden) mirror(); }, 8000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { mirror(); refresh(); } });
 })();

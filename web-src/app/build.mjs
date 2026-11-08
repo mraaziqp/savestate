@@ -148,13 +148,15 @@ const before = shell;
     `NxPlayOverlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayOverlay}))),` +
     `NxPhonePlay=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PhonePlay}))),` +
     `NxWhere=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Where}))),` +
+    `NxRemote=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.TvRemote}))),` +
+    `NxLibrary=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.LibraryManager}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPause,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPause,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxRemote,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
@@ -549,11 +551,22 @@ shell = patch(shell, "connections tab", `x==="connections"&&Pe("manage_system")&
 shell = patch(shell, "connections menu", `{id:"connections",icon:xs,label:"Connections"`,
   `{id:"help",icon:xs,label:"Help & guides",color:"#a3e635",glow:"rgba(163,230,53,0.25)"}`,
   `{id:"help",icon:xs,label:"Help & guides",color:"#a3e635",glow:"rgba(163,230,53,0.25)"},{id:"connections",icon:xs,label:"Connections",color:"#60a5fa",glow:"rgba(96,165,250,0.25)"}`);
-shell = patch(shell, "connections is admin-only in the menu", `addgames:"manage_system",connections:"manage_system"}`,
+shell = patch(shell, "connections is admin-only in the menu", `connections:"manage_system"`,
   `addgames:"manage_system"}`, `addgames:"manage_system",connections:"manage_system"}`);
 shell = patch(shell, "connections title", `connections:"Connections",`, `ql={addgames:"Add games",`, `ql={connections:"Connections",addgames:"Add games",`);
-shell = patch(shell, "add games is known", `"minigames","help","addgames"`, `"household","receipts","minigames","help"]`, `"household","receipts","minigames","help","addgames"]`);
-shell = patch(shell, "connections is known", `"help","addgames","connections"]`, `"minigames","help","addgames"]`, `"minigames","help","addgames","connections"]`);
+shell = patch(shell, "add games is known", `"addgames"`, `"household","receipts","minigames","help"]`, `"household","receipts","minigames","help","addgames"]`);
+shell = patch(shell, "connections is known", `"connections"`, `"minigames","help","addgames"]`, `"minigames","help","addgames","connections"]`);
+// Installed Library & Storage Manager (LibraryManager.jsx).
+shell = patch(shell, "library tab", `x==="library"`,
+  `x==="connections"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxConnections,{})}),`,
+  `x==="library"&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxLibrary,{})}),x==="connections"&&Pe("manage_system")&&(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxConnections,{})}),`);
+shell = patch(shell, "library menu", `{id:"library",icon:be,label:"Storage & Library"`,
+  `{id:"connections",icon:xs,label:"Connections",color:"#60a5fa",glow:"rgba(96,165,250,0.25)"}`,
+  `{id:"connections",icon:xs,label:"Connections",color:"#60a5fa",glow:"rgba(96,165,250,0.25)"},{id:"library",icon:be,label:"Storage & Library",color:"#38bdf8",glow:"rgba(56,189,248,0.25)"}`);
+shell = patch(shell, "library is admin-only in the menu", `library:"manage_system"`,
+  `connections:"manage_system"}`, `connections:"manage_system",library:"manage_system"}`);
+shell = patch(shell, "library title", `library:"Storage & Library",`, `ql={connections:"Connections",`, `ql={library:"Storage & Library",connections:"Connections",`);
+shell = patch(shell, "library is known", `"library"`, `"addgames","connections"]`, `"addgames","connections","library"]`);
 // The sidebar's own arrow keys (up/down = next section) ran on every press,
 // even ones the page's navigation had used (boot.js marks those handled): on
 // a TV remote each press of Down on Discover switched to the next section, so
