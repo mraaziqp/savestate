@@ -341,14 +341,44 @@ const GUIDES = [
   },
   // ── Admins: running the host ──────────────────────────────────────────
   {
+    id: "host-setup", group: "Running the host", admin: true, title: "Setting up a host", icon: "chip",
+    words: "host setup install windows linux nas docker powershell server new pc owner first account firewall wifi update uninstall remote access tunnel",
+    body: (
+      <>
+        <p className="lead">A host is the PC (or NAS) that holds your films, music and games and serves them to every other device. Setting one up takes a few minutes.</p>
+        <div className="nxg-sec"><h4>Windows: one command</h4>
+          <ol>
+            <li>Open <b>PowerShell</b> (Start menu, type PowerShell). No administrator needed.</li>
+            <li>Paste <C>irm https://savestate.co.za/install-host.ps1 | iex</C> and press Enter.</li>
+            <li>It downloads Node.js (nodejs.org), SaveState and ffmpeg (gyan.dev), checking each against its published checksum. SaveState brings its own private database, so there is no Docker or database to install.</li>
+            <li>Pick your <b>Films &amp; shows</b>, <b>Music</b> and <b>Games</b> folders when asked (Cancel skips one; add it later).</li>
+            <li>SaveState starts, opens in your browser, and starts again every time you sign in to Windows. <b>The first account you create becomes the owner.</b></li>
+          </ol></div>
+        <div className="nxg-sec"><h4>Linux or a NAS</h4>
+          <p>With Docker installed: <C>curl -fsSL https://savestate.co.za/install.sh | bash</C>. It asks for the folders and a port, and the first account becomes the owner here too.</p></div>
+        <div className="nxg-sec"><h4>Phones and TVs at home</h4>
+          <p>The installer prints an address like <C>http://192.168.1.20:3000</C>; open it on any device on the same Wi-Fi. If they can't connect, allow SaveState when Windows asks about the firewall, or run the installer once as administrator (it opens the port for home networks only).</p></div>
+        <div className="nxg-sec"><h4>From outside the house (optional)</h4>
+          <p>A free Cloudflare Tunnel gives the host a web address that works anywhere, without opening ports on your router: install <C>cloudflared</C>, then <C>cloudflared tunnel --url http://localhost:3000</C> for a quick test address, or a named tunnel for your own domain.</p></div>
+        <div className="nxg-sec"><h4>Updating, removing, and where things are</h4>
+          <ul>
+            <li><b>Update:</b> run the same command again. Accounts, settings and the library stay.</li>
+            <li><b>Remove:</b> <C>$env:SAVESTATE_UNINSTALL=1; irm https://savestate.co.za/install-host.ps1 | iex</C>. Your data stays in <C>%LOCALAPPDATA%\SaveStateHost\data</C> until you delete it.</li>
+            <li><b>If it won't start:</b> the logs are in <C>%LOCALAPPDATA%\SaveStateHost\data\logs</C> (<C>host.log</C>, <C>server.log</C>).</li>
+            <li><b>Games</b> play in SaveState's own player; nothing else to install. Systems that need a BIOS say so on the game's page: add it in <b>Set up games</b>.</li>
+          </ul></div>
+      </>
+    ),
+  },
+  {
     id: "host-games", group: "Running the host", admin: true, title: "Emulators, BIOS and firmware", icon: "chip",
     words: "host admin emulator bios firmware pcsx2 rpcs3 ryujinx dolphin retroarch neo geo neogeo keys ps3 switch setup",
     body: (
       <>
         <p className="lead">What each system needs on the host PC, and where it goes. The launch check on every game's page says what is still missing.</p>
         <ul className="nxg-sec">
-          <li><b>Older systems, PSP, GameCube:</b> RetroArch at <C>C:\RetroArch-Win64</C>, with its cores (Core Forge installs missing ones). GameCube uses standalone Dolphin when installed, else RetroArch's Dolphin core.</li>
-          <li><b>PS2:</b> PCSX2 at <C>E:\PCSX2</C>; its BIOS (<C>.bin</C>, 4 MB) in <C>E:\PCSX2\bios</C>.</li>
+          <li><b>Older systems, PSP, GameCube, PS2:</b> play in SaveState's own player, which fetches each system's core by itself. Standalone emulators (Dolphin, PCSX2) are only a fallback and also show inside SaveState.</li>
+          <li><b>PS2:</b> needs its BIOS (a 4 MB <C>.bin</C> from your console, any file name) added in <b>Set up games</b>.</li>
           <li><b>PS3:</b> RPCS3 at <C>E:\RPCS3</C> with Sony's firmware installed (done). Extracted games (folder with <C>PS3_GAME</C>) go in <C>E:\ROMS\PS3</C>.</li>
           <li><b>Switch:</b> unzip Ryujinx from <C>ryujinx.app</C> into <C>E:\Ryujinx</C> (or leave it in Downloads). Open it once, then <b>File &gt; Open Ryujinx Folder</b>: put <C>prod.keys</C> from your Switch in <C>system</C>, and install your firmware with <b>Tools &gt; Install Firmware</b>.</li>
           <li><b>Neo Geo:</b> a current <C>neogeo.zip</C> (with <C>sm1.sm1</C>, <C>sfix.sfix</C>, <C>000-lo.lo</C> and a system BIOS) in the BIOS folder <C>%APPDATA%\NexusEmuHost\bios</C> and <C>C:\RetroArch-Win64\system</C>.</li>

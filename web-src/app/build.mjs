@@ -977,14 +977,24 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   const file = path.join(assets, find("BecomeHost-"));
   let bh = readFileSync(file, "utf8");
   const before = bh;
-  bh = patch(bh, "host setup steps", 'title:"Install Docker"',
+  bh = patch(bh, "host setup steps", 'title:"Games need nothing else"',
     /title:"Install Node\.js",desc:"[^"]*",link:"https:\/\/nodejs\.org",linkLabel:"nodejs\.org"\},(\{icon:\(0,e\.jsx\)\(\w+,\{className:"w-5 h-5"\}\),)title:"Install RetroArch",desc:"[^"]*",link:"[^"]*",linkLabel:"retroarch\.com"\},(\{icon:\(0,e\.jsx\)\(\w+,\{className:"w-5 h-5"\}\),)title:"Download Nexus Host",desc:"[^"]*",cmd:"[^"]*"\},(\{icon:\(0,e\.jsx\)\(\w+,\{className:"w-5 h-5"\}\),)title:"Start the server",desc:"[^"]*",cmd:"[^"]*"\}/,
     'title:"Install Docker",desc:"Docker Desktop on Windows or Mac, or Docker on Linux and most NAS boxes. SaveState runs inside it with its own database.",link:"https://docs.docker.com/get-docker/",linkLabel:"docker.com"},'
     + '{icon:(0,e.jsx)(y,{className:"w-5 h-5"}),title:"Games need nothing else",desc:"Games play in SaveState\'s own player: no RetroArch or other emulators to install. Add BIOS files later in Set up games.",link:"/?tab=help&guide=host-games",linkLabel:"Emulators, BIOS and firmware"},'
     + '{icon:(0,e.jsx)(h,{className:"w-5 h-5"}),title:"Run the installer",desc:"It asks for your films, music and games folders and a port, then starts SaveState. Run it again any time to update.",cmd:"curl -fsSL https://savestate.co.za/install.sh | bash"},'
     + '{icon:(0,e.jsx)(S,{className:"w-5 h-5"}),title:"Open it and sign up",desc:"Open the address below (or the port you chose). The first account made on a new host becomes its owner.",cmd:"http://localhost:3000"}');
-  bh = patch(bh, "host quick start label", "Quick start (Linux, NAS, or Windows with WSL)", "Quick Start (Zorin OS / Ubuntu)", "Quick start (Linux, NAS, or Windows with WSL)");
+  bh = patch(bh, "host quick start label", "Quick start (Linux", "Quick Start (Zorin OS / Ubuntu)", "Quick start (Linux, NAS, or Windows with WSL)");
   bh = patch(bh, "host quick start note", "Needs Docker. On Windows", "Auto-installs Node.js, RetroArch, FFmpeg, and Nexus in one command", "Needs Docker. On Windows, run it in WSL (Ubuntu) with Docker Desktop running.");
+  // Windows needs no Docker any more (scripts/install-host.ps1 brings its own
+  // database), so it comes first; Docker stays for Linux and NAS boxes.
+  bh = patch(bh, "host setup windows first", 'title:"Windows: one command"',
+    /title:"Install Docker",desc:"[^"]*",link:"https:\/\/docs\.docker\.com\/get-docker\/",linkLabel:"docker\.com"\}/,
+    'title:"Windows: one command",desc:"Open PowerShell (Start menu, type PowerShell), paste this and press Enter. It installs everything SaveState needs, asks for your folders and opens SaveState. No Docker and no admin rights. Run it again to update.",cmd:"irm https://savestate.co.za/install-host.ps1 | iex"}');
+  bh = patch(bh, "host setup linux step", 'title:"Linux or a NAS"',
+    /title:"Run the installer",desc:"[^"]*",cmd:"curl -fsSL https:\/\/savestate\.co\.za\/install\.sh \| bash"\}/,
+    'title:"Linux or a NAS",desc:"Needs Docker (most NAS boxes have it in their app centre). It asks for your folders and a port, then starts SaveState. Run it again to update.",cmd:"curl -fsSL https://savestate.co.za/install.sh | bash"}');
+  bh = patch(bh, "host quick start label 2", "Quick start (Linux or NAS)", "Quick start (Linux, NAS, or Windows with WSL)", "Quick start (Linux or NAS)");
+  bh = patch(bh, "host quick start note 2", "On Windows, use the one-command install above", "Needs Docker. On Windows, run it in WSL (Ubuntu) with Docker Desktop running.", "Needs Docker. On Windows, use the one-command install above instead.");
   if (bh !== before) writeFileSync(file, bh);
 }
 {

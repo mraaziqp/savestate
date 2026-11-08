@@ -839,6 +839,41 @@ made on a brand-new host becomes its owner (`ultra_admin`). Re-running it
 updates and keeps the settings. Not tested end to end on a NAS yet (no
 Docker on this PC).
 
+## Windows hosts without Docker (install-host.ps1)
+
+`irm https://savestate.co.za/install-host.ps1 | iex` in PowerShell (no admin)
+makes a Windows PC a host with nothing else to install. Files:
+`scripts/install-host.ps1` (the installer, served at `/install-host.ps1`),
+`host/host.mjs` (the runner), `scripts/windows/build-host.mjs` (the package).
+
+- **Installer:** Node.js 22 from nodejs.org and ffmpeg from the builds
+  ffmpeg.org links to (BtbN on GitHub, else gyan.dev, which refused scripted
+  downloads on 2026-11-08), each checked against its published SHA-256; the
+  SaveState package from `/api/downloads/host-info` (newest
+  `releases/updates/SaveState-Host-<version>.zip` + `.json`). Folder pickers
+  for films, music and games; port 3000 or the next free one. Hidden start via
+  `start-host.vbs`, scheduled task "SaveState Home Host" at sign-in, firewall
+  rule for home networks only when run as admin. Everything goes in
+  `%LOCALAPPDATA%\SaveStateHost` (`node`, `app`, `ffmpeg`, `data`). Scripted
+  installs: `SAVESTATE_MEDIA_DIR`/`MUSIC_DIR`/`GAMES_DIR` (no dialogs),
+  `SAVESTATE_PORT`, `SAVESTATE_NO_TASK=1`, `SAVESTATE_NO_BROWSER=1`,
+  `SAVESTATE_HOST_DIR`, `SAVESTATE_FROM`; `SAVESTATE_UNINSTALL=1` removes it
+  (data kept).
+- **Runner (`host.mjs`):** starts SaveState's own PostgreSQL 17 (npm
+  `embedded-postgres`, official binaries; `data/pg`, 127.0.0.1 only, UTF-8
+  whatever the Windows language, 128 MB shared buffers), makes the JWT and DB
+  secrets once (`data/host.json`, read without the BOM PowerShell writes),
+  then runs `dist/server.mjs` with only the variables it needs and restarts it
+  with back-off. `--stop` leaves `data/stop.request` so the database shuts
+  down cleanly (Windows can't signal another process politely). A database
+  left running by a killed host is stopped first (pid from `postmaster.pid`).
+- **Package:** 85 MB. Only the packages `dist/server.mjs` imports (14 of the
+  40 in package.json; vite only runs without dist/) plus the Windows Postgres
+  binaries. Build after the server and site: `node scripts/windows/build-host.mjs`.
+- **Tested 2026-11-08** on this PC (port 3101, scratch folder): start from
+  nothing in 13 s, the first account became `ultra_admin`, PS2 games in the
+  chosen folder listed; server ~130 MB, runner ~36 MB.
+
 ## Local cache (server/hotcache.ts)
 
 The library is on Google Drive, so a first play fetches from Google (7 s for

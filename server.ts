@@ -1948,6 +1948,11 @@ function scannedRomName(filename: string, detected: string): { title: string; pl
   return { title, platform: detected, year: "", named: false };
 }
 
+// A BIOS or firmware file, by folder ("bios", "Bios Image", "firmware") or by
+// the names Sony and others give them (scph70012.bin, SCPH-70012_BIOS_V12_USA_200.BIN).
+// One was listed as a PS2 game on a new host (2026-11-08).
+const BIOS_FILE = /(^|\/)(bios|bios images?|firmware)\/|(^|\/)scph[-_]?\d+[^/]*\.(bin|rom|mec|nvm)$|(^|\/)[^/]*_bios_[^/]*\.(bin|rom)$/i;
+
 // Cartridge systems whose ROM dumps are plain .bin files (no .cue).
 const BIN_CARTRIDGE_PLATFORMS = new Set(["atari2600", "atari5200", "atari7800", "genesis", "mastersystem", "gamegear", "32x", "colecovision", "intellivision", "odyssey2", "vectrex", "channelf"]);
 
@@ -1970,6 +1975,7 @@ async function scanVaultDir(root: string) {
     // games launch with FinalBurn Neo, so these copies could never start (and
     // the same games come in the pack's FBNeo/MAME sets anyway).
     if (/(^|\/)geolith[^/]*\//.test(rel)) return false;
+    if (BIOS_FILE.test(rel)) return false;
 
     // Raw .bin should usually be paired with a .cue sidecar (disc image).
     // Skip random binary payload files when no cue exists — except in a
@@ -3070,6 +3076,8 @@ function isPlayableEntry(game: { platform?: string; relativePath?: string }): bo
   if (/\.(rar|txt|nfo|jpg|png|url|md)$/.test(rel)) return false;
   // Geolith .neo sets: FinalBurn Neo can't load them (see scanVaultDir).
   if (/(^|\/)geolith[^/]*\//.test(rel)) return false;
+  // Console BIOS files are system files, not games.
+  if (BIOS_FILE.test(rel)) return false;
   if (String(game.platform ?? "").toLowerCase() === "switch" && /(^|\/)(updates?|dlc)\//.test(rel)) return false;
   // Arcade BIOS sets sit next to the games (FinalBurn Neo looks for them
   // there) but aren't games: "Neo Geo System" was offered as one.
@@ -30221,6 +30229,30 @@ Format as JSON:
     res.sendFile(path.join(process.cwd(), 'scripts', 'install.sh'), (err) => {
       if (err && !res.headersSent) res.status(404).type('text/plain').send('echo "The installer is missing on this host." >&2; exit 1\n');
     });
+  });
+
+  // `irm https://savestate.co.za/install-host.ps1 | iex` makes a Windows PC a
+  // host with nothing else to install (scripts/install-host.ps1): it fetches
+  // the newest releases/updates/SaveState-Host-<version>.zip named here.
+  app.get('/install-host.ps1', (_req, res) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(path.join(process.cwd(), 'scripts', 'install-host.ps1'), (err) => {
+      if (err && !res.headersSent) res.status(404).type('text/plain').send('Write-Error "The installer is missing on this host."\n');
+    });
+  });
+  app.get('/api/downloads/host-info', async (_req, res) => {
+    const dir = path.join(process.cwd(), 'releases', 'updates');
+    const files = (await readdir(dir).catch(() => [] as string[])).filter((f) => /^SaveState-Host-[\d.]+\.json$/i.test(f));
+    files.sort((a, b) => (semverGt(a.replace(/^\D+|\.json$/gi, ''), b.replace(/^\D+|\.json$/gi, '')) ? -1 : 1));
+    for (const f of files) {
+      try {
+        const j = JSON.parse(await readFile(path.join(dir, f), 'utf8'));
+        await fsAccess(path.join(dir, j.file));
+        return res.json({ ...j, url: `/updates/${encodeURIComponent(j.file)}` });
+      } catch { /* try an older one */ }
+    }
+    res.status(404).json({ error: 'No SaveState Host package on this server yet.' });
   });
 
   // SaveState for PS Vita (vita/): the newest releases/updates/SaveState-Vita-<version>.vpk.
