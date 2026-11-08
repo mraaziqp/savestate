@@ -13,7 +13,7 @@ const vibrate = (ms = 25) => {
 /**
  * TV Remote Component:
  * - When in Remote mode (on phone or when explicitly opened): Full tactile TV remote pad.
- * - When on TV / desktop: Floating listener & pairing pill that executes remote actions.
+ * - When on TV / desktop: Floating listener & pairing pill that executes remote actions with auto-fade on video playback.
  */
 export function TvRemote() {
   useStyles();
@@ -24,6 +24,7 @@ export function TvRemote() {
   const [status, setStatus] = useState("disconnected"); // "disconnected" | "connecting" | "connected"
   const [error, setError] = useState("");
   const [mode, setMode] = useState("dpad"); // "dpad" | "trackpad" | "media"
+  const [showSearchModal, setShowSearchModal] = useState(false);
   const [inputText, setInputText] = useState("");
   const [mediaState, setMediaState] = useState({ playing: false, currentTime: 0, duration: 0, title: "", isVideo: false });
   const wsRef = useRef(null);
@@ -68,10 +69,6 @@ export function TvRemote() {
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
-
-    ws.onopen = () => {
-      // connected
-    };
 
     ws.onmessage = (evt) => {
       try {
@@ -122,9 +119,10 @@ export function TvRemote() {
 
   // Handle mobile text submission
   const handleInputSubmit = (e) => {
-    e.preventDefault();
+    e?.preventDefault?.();
     if (inputText) {
       send({ type: "input", text: inputText, replace: true, submit: true });
+      setShowSearchModal(false);
       setInputText("");
     }
   };
@@ -132,6 +130,12 @@ export function TvRemote() {
   const handleInputLiveChange = (val) => {
     setInputText(val);
     send({ type: "input", text: val, replace: true, submit: false });
+  };
+
+  const handleSuggestionClick = (term) => {
+    setInputText(term);
+    send({ type: "input", text: term, replace: true, submit: true });
+    setShowSearchModal(false);
   };
 
   // Touchpad drag handlers
@@ -200,8 +204,7 @@ export function TvRemote() {
         <div style={{
           position: "fixed",
           inset: 0,
-          background: "rgba(10, 10, 15, 0.96)",
-          backdropFilter: "blur(20px)",
+          background: "radial-gradient(circle at 50% 20%, #1e293b 0%, #090d16 100%)",
           zIndex: 99999,
           display: "flex",
           flexDirection: "column",
@@ -213,7 +216,7 @@ export function TvRemote() {
           touchAction: "manipulation",
           userSelect: "none",
         }}>
-          {/* Top Bar: TV status & Close */}
+          {/* Top Bar: TV status & Actions */}
           <div style={{ width: "100%", maxWidth: 420, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{
@@ -224,38 +227,93 @@ export function TvRemote() {
                 background: status === "connected" ? "#10b981" : status === "connecting" ? "#f59e0b" : "#ef4444",
                 boxShadow: status === "connected" ? "0 0 10px #10b981" : "none",
               }} />
-              <div style={{ fontSize: 14, fontWeight: 600 }}>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>
                 {status === "connected" ? (pairedDisplay?.name || "Connected to TV") : "Not Paired"}
               </div>
             </div>
 
-            <button
-              onClick={() => setIsOpen(false)}
-              style={{
-                background: "rgba(255,255,255,0.1)",
-                border: "none",
-                borderRadius: 20,
-                padding: "6px 14px",
-                color: "#cbd5e1",
-                fontSize: 13,
-                cursor: "pointer",
-              }}
-            >
-              ✕ Close
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              {status === "connected" && (
+                <button
+                  onClick={() => {
+                    try { wsRef.current?.close(); } catch {}
+                    setStatus("disconnected");
+                    setPairedDisplay(null);
+                  }}
+                  style={{
+                    background: "rgba(255,255,255,0.08)",
+                    border: "none",
+                    borderRadius: 16,
+                    padding: "5px 12px",
+                    color: "#94a3b8",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  📺 Switch TV
+                </button>
+              )}
+
+              <button
+                onClick={() => setIsOpen(false)}
+                style={{
+                  background: "rgba(255,255,255,0.1)",
+                  border: "none",
+                  borderRadius: 16,
+                  padding: "5px 12px",
+                  color: "#cbd5e1",
+                  fontSize: 12,
+                  cursor: "pointer",
+                }}
+              >
+                ✕ Close
+              </button>
+            </div>
           </div>
 
           {/* Pairing Screen if not connected */}
           {status !== "connected" ? (
             <div style={{ width: "100%", maxWidth: 360, textAlign: "center", margin: "auto 0" }}>
-              <div style={{ fontSize: 48, marginBottom: 12 }}>📱 ➔ 📺</div>
-              <h2 style={{ fontSize: 20, fontWeight: 700, margin: "0 0 8px" }}>Pair with TV Screen</h2>
-              <p style={{ fontSize: 14, color: "#94a3b8", margin: "0 0 24px" }}>
-                Enter the 4-digit PIN displayed on your TV screen to start controlling it.
+              <div style={{ fontSize: 48, marginBottom: 10 }}>📱 ➔ 📺</div>
+              <h2 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 6px" }}>Connect to TV</h2>
+              <p style={{ fontSize: 14, color: "#94a3b8", margin: "0 0 20px" }}>
+                Scan the QR code on your TV or enter the 4-digit PIN below.
               </p>
 
+              {/* One-Tap Connect if exactly 1 TV detected on network */}
+              {displays.length === 1 && (
+                <div style={{ marginBottom: 20 }}>
+                  <button
+                    onClick={() => { setPinInput(displays[0].pin); connectToDisplay(displays[0].pin); }}
+                    style={{
+                      width: "100%",
+                      padding: "16px 20px",
+                      background: "linear-gradient(135deg, #3b82f6, #1d4ed8)",
+                      border: "none",
+                      borderRadius: 16,
+                      color: "#fff",
+                      fontWeight: 800,
+                      fontSize: 15,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 10,
+                      boxShadow: "0 8px 24px rgba(59, 130, 246, 0.4)",
+                    }}
+                  >
+                    <span>📺</span>
+                    <span>1-Tap Connect: {displays[0].name}</span>
+                  </button>
+                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
+                    Detected automatically on your Wi-Fi (PIN: {displays[0].pin})
+                  </div>
+                </div>
+              )}
+
               {error && (
-                <div style={{ background: "rgba(239, 68, 68, 0.15)", border: "1px solid #ef4444", color: "#fca5a5", padding: "8px 12px", borderRadius: 8, fontSize: 13, marginBottom: 16 }}>
+                <div style={{ background: "rgba(239, 68, 68, 0.15)", border: "1px solid #ef4444", color: "#fca5a5", padding: "8px 12px", borderRadius: 10, fontSize: 13, marginBottom: 16 }}>
                   {error}
                 </div>
               )}
@@ -271,12 +329,12 @@ export function TvRemote() {
                     width: 140,
                     height: 52,
                     fontSize: 26,
-                    fontWeight: 700,
+                    fontWeight: 800,
                     letterSpacing: 6,
                     textAlign: "center",
                     background: "rgba(255,255,255,0.08)",
                     border: "1px solid rgba(255,255,255,0.2)",
-                    borderRadius: 12,
+                    borderRadius: 14,
                     color: "#fff",
                     outline: "none",
                   }}
@@ -285,13 +343,14 @@ export function TvRemote() {
                   onClick={() => connectToDisplay(pinInput)}
                   disabled={pinInput.length < 4 || status === "connecting"}
                   style={{
-                    padding: "0 20px",
+                    padding: "0 22px",
                     height: 52,
                     background: pinInput.length === 4 ? "#3b82f6" : "rgba(255,255,255,0.1)",
                     border: "none",
-                    borderRadius: 12,
+                    borderRadius: 14,
                     color: "#fff",
-                    fontWeight: 600,
+                    fontWeight: 700,
+                    fontSize: 15,
                     cursor: pinInput.length === 4 ? "pointer" : "default",
                   }}
                 >
@@ -299,11 +358,11 @@ export function TvRemote() {
                 </button>
               </div>
 
-              {/* Active TVs detected */}
-              {displays.length > 0 && (
-                <div style={{ marginTop: 24, textAlign: "left" }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, color: "#64748b", marginBottom: 10 }}>
-                    Detected TVs on Network
+              {/* Active TVs list if multiple detected */}
+              {displays.length > 1 && (
+                <div style={{ marginTop: 20, textAlign: "left" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: 1, color: "#64748b", marginBottom: 8 }}>
+                    Available TVs on Wi-Fi:
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {displays.map((d) => (
@@ -317,16 +376,16 @@ export function TvRemote() {
                           padding: "12px 16px",
                           background: "rgba(255,255,255,0.06)",
                           border: "1px solid rgba(255,255,255,0.1)",
-                          borderRadius: 10,
+                          borderRadius: 12,
                           color: "#fff",
                           cursor: "pointer",
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                          <span style={{ fontSize: 18 }}>📺</span>
+                          <span style={{ fontSize: 20 }}>📺</span>
                           <span style={{ fontWeight: 600 }}>{d.name}</span>
                         </div>
-                        <span style={{ fontSize: 13, background: "rgba(59, 130, 246, 0.2)", color: "#60a5fa", padding: "4px 8px", borderRadius: 6, fontWeight: 700 }}>
+                        <span style={{ fontSize: 13, background: "rgba(59, 130, 246, 0.25)", color: "#60a5fa", padding: "4px 8px", borderRadius: 6, fontWeight: 800 }}>
                           PIN: {d.pin}
                         </span>
                       </button>
@@ -337,20 +396,20 @@ export function TvRemote() {
             </div>
           ) : (
             /* Connected Remote Pad */
-            <div style={{ width: "100%", maxWidth: 380, display: "flex", flexDirection: "column", gap: 16, margin: "auto 0" }}>
+            <div style={{ width: "100%", maxWidth: 390, display: "flex", flexDirection: "column", gap: 14, margin: "auto 0" }}>
 
-              {/* Mode Selector */}
-              <div style={{ display: "flex", background: "rgba(255,255,255,0.08)", borderRadius: 12, padding: 4, gap: 4 }}>
+              {/* Mode Selector Tabs */}
+              <div style={{ display: "flex", background: "rgba(255,255,255,0.08)", borderRadius: 14, padding: 4, gap: 4 }}>
                 <button
                   onClick={() => setMode("dpad")}
                   style={{
                     flex: 1,
                     padding: "8px 0",
                     border: "none",
-                    borderRadius: 8,
+                    borderRadius: 10,
                     background: mode === "dpad" ? "#3b82f6" : "transparent",
                     color: "#fff",
-                    fontWeight: 600,
+                    fontWeight: 700,
                     fontSize: 13,
                     cursor: "pointer",
                   }}
@@ -363,10 +422,10 @@ export function TvRemote() {
                     flex: 1,
                     padding: "8px 0",
                     border: "none",
-                    borderRadius: 8,
+                    borderRadius: 10,
                     background: mode === "trackpad" ? "#3b82f6" : "transparent",
                     color: "#fff",
-                    fontWeight: 600,
+                    fontWeight: 700,
                     fontSize: 13,
                     cursor: "pointer",
                   }}
@@ -379,63 +438,52 @@ export function TvRemote() {
                     flex: 1,
                     padding: "8px 0",
                     border: "none",
-                    borderRadius: 8,
+                    borderRadius: 10,
                     background: mode === "media" ? "#3b82f6" : "transparent",
                     color: "#fff",
-                    fontWeight: 600,
+                    fontWeight: 700,
                     fontSize: 13,
                     cursor: "pointer",
                   }}
                 >
-                  🎬 Playback
+                  🎬 Media
                 </button>
               </div>
 
-              {/* Mode 1: D-PAD & Core TV Navigation */}
+              {/* Mode 1: Tactile D-Pad Controller */}
               {mode === "dpad" && (
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 14 }}>
-                  {/* Top utility row: Back, Home, Menu */}
-                  <div style={{ display: "flex", width: "100%", justifyContent: "space-between", padding: "0 16px" }}>
-                    <button
-                      onClick={() => nav("cancel")}
-                      style={utilityBtnStyle}
-                      title="Back / Escape"
-                    >
-                      ↩ Back
+                  {/* Quick Back & Home Bar */}
+                  <div style={{ display: "flex", width: "100%", justifyContent: "space-between", padding: "0 10px" }}>
+                    <button onClick={() => nav("cancel")} style={pillControlBtn} title="Back / Escape">
+                      ◀ Back
                     </button>
-                    <button
-                      onClick={() => nav("home")}
-                      style={utilityBtnStyle}
-                      title="Home"
-                    >
+                    <button onClick={() => setShowSearchModal(true)} style={{ ...pillControlBtn, background: "rgba(59,130,246,0.25)", color: "#60a5fa" }} title="Type to Search TV">
+                      🔍 Search TV
+                    </button>
+                    <button onClick={() => nav("home")} style={pillControlBtn} title="Home / Top">
                       🏠 Home
-                    </button>
-                    <button
-                      onClick={() => nav("menu")}
-                      style={utilityBtnStyle}
-                      title="Menu"
-                    >
-                      ☰ Menu
                     </button>
                   </div>
 
-                  {/* Circular D-Pad Container */}
+                  {/* Circular D-Pad */}
                   <div style={{
-                    position: "relative",
                     width: 250,
                     height: 250,
                     borderRadius: "50%",
-                    background: "radial-gradient(circle, rgba(30, 41, 59, 0.8) 0%, rgba(15, 23, 42, 0.95) 100%)",
+                    background: "rgba(255, 255, 255, 0.05)",
                     border: "2px solid rgba(255, 255, 255, 0.12)",
-                    boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
+                    position: "relative",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
+                    boxShadow: "0 10px 30px rgba(0,0,0,0.5)",
                   }}>
                     {/* UP */}
                     <button
                       onClick={() => nav("up")}
                       style={{ ...dpadArrowStyle, top: 12, left: "50%", transform: "translateX(-50%)" }}
+                      aria-label="Up"
                     >
                       ▲
                     </button>
@@ -444,6 +492,7 @@ export function TvRemote() {
                     <button
                       onClick={() => nav("down")}
                       style={{ ...dpadArrowStyle, bottom: 12, left: "50%", transform: "translateX(-50%)" }}
+                      aria-label="Down"
                     >
                       ▼
                     </button>
@@ -452,6 +501,7 @@ export function TvRemote() {
                     <button
                       onClick={() => nav("left")}
                       style={{ ...dpadArrowStyle, left: 12, top: "50%", transform: "translateY(-50%)" }}
+                      aria-label="Left"
                     >
                       ◀
                     </button>
@@ -460,6 +510,7 @@ export function TvRemote() {
                     <button
                       onClick={() => nav("right")}
                       style={{ ...dpadArrowStyle, right: 12, top: "50%", transform: "translateY(-50%)" }}
+                      aria-label="Right"
                     >
                       ▶
                     </button>
@@ -468,8 +519,8 @@ export function TvRemote() {
                     <button
                       onClick={() => nav("confirm")}
                       style={{
-                        width: 90,
-                        height: 90,
+                        width: 86,
+                        height: 86,
                         borderRadius: "50%",
                         background: "linear-gradient(135deg, #3b82f6, #1d4ed8)",
                         border: "2px solid rgba(255, 255, 255, 0.3)",
@@ -479,8 +530,34 @@ export function TvRemote() {
                         fontWeight: 800,
                         cursor: "pointer",
                       }}
+                      aria-label="OK / Select"
                     >
                       OK
+                    </button>
+                  </div>
+
+                  {/* Volume Control Rocker right under D-Pad */}
+                  <div style={{ display: "flex", width: "100%", justifyContent: "center", gap: 10 }}>
+                    <button
+                      onClick={() => media("volume", -0.1)}
+                      style={{ ...pillControlBtn, flex: 1, padding: "10px 0" }}
+                      title="Volume Down"
+                    >
+                      🔉 Vol -
+                    </button>
+                    <button
+                      onClick={() => media("mute")}
+                      style={{ ...pillControlBtn, flex: 1, padding: "10px 0" }}
+                      title="Mute Audio"
+                    >
+                      🔇 Mute
+                    </button>
+                    <button
+                      onClick={() => media("volume", 0.1)}
+                      style={{ ...pillControlBtn, flex: 1, padding: "10px 0" }}
+                      title="Volume Up"
+                    >
+                      🔊 Vol +
                     </button>
                   </div>
                 </div>
@@ -493,9 +570,9 @@ export function TvRemote() {
                   onTouchMove={handleTouchMove}
                   onTouchEnd={handleTouchEnd}
                   style={{
-                    height: 280,
+                    height: 270,
                     background: "rgba(255,255,255,0.05)",
-                    border: "2px dashed rgba(255,255,255,0.15)",
+                    border: "2px dashed rgba(255,255,255,0.18)",
                     borderRadius: 20,
                     display: "flex",
                     flexDirection: "column",
@@ -506,100 +583,223 @@ export function TvRemote() {
                     touchAction: "none",
                   }}
                 >
-                  <div style={{ fontSize: 32, marginBottom: 8 }}>👆</div>
-                  <div style={{ fontWeight: 600, fontSize: 16 }}>Swipe & Scroll Surface</div>
-                  <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
+                  <div style={{ fontSize: 36, marginBottom: 8 }}>👆</div>
+                  <div style={{ fontWeight: 700, fontSize: 16 }}>Smooth Swipe Surface</div>
+                  <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 4, maxWidth: 260 }}>
                     Swipe up / down to scroll shelves smoothly on the TV screen. Tap to select.
                   </div>
-                  <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
-                    <button onClick={() => scroll(-300)} style={pillStyle}>▲ Scroll Up</button>
-                    <button onClick={() => nav("confirm")} style={{ ...pillStyle, background: "#3b82f6" }}>Tap (OK)</button>
-                    <button onClick={() => scroll(300)} style={pillStyle}>▼ Scroll Down</button>
+                  <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
+                    <button onClick={() => scroll(-300)} style={pillControlBtn}>▲ Scroll Up</button>
+                    <button onClick={() => nav("confirm")} style={{ ...pillControlBtn, background: "#3b82f6" }}>Tap (OK)</button>
+                    <button onClick={() => scroll(300)} style={pillControlBtn}>▼ Scroll Down</button>
                   </div>
                 </div>
               )}
 
-              {/* Mode 3: Media Controller */}
+              {/* Mode 3: Media Playback Controller */}
               {mode === "media" && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 16, padding: "8px 0" }}>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 13, color: "#94a3b8" }}>Now Playing on TV</div>
-                    <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {mediaState.title || "Video Player"}
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  {/* Current Playing Card */}
+                  <div style={{
+                    background: "rgba(255,255,255,0.06)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 16,
+                    padding: "16px 18px",
+                    textAlign: "center",
+                  }}>
+                    <div style={{ fontSize: 12, color: "#60a5fa", fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>
+                      {mediaState.isVideo ? "Now Playing on TV" : "Active Screen"}
                     </div>
+                    <div style={{ fontWeight: 700, fontSize: 16, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {mediaState.title || "SaveState TV Hub"}
+                    </div>
+
+                    {mediaState.duration > 0 && (
+                      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 6 }}>
+                        {Math.floor(mediaState.currentTime / 60)}:{String(mediaState.currentTime % 60).padStart(2, "0")} / {Math.floor(mediaState.duration / 60)}:{String(mediaState.duration % 60).padStart(2, "0")}
+                      </div>
+                    )}
                   </div>
 
                   {/* Playback Controls */}
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 18 }}>
-                    <button onClick={() => media("seek", -10)} style={mediaBtnStyle}>⏪ 10s</button>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 16 }}>
+                    <button onClick={() => media("seek", -10)} style={circleMediaBtn} title="Rewind 10s">
+                      ⏪ 10s
+                    </button>
+
                     <button
                       onClick={() => media("play_pause")}
                       style={{
-                        ...mediaBtnStyle,
+                        ...circleMediaBtn,
                         width: 72,
                         height: 72,
-                        borderRadius: "50%",
                         background: "#3b82f6",
                         fontSize: 26,
+                        boxShadow: "0 4px 18px rgba(59, 130, 246, 0.5)",
                       }}
+                      title="Play / Pause"
                     >
                       {mediaState.playing ? "⏸" : "▶"}
                     </button>
-                    <button onClick={() => media("seek", 10)} style={mediaBtnStyle}>10s ⏩</button>
+
+                    <button onClick={() => media("seek", 10)} style={circleMediaBtn} title="Forward 10s">
+                      10s ⏩
+                    </button>
                   </div>
 
                   {/* Volume & Fullscreen */}
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
-                    <button onClick={() => media("mute")} style={pillStyle}>🔇 Mute</button>
-                    <button onClick={() => media("fullscreen")} style={pillStyle}>⛶ Fullscreen</button>
+                  <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+                    <button onClick={() => media("volume", -0.1)} style={pillControlBtn}>
+                      🔉 Vol -
+                    </button>
+                    <button onClick={() => media("mute")} style={pillControlBtn}>
+                      🔇 Mute
+                    </button>
+                    <button onClick={() => media("volume", 0.1)} style={pillControlBtn}>
+                      🔊 Vol +
+                    </button>
+                    <button onClick={() => media("fullscreen")} style={pillControlBtn}>
+                      ⛶ Fullscreen
+                    </button>
                   </div>
                 </div>
               )}
-
-              {/* Mobile Keyboard / Search Input Streamer */}
-              <form onSubmit={handleInputSubmit} style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                <input
-                  type="text"
-                  placeholder="Type to search on TV..."
-                  value={inputText}
-                  onChange={(e) => handleInputLiveChange(e.target.value)}
-                  style={{
-                    flex: 1,
-                    height: 44,
-                    background: "rgba(255,255,255,0.08)",
-                    border: "1px solid rgba(255,255,255,0.2)",
-                    borderRadius: 10,
-                    padding: "0 12px",
-                    color: "#fff",
-                    fontSize: 14,
-                    outline: "none",
-                  }}
-                />
-                <button
-                  type="submit"
-                  style={{
-                    padding: "0 16px",
-                    height: 44,
-                    background: "rgba(255,255,255,0.15)",
-                    border: "none",
-                    borderRadius: 10,
-                    color: "#fff",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  Send
-                </button>
-              </form>
             </div>
           )}
 
-          {/* Bottom Bar: Quick tab navigation */}
-          <div style={{ display: "flex", gap: 10, justifyContent: "center", width: "100%", maxWidth: 400 }}>
-            <button onClick={() => send({ type: "navigate_tab", tab: "games" })} style={bottomTabStyle}>🎮 Games</button>
-            <button onClick={() => send({ type: "navigate_tab", tab: "media" })} style={bottomTabStyle}>🎬 Movies</button>
-            <button onClick={() => send({ type: "navigate_tab", tab: "library" })} style={bottomTabStyle}>💾 Library</button>
-          </div>
+          {/* Quick TV App Jump Bar at Bottom */}
+          {status === "connected" && (
+            <div style={{
+              width: "100%",
+              maxWidth: 420,
+              display: "grid",
+              gridTemplateColumns: "repeat(5, 1fr)",
+              gap: 6,
+              background: "rgba(255,255,255,0.06)",
+              padding: 6,
+              borderRadius: 16,
+            }}>
+              <button onClick={() => send({ type: "navigate_tab", tab: "discover" })} style={quickTabBtnStyle}>
+                <span>🏠</span> Home
+              </button>
+              <button onClick={() => send({ type: "navigate_tab", tab: "games" })} style={quickTabBtnStyle}>
+                <span>🎮</span> Games
+              </button>
+              <button onClick={() => send({ type: "navigate_tab", tab: "media" })} style={quickTabBtnStyle}>
+                <span>🎬</span> Movies
+              </button>
+              <button onClick={() => send({ type: "navigate_tab", tab: "music" })} style={quickTabBtnStyle}>
+                <span>🎵</span> Music
+              </button>
+              <button onClick={() => send({ type: "navigate_tab", tab: "library" })} style={quickTabBtnStyle}>
+                <span>💾</span> Library
+              </button>
+            </div>
+          )}
+
+          {/* Quick Mobile Keyboard Search Modal */}
+          {showSearchModal && (
+            <div style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.85)",
+              backdropFilter: "blur(16px)",
+              zIndex: 100000,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "center",
+              alignItems: "center",
+              padding: 24,
+            }}>
+              <div style={{ width: "100%", maxWidth: 360, textAlign: "center" }}>
+                <div style={{ fontSize: 32, marginBottom: 8 }}>🔍</div>
+                <h3 style={{ fontSize: 18, fontWeight: 700, margin: "0 0 12px" }}>Search on TV</h3>
+                
+                <form onSubmit={handleInputSubmit} style={{ marginBottom: 14 }}>
+                  <input
+                    type="text"
+                    autoFocus
+                    placeholder="Type anything to search on TV..."
+                    value={inputText}
+                    onChange={(e) => handleInputLiveChange(e.target.value)}
+                    style={{
+                      width: "100%",
+                      height: 48,
+                      background: "rgba(255,255,255,0.1)",
+                      border: "1px solid rgba(255,255,255,0.25)",
+                      borderRadius: 12,
+                      padding: "0 16px",
+                      color: "#fff",
+                      fontSize: 16,
+                      outline: "none",
+                      boxSizing: "border-box",
+                      marginBottom: 10,
+                    }}
+                  />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="submit"
+                      style={{
+                        flex: 1,
+                        height: 44,
+                        background: "#3b82f6",
+                        border: "none",
+                        borderRadius: 10,
+                        color: "#fff",
+                        fontWeight: 700,
+                        fontSize: 14,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Search
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowSearchModal(false)}
+                      style={{
+                        padding: "0 16px",
+                        height: 44,
+                        background: "rgba(255,255,255,0.1)",
+                        border: "none",
+                        borderRadius: 10,
+                        color: "#cbd5e1",
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+
+                {/* Popular Search Suggestions */}
+                <div style={{ textAlign: "left" }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", color: "#64748b", marginBottom: 6 }}>
+                    Quick Suggestions:
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {["GTA", "Spider-Man", "Mario", "Anime", "Action", "Horror", "PS2"].map((term) => (
+                      <button
+                        key={term}
+                        onClick={() => handleSuggestionClick(term)}
+                        style={{
+                          background: "rgba(255,255,255,0.08)",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          borderRadius: 16,
+                          padding: "4px 10px",
+                          color: "#cbd5e1",
+                          fontSize: 12,
+                          cursor: "pointer",
+                        }}
+                      >
+                        {term}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </>
@@ -608,19 +808,59 @@ export function TvRemote() {
 
 /**
  * TV Display Listener:
- * Runs in the background on the TV/browser.
- * Registers as display on `/ws/remote?role=display`, displays pairing pill with PIN,
- * and translates incoming remote events to gamepad nav, video controls, and scrolling!
+ * Runs in the background on the TV screen.
+ * - Registers as display on `/ws/remote?role=display`.
+ * - Auto-fades corner badge during full-screen playback.
+ * - Displays on-screen TV Volume HUD toast when volume changes.
+ * - Translates incoming remote events to gamepad nav, video playback, and smooth scrolling!
  */
 export function TvDisplayListener({ onOpenRemote }) {
   const [pin, setPin] = useState(null);
   const [qrData, setQrData] = useState(null);
   const [controllerCount, setControllerCount] = useState(0);
   const [showPairModal, setShowPairModal] = useState(false);
+  const [isIdle, setIsIdle] = useState(false);
+  const [volumeHud, setVolumeHud] = useState({ visible: false, text: "", icon: "🔊" });
   const wsRef = useRef(null);
+  const volumeTimerRef = useRef(null);
+
+  // Show on-screen TV Volume Toast
+  const showVolumeToast = useCallback((text, icon = "🔊") => {
+    clearTimeout(volumeTimerRef.current);
+    setVolumeHud({ visible: true, text, icon });
+    volumeTimerRef.current = setTimeout(() => {
+      setVolumeHud((s) => ({ ...s, visible: false }));
+    }, 1800);
+  }, []);
+
+  // Auto-fade badge during fullscreen / inactive video playback
+  useEffect(() => {
+    let idleTimer = null;
+    const resetIdle = () => {
+      setIsIdle(false);
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        const isFs = !!document.fullscreenElement;
+        const v = document.querySelector("video");
+        const isPlaying = v && !v.paused;
+        if (isFs || isPlaying) {
+          setIsIdle(true);
+        }
+      }, 3500);
+    };
+
+    window.addEventListener("mousemove", resetIdle);
+    window.addEventListener("keydown", resetIdle);
+    resetIdle();
+
+    return () => {
+      clearTimeout(idleTimer);
+      window.removeEventListener("mousemove", resetIdle);
+      window.removeEventListener("keydown", resetIdle);
+    };
+  }, []);
 
   useEffect(() => {
-    // Only connect as display on non-mobile devices or wide screens
     if (typeof window === "undefined") return;
 
     let ws = null;
@@ -642,7 +882,6 @@ export function TvDisplayListener({ onOpenRemote }) {
       } catch {}
     };
 
-    // Attach video status listeners across DOM
     const onPlay = () => pushVideoStatus();
     const onPause = () => pushVideoStatus();
     const onSeeked = () => pushVideoStatus();
@@ -666,6 +905,7 @@ export function TvDisplayListener({ onOpenRemote }) {
             if (msg.qrData) setQrData(msg.qrData);
           } else if (msg.type === "controller_joined") {
             setControllerCount(msg.controllerCount || 1);
+            showVolumeToast(`Phone Connected`, "📱");
             pushVideoStatus();
           } else if (msg.type === "controller_left") {
             setControllerCount(msg.controllerCount || 0);
@@ -682,15 +922,25 @@ export function TvDisplayListener({ onOpenRemote }) {
             // Smooth scroll active window
             window.scrollBy({ top: msg.deltaY, behavior: "smooth" });
           } else if (msg.type === "media") {
-            // Video playback control
+            // Video playback & volume control
             const video = document.querySelector("video");
-            if (video) {
+            if (msg.action === "volume") {
+              const currentVol = video ? video.volume : 1;
+              const newVol = Math.max(0, Math.min(1, currentVol + (msg.value || 0)));
+              if (video) video.volume = newVol;
+              showVolumeToast(`Volume: ${Math.round(newVol * 100)}%`, newVol === 0 ? "🔇" : newVol < 0.5 ? "🔉" : "🔊");
+            } else if (msg.action === "mute") {
+              if (video) {
+                video.muted = !video.muted;
+                showVolumeToast(video.muted ? "Muted" : `Volume: ${Math.round(video.volume * 100)}%`, video.muted ? "🔇" : "🔊");
+              } else {
+                showVolumeToast("Muted", "🔇");
+              }
+            } else if (video) {
               if (msg.action === "play_pause") {
                 if (video.paused) video.play(); else video.pause();
               } else if (msg.action === "seek") {
                 video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + (msg.value || 0)));
-              } else if (msg.action === "mute") {
-                video.muted = !video.muted;
               } else if (msg.action === "fullscreen") {
                 if (document.fullscreenElement) document.exitFullscreen?.();
                 else video.requestFullscreen?.() || video.parentElement?.requestFullscreen?.();
@@ -719,14 +969,12 @@ export function TvDisplayListener({ onOpenRemote }) {
       };
 
       ws.onclose = () => {
-        // Reconnect after 5 seconds
         setTimeout(connectDisplay, 5000);
       };
     };
 
     connectDisplay();
 
-    // Ping loop
     keepAlive = setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "ping" }));
@@ -740,13 +988,39 @@ export function TvDisplayListener({ onOpenRemote }) {
       document.removeEventListener("seeked", onSeeked, true);
       try { ws?.close(); } catch {}
     };
-  }, []);
+  }, [showVolumeToast]);
 
   if (!pin) return null;
 
   return (
     <>
-      {/* Sleek Floating TV Remote Badge in bottom corner */}
+      {/* On-Screen TV Volume & Status HUD Overlay */}
+      {volumeHud.visible && (
+        <div style={{
+          position: "fixed",
+          top: 28,
+          right: 28,
+          zIndex: 99999,
+          background: "rgba(15, 23, 42, 0.92)",
+          backdropFilter: "blur(20px)",
+          border: "1px solid rgba(255, 255, 255, 0.2)",
+          boxShadow: "0 10px 30px rgba(0,0,0,0.6)",
+          borderRadius: 30,
+          padding: "10px 22px",
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          color: "#fff",
+          fontSize: 16,
+          fontWeight: 700,
+          pointerEvents: "none",
+        }}>
+          <span style={{ fontSize: 22 }}>{volumeHud.icon}</span>
+          <span>{volumeHud.text}</span>
+        </div>
+      )}
+
+      {/* Sleek Floating TV Remote Badge in bottom corner (auto-fades during video playback) */}
       <div
         onClick={() => setShowPairModal(true)}
         style={{
@@ -755,8 +1029,8 @@ export function TvDisplayListener({ onOpenRemote }) {
           right: 16,
           zIndex: 9000,
           background: controllerCount > 0 ? "rgba(16, 185, 129, 0.9)" : "rgba(30, 41, 59, 0.85)",
-          backdropFilter: "blur(12px)",
-          border: "1px solid rgba(255, 255, 255, 0.15)",
+          backdropFilter: "blur(14px)",
+          border: "1px solid rgba(255, 255, 255, 0.18)",
           borderRadius: 24,
           padding: "6px 14px",
           display: "flex",
@@ -766,19 +1040,23 @@ export function TvDisplayListener({ onOpenRemote }) {
           boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
           color: "#fff",
           fontSize: 12,
-          fontWeight: 600,
+          fontWeight: 700,
           userSelect: "none",
+          opacity: isIdle ? 0 : 1,
+          pointerEvents: isIdle ? "none" : "auto",
+          transition: "opacity 0.4s ease, transform 0.2s ease",
         }}
-        title="Click to pair your smartphone as a TV remote"
+        title="Click to pair your cellphone as a TV remote"
       >
         <span>📱 TV Remote</span>
         <span style={{
-          background: "rgba(0,0,0,0.3)",
-          padding: "2px 6px",
+          background: "rgba(0,0,0,0.35)",
+          padding: "2px 7px",
           borderRadius: 6,
           letterSpacing: 1,
           fontFamily: "monospace",
-          fontWeight: 700,
+          fontWeight: 800,
+          color: "#38bdf8",
         }}>
           PIN: {pin}
         </span>
@@ -787,7 +1065,7 @@ export function TvDisplayListener({ onOpenRemote }) {
         )}
       </div>
 
-      {/* TV Pairing Modal */}
+      {/* TV Pairing Modal with Big Interactive QR Code */}
       {showPairModal && (
         <div style={{
           position: "fixed",
@@ -803,23 +1081,23 @@ export function TvDisplayListener({ onOpenRemote }) {
           <div style={{
             background: "#0f172a",
             border: "1px solid rgba(255,255,255,0.15)",
-            borderRadius: 20,
+            borderRadius: 24,
             maxWidth: 440,
             width: "100%",
             padding: 28,
             textAlign: "center",
             color: "#fff",
-            boxShadow: "0 20px 40px rgba(0,0,0,0.6)",
+            boxShadow: "0 20px 50px rgba(0,0,0,0.7)",
           }}>
-            <div style={{ fontSize: 40, marginBottom: 8 }}>📱 ➔ 📺</div>
-            <h2 style={{ fontSize: 22, fontWeight: 700, margin: "0 0 6px" }}>Use Your Phone as a Remote</h2>
+            <div style={{ fontSize: 44, marginBottom: 8 }}>📱 ➔ 📺</div>
+            <h2 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 6px" }}>Use Your Phone as a TV Remote</h2>
             <p style={{ fontSize: 14, color: "#94a3b8", margin: "0 0 20px" }}>
               Control navigation, scroll shelves, seek movies, and type with your mobile keyboard.
             </p>
 
             <div style={{
               background: "rgba(255,255,255,0.06)",
-              borderRadius: 16,
+              borderRadius: 18,
               padding: 20,
               marginBottom: 20,
               display: "flex",
@@ -833,18 +1111,18 @@ export function TvDisplayListener({ onOpenRemote }) {
                     src={qrData}
                     alt="Scan QR Code to Pair"
                     style={{
-                      width: 170,
-                      height: 170,
-                      borderRadius: 12,
+                      width: 175,
+                      height: 175,
+                      borderRadius: 14,
                       background: "#fff",
                       padding: 8,
                       display: "block",
-                      margin: "0 auto 6px",
-                      boxShadow: "0 4px 14px rgba(0,0,0,0.5)",
+                      margin: "0 auto 8px",
+                      boxShadow: "0 6px 18px rgba(0,0,0,0.5)",
                     }}
                   />
-                  <div style={{ fontSize: 12, color: "#38bdf8", fontWeight: 600 }}>
-                    📷 Scan with phone camera to connect
+                  <div style={{ fontSize: 13, color: "#38bdf8", fontWeight: 700 }}>
+                    📷 Scan with phone camera to connect instantly
                   </div>
                 </div>
               ) : (
@@ -861,44 +1139,35 @@ export function TvDisplayListener({ onOpenRemote }) {
                 fontSize: 38,
                 fontWeight: 900,
                 letterSpacing: 8,
-                color: "#10b981",
                 fontFamily: "monospace",
+                color: "#60a5fa",
                 background: "rgba(0,0,0,0.3)",
-                padding: "8px 20px",
+                padding: "8px 24px",
                 borderRadius: 12,
+                marginTop: 4,
               }}>
                 {pin}
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
-              <button
-                onClick={() => { setShowPairModal(false); onOpenRemote?.(); }}
-                style={{
-                  padding: "10px 18px",
-                  borderRadius: 10,
-                  border: "none",
-                  background: "#3b82f6",
-                  color: "#fff",
-                  fontWeight: 600,
-                  cursor: "pointer",
-                }}
-              >
-                Open Remote on this PC
-              </button>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 13, color: "#94a3b8" }}>
+                Connected phones: <strong style={{ color: controllerCount > 0 ? "#34d399" : "#fff" }}>{controllerCount}</strong>
+              </div>
               <button
                 onClick={() => setShowPairModal(false)}
                 style={{
-                  padding: "10px 18px",
-                  borderRadius: 10,
+                  background: "#3b82f6",
                   border: "none",
-                  background: "rgba(255,255,255,0.1)",
+                  borderRadius: 10,
+                  padding: "8px 18px",
                   color: "#fff",
-                  fontWeight: 600,
+                  fontWeight: 700,
+                  fontSize: 13,
                   cursor: "pointer",
                 }}
               >
-                Close
+                Done
               </button>
             </div>
           </div>
@@ -909,49 +1178,40 @@ export function TvDisplayListener({ onOpenRemote }) {
 }
 
 // Styling helpers
-const utilityBtnStyle = {
-  background: "rgba(255,255,255,0.08)",
-  border: "1px solid rgba(255,255,255,0.12)",
-  borderRadius: 12,
-  padding: "8px 16px",
-  color: "#e2e8f0",
-  fontSize: 13,
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
 const dpadArrowStyle = {
   position: "absolute",
-  width: 54,
-  height: 54,
+  width: 52,
+  height: 52,
   borderRadius: 14,
-  background: "rgba(255,255,255,0.12)",
-  border: "1px solid rgba(255,255,255,0.18)",
+  background: "rgba(255, 255, 255, 0.09)",
+  border: "1px solid rgba(255, 255, 255, 0.15)",
   color: "#fff",
-  fontSize: 18,
+  fontSize: 20,
+  fontWeight: 700,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
   cursor: "pointer",
+  boxShadow: "0 4px 10px rgba(0,0,0,0.3)",
 };
 
-const pillStyle = {
-  background: "rgba(255,255,255,0.1)",
-  border: "1px solid rgba(255,255,255,0.15)",
-  borderRadius: 20,
-  padding: "8px 16px",
+const pillControlBtn = {
+  background: "rgba(255, 255, 255, 0.08)",
+  border: "1px solid rgba(255, 255, 255, 0.12)",
+  borderRadius: 12,
+  padding: "8px 14px",
   color: "#fff",
   fontSize: 13,
-  fontWeight: 600,
+  fontWeight: 700,
   cursor: "pointer",
 };
 
-const mediaBtnStyle = {
-  width: 58,
-  height: 58,
+const circleMediaBtn = {
+  width: 52,
+  height: 52,
   borderRadius: "50%",
-  background: "rgba(255,255,255,0.12)",
-  border: "1px solid rgba(255,255,255,0.2)",
+  background: "rgba(255, 255, 255, 0.08)",
+  border: "1px solid rgba(255, 255, 255, 0.15)",
   color: "#fff",
   fontSize: 14,
   fontWeight: 700,
@@ -961,14 +1221,17 @@ const mediaBtnStyle = {
   cursor: "pointer",
 };
 
-const bottomTabStyle = {
-  flex: 1,
-  padding: "8px 0",
-  background: "rgba(255,255,255,0.06)",
-  border: "1px solid rgba(255,255,255,0.1)",
+const quickTabBtnStyle = {
+  background: "transparent",
+  border: "none",
   borderRadius: 10,
-  color: "#94a3b8",
-  fontSize: 12,
-  fontWeight: 600,
+  padding: "8px 4px",
+  color: "#cbd5e1",
+  fontSize: 11,
+  fontWeight: 700,
   cursor: "pointer",
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: 2,
 };

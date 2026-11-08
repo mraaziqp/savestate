@@ -555,7 +555,7 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
     }
   });
 
-  // 4. Move an item to another storage root (e.g. migrate between E: and Google Drive)
+  // 4. Move items to another storage root (e.g. migrate between E: and Google Drive)
   app.post("/api/library/move", async (req, res) => {
     try {
       const auth = requireAuth(req, res);
@@ -564,69 +564,126 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
         return res.status(403).json({ error: "Only administrators can move installed library items." });
       }
 
-      const { id, type, targetDrive } = req.body ?? {};
-      if (!id || !type || !targetDrive) {
-        return res.status(400).json({ error: "Missing required parameters: id, type, targetDrive." });
+      const targetDrive = String(req.body?.targetDrive ?? "").trim();
+      const rawItems: Array<{ id: string; type: "game" | "media" }> = Array.isArray(req.body?.items)
+        ? req.body.items
+        : req.body?.id
+        ? [{ id: req.body.id, type: req.body.type || "game" }]
+        : [];
+
+      if (rawItems.length === 0 || !targetDrive) {
+        return res.status(400).json({ error: "Missing required parameters: items and targetDrive." });
       }
 
       const cfg = await getVaultConfig().catch(() => ({ root_path: "C:\\Users\\mraaz\\nexus-cloud-media\\roms" }));
       const extraRoots = getExtraRoots(cfg);
 
-      if (type === "game") {
-        let gRow: any = null;
-        if (pool) {
-          const r = await pool.query("SELECT * FROM games WHERE id::text = $1", [id]);
-          gRow = r.rows[0];
-        } else {
-          gRow = mem.games.find(g => String(g.id) === String(id));
+      let movedCount = 0;
+      let movedBytes = 0;
+      const errors: string[] = [];
+
+      for (const item of rawItems) {
+        try {
+          if (item.type === "game") {
+            let gRow: any = null;
+            if (pool) {
+              const r = await pool.query("SELECT * FROM games WHERE id::text = $1", [item.id]);
+              gRow = r.rows[0];
+            } else {
+              gRow = mem.games.find(g => String(g.id) === String(item.id));
+            }
+
+            if (!gRow) {
+              errors.push(`Game ${item.id} not found`);
+              continue;
+            }
+
+            const resolved = await resolveRomPath(cfg.root_path, gRow, extraRoots);
+            const sourcePath = resolved.absolutePath;
+            if (!sourcePath || !existsSync(sourcePath)) {
+              errors.push(`ROM for ${gRow.title} not found on disk`);
+              continue;
+            }
+
+            const base = path.basename(sourcePath);
+            const platform = gRow.platform || "other";
+            let destRoot = "";
+
+            if (targetDrive.toUpperCase().startsWith("E:")) {
+              destRoot = path.join("E:\\ROMS", platform);
+            } else if (targetDrive.toUpperCase().startsWith("I:") || targetDrive.toLowerCase().includes("drive")) {
+              destRoot = path.join("I:\\My Drive\\NexusArchive\\roms", platform);
+            } else if (targetDrive.toUpperCase().startsWith("C:")) {
+              destRoot = path.join("C:\\Users\\mraaz\\nexus-cloud-media\\roms", platform);
+            } else if (targetDrive.toUpperCase().startsWith("F:")) {
+              destRoot = path.join("F:\\SaveState\\client-roms", platform);
+            } else {
+              errors.push(`Unsupported target drive: ${targetDrive}`);
+              continue;
+            }
+
+            await mkdir(destRoot, { recursive: true });
+            const destPath = path.join(destRoot, base);
+
+            if (path.resolve(sourcePath) !== path.resolve(destPath)) {
+              const fileSz = Number(gRow.file_size) || (await stat(sourcePath).catch(() => null))?.size || 0;
+              await copyFile(sourcePath, destPath);
+              await unlink(sourcePath);
+              movedBytes += fileSz;
+
+              const newRel = `./${platform}/${base}`.replace(/\\/g, "/");
+              if (pool) {
+                await pool.query("UPDATE games SET relative_path = $1, updated_at = NOW() WHERE id::text = $2", [newRel, item.id]);
+              }
+              gRow.relative_path = newRel;
+              log("INFO", `Moved game ${gRow.title} to ${destPath} (${humanBytes(fileSz)})`, "library");
+            }
+            movedCount++;
+          } else if (item.type === "media") {
+            const mItem = (mem.media || []).find(m => String(m.id) === String(item.id));
+            if (!mItem || !mItem.path || !existsSync(mItem.path)) {
+              errors.push(`Media item ${item.id} not found on disk`);
+              continue;
+            }
+
+            const base = path.basename(mItem.path);
+            let destDir = "";
+            if (targetDrive.toUpperCase().startsWith("E:")) {
+              destDir = "E:\\Movies";
+            } else if (targetDrive.toUpperCase().startsWith("I:") || targetDrive.toLowerCase().includes("drive")) {
+              destDir = "C:\\Users\\mraaz\\nexus-cloud-media\\movies";
+            } else if (targetDrive.toUpperCase().startsWith("C:")) {
+              destDir = "C:\\Users\\mraaz\\Videos";
+            } else {
+              destDir = "F:\\Movies";
+            }
+
+            await mkdir(destDir, { recursive: true });
+            const destPath = path.join(destDir, base);
+
+            if (path.resolve(mItem.path) !== path.resolve(destPath)) {
+              const fileSz = Number(mItem.size) || (await stat(mItem.path).catch(() => null))?.size || 0;
+              await copyFile(mItem.path, destPath);
+              await unlink(mItem.path);
+              movedBytes += fileSz;
+              mItem.path = destPath;
+              log("INFO", `Moved media ${mItem.name || base} to ${destPath} (${humanBytes(fileSz)})`, "library");
+            }
+            movedCount++;
+          }
+        } catch (itemErr: any) {
+          log("WARN", `Failed to move item ${item.id}: ${itemErr.message}`, "library");
+          errors.push(`Item ${item.id}: ${itemErr.message}`);
         }
-
-        if (!gRow) return res.status(404).json({ error: "Game not found." });
-
-        const resolved = await resolveRomPath(cfg.root_path, gRow, extraRoots);
-        const sourcePath = resolved.absolutePath;
-        if (!sourcePath || !existsSync(sourcePath)) {
-          return res.status(404).json({ error: "Game ROM file not found on disk." });
-        }
-
-        // Determine destination path
-        const base = path.basename(sourcePath);
-        const platform = gRow.platform || "other";
-        let destRoot = "";
-
-        if (targetDrive.toUpperCase().startsWith("E:")) {
-          destRoot = path.join("E:\\ROMS", platform);
-        } else if (targetDrive.toUpperCase().startsWith("I:") || targetDrive.toLowerCase().includes("drive")) {
-          destRoot = path.join("I:\\My Drive\\NexusArchive\\roms", platform);
-        } else if (targetDrive.toUpperCase().startsWith("F:")) {
-          destRoot = path.join("F:\\SaveState\\client-roms", platform);
-        } else {
-          return res.status(400).json({ error: `Unsupported target drive: ${targetDrive}` });
-        }
-
-        await mkdir(destRoot, { recursive: true });
-        const destPath = path.join(destRoot, base);
-
-        if (sourcePath === destPath) {
-          return res.json({ ok: true, message: "File is already at destination.", path: destPath });
-        }
-
-        // Copy then unlink (safe across different filesystem devices)
-        await copyFile(sourcePath, destPath);
-        await unlink(sourcePath);
-
-        // Update database relative path
-        const newRel = `./${platform}/${base}`.replace(/\\/g, "/");
-        if (pool) {
-          await pool.query("UPDATE games SET relative_path = $1, updated_at = NOW() WHERE id::text = $2", [newRel, id]);
-        }
-        gRow.relative_path = newRel;
-
-        log("INFO", `Moved game ${gRow.title} from ${sourcePath} to ${destPath}`, "library");
-        return res.json({ ok: true, newPath: destPath, relativePath: newRel });
       }
 
-      return res.status(400).json({ error: "Move currently supported for games." });
+      return res.json({
+        ok: true,
+        movedCount,
+        movedBytes,
+        movedFormatted: humanBytes(movedBytes),
+        errors: errors.length > 0 ? errors : undefined,
+      });
     } catch (err: any) {
       log("ERROR", `library move failed: ${err.message}`, "library");
       return res.status(500).json({ error: String(err?.message ?? err) });
