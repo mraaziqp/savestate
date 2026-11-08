@@ -956,6 +956,24 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
 //     "Network Error" before it requests the ROM. Only systems that need a
 //     BIOS ask for one, by name, and only when the host has it. The cloud
 //     save is likewise loaded only when there is one.
+// Become a Host > Setup Guide told people to install RetroArch, clone
+// "github.com/yourusername/nexusemu" and run npm start, none of which is how
+// SaveState is set up (2026-11-08). It now gives the real steps: Docker, the
+// one-command installer, then the first account becomes the owner.
+{
+  const file = path.join(assets, find("BecomeHost-"));
+  let bh = readFileSync(file, "utf8");
+  const before = bh;
+  bh = patch(bh, "host setup steps", 'title:"Install Docker"',
+    /title:"Install Node\.js",desc:"[^"]*",link:"https:\/\/nodejs\.org",linkLabel:"nodejs\.org"\},(\{icon:\(0,e\.jsx\)\(\w+,\{className:"w-5 h-5"\}\),)title:"Install RetroArch",desc:"[^"]*",link:"[^"]*",linkLabel:"retroarch\.com"\},(\{icon:\(0,e\.jsx\)\(\w+,\{className:"w-5 h-5"\}\),)title:"Download Nexus Host",desc:"[^"]*",cmd:"[^"]*"\},(\{icon:\(0,e\.jsx\)\(\w+,\{className:"w-5 h-5"\}\),)title:"Start the server",desc:"[^"]*",cmd:"[^"]*"\}/,
+    'title:"Install Docker",desc:"Docker Desktop on Windows or Mac, or Docker on Linux and most NAS boxes. SaveState runs inside it with its own database.",link:"https://docs.docker.com/get-docker/",linkLabel:"docker.com"},'
+    + '{icon:(0,e.jsx)(y,{className:"w-5 h-5"}),title:"Games need nothing else",desc:"Games play in SaveState\'s own player: no RetroArch or other emulators to install. Add BIOS files later in Set up games.",link:"/?tab=help&guide=host-games",linkLabel:"Emulators, BIOS and firmware"},'
+    + '{icon:(0,e.jsx)(h,{className:"w-5 h-5"}),title:"Run the installer",desc:"It asks for your films, music and games folders and a port, then starts SaveState. Run it again any time to update.",cmd:"curl -fsSL https://savestate.co.za/install.sh | bash"},'
+    + '{icon:(0,e.jsx)(S,{className:"w-5 h-5"}),title:"Open it and sign up",desc:"Open the address below (or the port you chose). The first account made on a new host becomes its owner.",cmd:"http://localhost:3000"}');
+  bh = patch(bh, "host quick start label", "Quick start (Linux, NAS, or Windows with WSL)", "Quick Start (Zorin OS / Ubuntu)", "Quick start (Linux, NAS, or Windows with WSL)");
+  bh = patch(bh, "host quick start note", "Needs Docker. On Windows", "Auto-installs Node.js, RetroArch, FFmpeg, and Nexus in one command", "Needs Docker. On Windows, run it in WSL (Ubuntu) with Docker Desktop running.");
+  if (bh !== before) writeFileSync(file, bh);
+}
 {
   const file = path.join(assets, find("EmulatorPlayer-"));
   let ep = readFileSync(file, "utf8");
