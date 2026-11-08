@@ -41,6 +41,34 @@ function NxLibrary({ movies, series, Movie, Series, titleOf, yearOf, onPlayMovie
     return list;
   }, [series, sort, yearOf]);
 
+  // Expose global player hook for TV remote playback intent
+  useEffect(() => {
+    window.nxPlayMedia = (item, queue) => {
+      onPlayMovie(item, queue || (films.includes(item) ? films : [item]));
+    };
+    try {
+      const pendingStr = localStorage.getItem("nx_pending_play_media");
+      if (pendingStr) {
+        localStorage.removeItem("nx_pending_play_media");
+        const pending = JSON.parse(pendingStr);
+        if (pending?.item) {
+          setTimeout(() => onPlayMovie(pending.item, pending.queue || [pending.item]), 150);
+        }
+      }
+    } catch {}
+    return () => {
+      delete window.nxPlayMedia;
+    };
+  }, [onPlayMovie, films]);
+
+  const handlePlayMovie = (item, queue) => {
+    if (window.__nxTvRemote?.isMirrorActive) {
+      window.__nxTvRemote.playOnTv(item, queue);
+      return;
+    }
+    onPlayMovie(item, queue);
+  };
+
   const items = tab === "movies" ? films : shows;
   const left = items.length - shown;
   const pill = (on) => `px-3 py-1.5 rounded-xl text-xs font-black transition-colors ${on ? "bg-cyan-400 text-black" : "bg-white/5 text-white/60 hover:text-white hover:bg-white/10"}`;
@@ -68,7 +96,7 @@ function NxLibrary({ movies, series, Movie, Series, titleOf, yearOf, onPlayMovie
         <p className="text-sm text-white/40">{tab === "movies" ? "No films yet." : "No series yet."}</p>
       ) : tab === "movies" ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-          {films.slice(0, shown).map((m) => <Movie key={m.id} item={m} onPlay={(x) => onPlayMovie(x, films)} onDelete={onDeleteMovie} onOpenDetail={onOpenMovie} />)}
+          {films.slice(0, shown).map((m) => <Movie key={m.id} item={m} onPlay={(x) => handlePlayMovie(x, films)} onDelete={onDeleteMovie} onOpenDetail={onOpenMovie} />)}
         </div>
       ) : (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3">

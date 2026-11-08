@@ -194,6 +194,14 @@ export function LibraryManager() {
 
   // Direct action: Launch game or Play movie
   const handleLaunchOrPlay = (item) => {
+    if (window.__nxTvRemote?.isMirrorActive) {
+      if (item.type === "game") {
+        window.__nxTvRemote.launchOnTv(item);
+      } else if (item.type === "media") {
+        window.__nxTvRemote.playOnTv(item);
+      }
+      return;
+    }
     if (item.type === "game") {
       window.dispatchEvent(new CustomEvent("nexus:play", {
         detail: { phase: "browser", mode: "browser", game: item }

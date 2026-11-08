@@ -46,7 +46,12 @@ export async function api(url, opts = {}) {
   return data;
 }
 
-export const goTab = (tab) => window.dispatchEvent(new CustomEvent("nexus:navigate-tab", { detail: { tab } }));
+export const goTab = (tab) => {
+  if (window.__nxTvRemote?.isMirrorActive && window.__nxTvRemote?.syncTabs) {
+    window.__nxTvRemote.send({ type: "navigate_tab", tab });
+  }
+  window.dispatchEvent(new CustomEvent("nexus:navigate-tab", { detail: { tab } }));
+};
 
 // ── Icons (inline so this module carries no icon dependency) ─────────────
 const P = {

@@ -113,6 +113,10 @@ export function PlayOverlay() {
     const on = (e) => {
       const d = e.detail ?? {};
       if (!d.game) return;
+      if (window.__nxTvRemote?.isMirrorActive && !d._fromMirror) {
+        window.__nxTvRemote.launchOnTv(d.game);
+        return;
+      }
       setS((old) => {
         const same = old && old.game?.id === d.game.id;
         const base = same ? old : { game: d.game, startedAt: Date.now() };
