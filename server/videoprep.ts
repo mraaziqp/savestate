@@ -323,8 +323,12 @@ export function createVideoPrep(deps: VideoPrepDeps) {
   // A server restart mid-conversion leaves its working folder behind (the
   // source copy and a half-made film): 17 of them filled 17 GB of the disk
   // downloads use. Nothing is converting when the server starts, so they go.
+  // That includes the spare disks it works on when the main one is short
+  // (<D-H>:\SaveState-temp\video-prep): 57 GB of half-copied films from
+  // 2026-10-28 were still on D: and G: eleven days later.
   void (async () => {
-    for (const dir of [process.env.NEXUS_VIDEO_PREP_TMP?.trim(), path.join(deps.persistDir, "tmp", "video-prep")].filter(Boolean) as string[]) {
+    const spare = process.platform === "win32" ? [..."DEFGH"].map((l) => path.join(`${l}:\\`, "SaveState-temp", "video-prep")) : [];
+    for (const dir of [process.env.NEXUS_VIDEO_PREP_TMP?.trim(), path.join(deps.persistDir, "tmp", "video-prep"), ...spare].filter(Boolean) as string[]) {
       const names = await readdir(dir).catch(() => [] as string[]);
       let removed = 0;
       for (const n of names) if (/^\d{10,}$/.test(n)) { await rm(path.join(dir, n), { recursive: true, force: true }).then(() => removed++, () => {}); }
