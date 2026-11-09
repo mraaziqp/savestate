@@ -150,13 +150,14 @@ const before = shell;
     `NxWhere=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.Where}))),` +
     `NxRemote=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.TvRemote}))),` +
     `NxLibrary=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.LibraryManager}))),` +
+    `NxPlayTogether=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayTogetherModal}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
     `function NxRoot(){var t=!1;try{var w=/^https?:$/.test(location.protocol)&&!to()&&!Fe()&&!Ht(location.hostname)&&(!zt()||String(zt()).indexOf(location.origin)===0);` +
     `t=w&&(!localStorage.getItem("nexus_token")||new URLSearchParams(location.search).has("reset"))}catch{}` +
     // Signed in: the app, with household profiles over it ("Who's watching?", the profile chip).
-    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPause,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxRemote,{})})]})}` +
+    `return t?(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxWelcome,{})}):(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(Yl,{}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxProfiles,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGetStarted,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxScreens,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxGameSetup,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayOverlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPhonePlay,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPause,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxRemote,{})}),(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxPlayTogether,{})})]})}` +
     `function Jl(){return $s?(0,e.jsx)(Ri,{sessionId:$s.sessionId,initialTitle:$s.title}):(0,e.jsx)(NxRoot,{})}`);
 }
 
@@ -539,7 +540,7 @@ shell = patch(shell, "game shelf", "render:nxG=>(0,e.jsx)(NxShelf,{games:nxG,pla
 // Split-screen & local multiplayer in Game Hub genres:
 shell = patch(shell, "split-screen in genre list", 'key:"splitscreen"',
   'Us=[{label:"🥊 Beat-em-up",key:"beat",',
-  'Us=[{label:"👥 Split-Screen & Co-Op",key:"splitscreen",terms:["kart","smash","goldeneye","perfect dark","timesplitters","halo","battlefront","burnout","gran turismo","tekken","street fighter","mortal kombat","contra","metal slug","streets of rage","bomberman","party","fifa","nba","wwe","wwf","worms","double dragon","battletoads","turtles","gauntlet","tony hawk","twisted metal","split screen","splitscreen","multiplayer","f-zero","wipeout","ridge racer","micro machines","quake","unreal","doom","soulcalibur","virtua fighter","bloody roar","marvel vs","capcom vs","king of fighters","power stone","super monkey ball","crash team","ctr","diddy kong"]},{label:"🥊 Beat-em-up",key:"beat",');
+  'Us=[{label:"👥 Play Together",key:"splitscreen",terms:["kart","smash","goldeneye","perfect dark","timesplitters","halo","battlefront","burnout","gran turismo","tekken","street fighter","mortal kombat","contra","metal slug","streets of rage","bomberman","party","fifa","nba","wwe","wwf","worms","double dragon","battletoads","turtles","gauntlet","tony hawk","twisted metal","split screen","splitscreen","multiplayer","f-zero","wipeout","ridge racer","micro machines","quake","unreal","doom","soulcalibur","virtua fighter","bloody roar","marvel vs","capcom vs","king of fighters","power stone","super monkey ball","crash team","ctr","diddy kong"]},{label:"🥊 Beat-em-up",key:"beat",');
 shell = patch(shell, "genre click can trigger split-screen where mode", 'onClick:g.key==="splitscreen"?',
   'children:Us.map(g=>{const E=p[g.key]??0;return E===0?null:(0,e.jsxs)("button",{onClick:r,',
   'children:Us.map(g=>{const E=p[g.key]??0;return E===0?null:(0,e.jsxs)("button",{onClick:g.key==="splitscreen"?(ev)=>{try{window.dispatchEvent(new CustomEvent("nexus:where",{detail:"splitscreen"}))}catch{}r(ev)}:r,');

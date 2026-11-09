@@ -8,7 +8,7 @@
 import React, { useState, useEffect, useMemo, useRef, useDeferredValue } from "react";
 import { SYSTEMS } from "./systems.js";
 import { norm } from "./devices.js";
-import { isSplitScreenGame } from "./Where.jsx";
+import { isSplitScreenGame, isPlayTogetherGame, getMultiplayerBadge } from "./Where.jsx";
 
 const CSS = `
 .nxs{display:flex;flex-direction:column;gap:12px}
@@ -48,12 +48,23 @@ const store = { get: (k, d) => { try { return localStorage.getItem(k) ?? d; } ca
 function Cover({ g }) {
   const [bad, setBad] = useState(false);
   const src = g.boxArt && !bad ? (window.nxThumb ? window.nxThumb(g.boxArt) : g.boxArt) : "";
-  const isMulti = isSplitScreenGame(g);
+  const badge = getMultiplayerBadge(g);
   return (
     <div className="nxs-art" style={{ background: g.dominantColor || "#1a1a2e" }}>
       {src ? <img src={src} alt="" loading="lazy" decoding="async" onError={() => setBad(true)} /> : <div className="nxs-ph">{g.title}</div>}
       <span className="nxs-sys">{sysName(g.platform)}</span>
-      {isMulti && <span className="nxs-multi" title="Split-screen or local multiplayer">👥 2-4P</span>}
+      {badge && (
+        <span
+          className={`nxs-multi nxs-multi-${badge.type}`}
+          title={badge.label}
+          onClick={(e) => {
+            e.stopPropagation();
+            window.dispatchEvent(new CustomEvent("nexus:play-together-modal", { detail: { game: g } }));
+          }}
+        >
+          {badge.short}
+        </span>
+      )}
     </div>
   );
 }
@@ -76,12 +87,12 @@ export function GameShelf({ games = [], platform = null, loading = false, onSele
     return [...n.entries()].sort((a, b) => b[1] - a[1]);
   }, [games]);
   const recent = useMemo(() => games.filter(played).length, [games]);
-  const multiCount = useMemo(() => games.filter(isSplitScreenGame).length, [games]);
+  const multiCount = useMemo(() => games.filter(isPlayTogetherGame).length, [games]);
 
   const list = useMemo(() => {
     let l = games;
     if (system === "@recent") l = l.filter(played);
-    else if (system === "@splitscreen") l = l.filter(isSplitScreenGame);
+    else if (system === "@splitscreen" || system === "@playtogether") l = l.filter(isPlayTogetherGame);
     else if (system) l = l.filter((g) => g.platform === system);
     if (q) l = l.filter((g) => String(g.title).toLowerCase().includes(q) || sysName(g.platform).toLowerCase().includes(q));
     l = [...l];
@@ -138,8 +149,8 @@ export function GameShelf({ games = [], platform = null, loading = false, onSele
       <div className="nxs-chips" role="group" aria-label="Systems">
         <button className="nxs-chip" aria-pressed={!system} onClick={() => setSystem("")}>All<b>{games.length.toLocaleString()}</b></button>
         {multiCount > 0 && (
-          <button className="nxs-chip" data-special="split" aria-pressed={system === "@splitscreen"} onClick={() => setSystem(system === "@splitscreen" ? "" : "@splitscreen")}>
-            👥 Split-Screen<b>{multiCount.toLocaleString()}</b>
+          <button className="nxs-chip" data-special="split" aria-pressed={system === "@splitscreen" || system === "@playtogether"} onClick={() => setSystem(system === "@playtogether" || system === "@splitscreen" ? "" : "@playtogether")}>
+            👥 Play Together<b>{multiCount.toLocaleString()}</b>
           </button>
         )}
         {recent > 0 && <button className="nxs-chip" aria-pressed={system === "@recent"} onClick={() => setSystem("@recent")}>Recently played<b>{recent}</b></button>}

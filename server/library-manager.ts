@@ -3,6 +3,8 @@ import path from "node:path";
 import { statfs, stat, unlink, rm, rename, copyFile, mkdir } from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import { execFile } from "node:child_process";
+import { getStorageRegistry } from "./storage-registry.ts";
+import { getMigrationEngine } from "./storage-migration.ts";
 
 export type LibraryManagerDeps = {
   app: express.Express;
@@ -96,55 +98,77 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
       const auth = requireAuth(req, res);
       if (!auth) return;
       if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can see the installed library." });
-      const candidates = ["C:\\", "E:\\", "F:\\", "I:\\"];
-      const drives: Array<{ drive: string; label: string; totalBytes: number; freeBytes: number; usedBytes: number; totalFormatted: string; freeFormatted: string; percentUsed: number; isCloud: boolean }> = [];
+
+      const registry = getStorageRegistry();
+      let locations = registry.getLocations();
+      if (locations.length === 0) {
+        locations = await registry.scanLocations();
+      }
+      const drives: Array<{
+        id?: string;
+        drive: string;
+        label: string;
+        storageType?: string;
+        totalBytes: number;
+        freeBytes: number;
+        usedBytes: number;
+        totalFormatted: string;
+        freeFormatted: string;
+        percentUsed: number;
+        isCloud: boolean;
+        isNas?: boolean;
+        healthStatus?: string;
+        connectivityStatus?: string;
+        warningMessage?: string | null;
+      }> = [];
+
       let hasGoogleDrive = false;
 
-      for (const d of candidates) {
-        try {
-          const s = await statfs(d);
-          let total = Number(s.bsize) * Number(s.blocks);
-          let free = Number(s.bsize) * Number(s.bavail);
-          let used = Math.max(0, total - free);
-          const isCl = d.startsWith("I:") || isCloud(d);
-          let label = d.startsWith("C:") ? "SSD (System C:)"
-            : d.startsWith("E:") ? "External Storage (E:)"
-            : d.startsWith("F:") ? "Storage (F:)"
-            : "Google Drive (I:)";
+      for (const loc of locations) {
+        let total = loc.totalBytes;
+        let free = loc.availableBytes;
+        let used = loc.usedBytes;
+        let label = loc.name;
+        const isCl = loc.storageType === "gdrive" || isCloud(loc.mountPath);
 
-          if (d.startsWith("I:") || isCl) {
-            hasGoogleDrive = true;
-            const gquota = await getGdriveCloudQuota();
-            if (gquota && gquota.total > 0) {
-              total = gquota.total;
-              free = gquota.free;
-              used = gquota.used;
-              label = "Google Drive (Cloud)";
-            }
+        if (isCl) {
+          hasGoogleDrive = true;
+          const gquota = await getGdriveCloudQuota();
+          if (gquota && gquota.total > 0) {
+            total = gquota.total;
+            free = gquota.free;
+            used = gquota.used;
+            label = "Google Drive (Cloud)";
           }
-
-          drives.push({
-            drive: d.replace(/\\$/, ""),
-            label,
-            totalBytes: total,
-            freeBytes: free,
-            usedBytes: used,
-            totalFormatted: humanBytes(total),
-            freeFormatted: humanBytes(free),
-            percentUsed: total > 0 ? Math.round((used / total) * 100) : 0,
-            isCloud: isCl,
-          });
-        } catch {
-          // Drive not mounted / unreachable
         }
+
+        drives.push({
+          id: loc.id,
+          drive: loc.mountPath.replace(/\\$/, ""),
+          label,
+          storageType: loc.storageType,
+          totalBytes: total,
+          freeBytes: free,
+          usedBytes: used,
+          totalFormatted: humanBytes(total),
+          freeFormatted: humanBytes(free),
+          percentUsed: total > 0 ? Math.round((used / total) * 100) : 0,
+          isCloud: isCl,
+          isNas: loc.isNas,
+          healthStatus: loc.healthStatus,
+          connectivityStatus: loc.connectivityStatus,
+          warningMessage: loc.warningMessage || null,
+        });
       }
 
       if (!hasGoogleDrive) {
         const gquota = await getGdriveCloudQuota();
         if (gquota && gquota.total > 0) {
           drives.push({
+            id: "cloud_gdrive",
             drive: "Google Drive",
             label: "Google Drive (Cloud)",
+            storageType: "gdrive",
             totalBytes: gquota.total,
             freeBytes: gquota.free,
             usedBytes: gquota.used,
@@ -152,6 +176,10 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
             freeFormatted: humanBytes(gquota.free),
             percentUsed: Math.round((gquota.used / gquota.total) * 100),
             isCloud: true,
+            isNas: false,
+            healthStatus: "healthy",
+            connectivityStatus: "online",
+            warningMessage: null,
           });
         }
       }
@@ -735,6 +763,184 @@ export function registerLibraryManagerApi(deps: LibraryManagerDeps) {
       stream.pipe(res);
     } catch {
       res.status(404).send("Cover error");
+    }
+  });
+
+  // 6. Centralized Storage Locations API
+  app.get("/api/storage/locations", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      const registry = getStorageRegistry();
+      let locs = registry.getLocations();
+      if (req.query.refresh === "true" || locs.length === 0) {
+        locs = await registry.scanLocations();
+      }
+      res.json({ ok: true, locations: locs });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  // 7. NAS Configuration (Safe "configured_pending_capacity" - does NOT move files)
+  app.post("/api/storage/nas/configure", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can configure NAS storage." });
+
+      const { host, shareName, protocol, username, mountPath, targetCapacityBytes, notes, assignedLibraries } = req.body || {};
+      if (!host || !shareName || !mountPath) {
+        return res.status(400).json({ error: "host, shareName, and mountPath are required." });
+      }
+
+      const registry = getStorageRegistry();
+      const loc = await registry.registerNasLocation(
+        {
+          host: String(host).trim(),
+          shareName: String(shareName).trim(),
+          protocol: protocol === "nfs" || protocol === "unc" ? protocol : "smb",
+          username: username ? String(username).trim() : undefined,
+          mountPath: String(mountPath).trim(),
+          status: "configured_pending_capacity",
+          targetCapacityBytes: Number(targetCapacityBytes) || undefined,
+          notes: notes ? String(notes).trim() : "Configured pending NAS drive capacity expansion. No files moved.",
+        },
+        Array.isArray(assignedLibraries) ? assignedLibraries : ["movies", "tv", "games"]
+      );
+
+      log("INFO", `Configured NAS storage location (pending capacity): ${loc.name} -> ${loc.mountPath}`, "storage");
+      res.json({ ok: true, location: loc, message: "NAS configured in pending state. No files were moved." });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  // 8. Console Storage Policies
+  app.get("/api/storage/policies", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      const registry = getStorageRegistry();
+      res.json({ ok: true, policies: registry.getPolicies() });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.put("/api/storage/policies/:consoleId", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can update storage policies." });
+
+      const consoleId = String(req.params.consoleId ?? "").toLowerCase();
+      const registry = getStorageRegistry();
+      const updated = await registry.updatePolicy(consoleId, req.body || {});
+      if (!updated) return res.status(404).json({ error: `Console policy ${consoleId} not found.` });
+
+      res.json({ ok: true, policy: updated });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  // 9. Storage Migration Planning & Execution
+  app.post("/api/storage/migration/plan", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can plan storage migrations." });
+
+      const { sourceLocationId, destLocationId, category, maxFiles, maxBytes } = req.body || {};
+      if (!sourceLocationId || !destLocationId) {
+        return res.status(400).json({ error: "sourceLocationId and destLocationId are required." });
+      }
+
+      const registry = getStorageRegistry();
+      const srcLoc = registry.getLocationById(sourceLocationId);
+      const dstLoc = registry.getLocationById(destLocationId);
+      if (!srcLoc || !dstLoc) {
+        return res.status(400).json({ error: "Source or destination storage location not found." });
+      }
+
+      const migration = getMigrationEngine();
+      // Collect candidate items from active library
+      const filePaths: Array<{ relPath: string; absPath: string; size: number }> = [];
+
+      if (!category || category === "all" || category === "media" || category === "movies" || category === "tv") {
+        for (const m of mem.media || []) {
+          if (m.path && existsSync(m.path)) {
+            filePaths.push({
+              relPath: m.relPath || path.basename(m.path),
+              absPath: m.path,
+              size: Number(m.size) || 0,
+            });
+          }
+        }
+      }
+
+      const candidateSlice = maxFiles ? filePaths.slice(0, Number(maxFiles)) : filePaths;
+      const manifest = await migration.createPlan({
+        sourceLocationId,
+        sourcePath: srcLoc.mountPath,
+        destLocationId,
+        destPath: dstLoc.mountPath,
+        category: category || "all",
+        filePaths: candidateSlice,
+      });
+
+      res.json({ ok: true, manifest });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/storage/migration/execute", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can execute storage migrations." });
+
+      const { userConfirmation } = req.body || {};
+      if (userConfirmation !== true) {
+        return res.status(400).json({ error: "userConfirmation: true is required to initiate migration execution." });
+      }
+
+      const migration = getMigrationEngine();
+      // Start migration asynchronously so HTTP request doesn't timeout
+      void migration.executePlan(true).catch((err) => {
+        log("ERROR", `Storage migration failed: ${err.message}`, "storage");
+      });
+
+      res.json({ ok: true, message: "Migration started in background.", status: migration.getStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/storage/migration/pause", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      if (!(await isAdmin(auth))) return res.status(403).json({ error: "Only administrators can pause storage migrations." });
+
+      const migration = getMigrationEngine();
+      await migration.pausePlan();
+      res.json({ ok: true, message: "Migration paused.", status: migration.getStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.get("/api/storage/migration/status", async (req, res) => {
+    try {
+      const auth = requireAuth(req, res);
+      if (!auth) return;
+      const migration = getMigrationEngine();
+      res.json({ ok: true, status: migration.getStatus() });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
     }
   });
 

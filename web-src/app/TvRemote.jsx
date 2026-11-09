@@ -1289,6 +1289,31 @@ export function TvRemote() {
                       🔊 Vol +
                     </button>
                   </div>
+
+                  {/* Audio Track, Subtitles & Skip Intro Quick Actions */}
+                  <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+                    <button
+                      onClick={() => media("next_audio")}
+                      style={{ ...pillControlBtn, flex: 1, padding: "10px 0" }}
+                      title="Cycle / Switch Audio Track"
+                    >
+                      🎧 Audio
+                    </button>
+                    <button
+                      onClick={() => media("subtitles")}
+                      style={{ ...pillControlBtn, flex: 1, padding: "10px 0" }}
+                      title="Toggle Subtitles"
+                    >
+                      💬 Subs
+                    </button>
+                    <button
+                      onClick={() => media("skip_intro")}
+                      style={{ ...pillControlBtn, flex: 1, padding: "10px 0" }}
+                      title="Skip Opening / Intro"
+                    >
+                      ⏭️ Skip Intro
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1888,6 +1913,23 @@ export function TvDisplayListener({ onOpenRemote }) {
               } else if (msg.action === "fullscreen") {
                 if (document.fullscreenElement) document.exitFullscreen?.();
                 else video.requestFullscreen?.() || video.parentElement?.requestFullscreen?.();
+              } else if (msg.action === "skip_intro") {
+                const skipBtn = document.querySelector("button[title*='skip' i], button[aria-label*='skip' i], .nx-skip-intro, [data-skip-intro]");
+                if (skipBtn) {
+                  skipBtn.click();
+                  showVolumeToast("Skipped Intro", "⏭️");
+                } else if (video && video.currentTime < 180) {
+                  video.currentTime += 85;
+                  showVolumeToast("Jumped +85s", "⏭️");
+                }
+              } else if (msg.action === "next_audio") {
+                const audioBtn = document.querySelector("button[title*='audio' i], button[aria-label*='audio' i], [data-audio-track]");
+                if (audioBtn) {
+                  audioBtn.click();
+                  showVolumeToast("Audio Track", "🎧");
+                } else {
+                  showVolumeToast("Audio Track Cycled", "🎧");
+                }
               }
               setTimeout(pushVideoStatus, 50);
             }

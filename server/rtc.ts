@@ -123,4 +123,36 @@ export function registerRtc(app: express.Express, deps: {
     if (r && r.owner === who.userId) { r.offerWaiters.forEach((w) => w(null)); r.answerWaiters.forEach((w) => w(null)); rooms.delete(r.code); }
     res.json({ ok: true });
   });
+
+  // Provide configured STUN/TURN ICE servers for cross-network WebRTC traversal
+  app.get("/api/rtc/ice-servers", (req, res) => {
+    const who = deps.userOf(req, res);
+    if (!who) return;
+
+    const iceServers: any[] = [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:global.stun.twilio.com:3478" }
+    ];
+
+    const turnUrl = process.env.TURN_URL;
+    const turnSecret = process.env.TURN_SECRET;
+    const turnUsername = process.env.TURN_USERNAME;
+
+    if (turnUrl && turnSecret) {
+      const unixTimestamp = Math.floor(Date.now() / 1000) + 24 * 3600;
+      const username = `${unixTimestamp}:${turnUsername || who.userId}`;
+      const hmac = crypto.createHmac("sha1", turnSecret);
+      hmac.update(username);
+      const credential = hmac.digest("base64");
+      iceServers.push({
+        urls: turnUrl,
+        username,
+        credential
+      });
+    }
+
+    res.json({ ok: true, iceServers });
+  });
 }

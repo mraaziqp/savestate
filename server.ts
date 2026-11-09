@@ -45,7 +45,20 @@ import { createServing } from "./server/serving.ts";
 import { createPauseAll } from "./server/pause-all.ts";
 import { registerLibraryManagerApi } from "./server/library-manager.ts";
 import { registerRemoteControl } from "./server/remote-control.ts";
+import { getBackupCentre } from "./server/backup-centre.ts";
+import { getQASuite } from "./server/qa-suite.ts";
 import { createDownloader } from "./server/downloader.ts";
+import {
+  initMultiplayerSchema,
+  saveGameMultiplayer,
+  getGameMultiplayer,
+  batchClassifyLibrary,
+  loadMpCache,
+  mpCache,
+  classifyGame,
+  findCuratedGame,
+  registerMultiplayerApi,
+} from "./server/multiplayer-db.ts";
 import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.ts";
 import { createUploadBatches } from "./server/upload-batches.ts";
 import { initReceipts, receipt, addLiveSource } from "./server/receipts.ts";
@@ -3095,6 +3108,16 @@ function rowToGame(row: Record<string, any>) {
   const storedCore = String(row.core_id ?? row.coreId ?? "").trim();
   const expectedCore = (PLATFORM_CORES[platform] ?? PLATFORM_CORES.unknown).coreId;
   const resolvedCore = storedCore && storedCore === expectedCore ? storedCore : expectedCore;
+  // The saved classification (corrections included); worked out here only
+  // for a game the background pass hasn't reached yet.
+  const multi = mpCache.get(String(row.id)) ?? classifyGame(
+    String(row.id),
+    row.title,
+    platform,
+    Array.isArray(row.genre) ? row.genre : [],
+    String(row.players ?? "1"),
+    String(row.relative_path ?? "").split(/[\\/]/).pop() ?? ""
+  );
   return {
     id: row.id,
     // Switch dumps carry the title ID and version numbers in the name
@@ -3119,6 +3142,31 @@ function rowToGame(row: Record<string, any>) {
       genre: row.genre ?? [],
       players: row.players ?? "1",
       rating: row.rating ?? 0,
+    },
+    multiplayer: {
+      isSinglePlayer: multi.is_single_player,
+      isLocalCoop: multi.is_local_coop,
+      hasCoopCampaign: multi.has_coop_campaign,
+      isLocalCompetitive: multi.is_local_competitive,
+      isLocalVersus: multi.is_local_versus,
+      isSplitScreen: multi.is_split_screen,
+      isSharedScreen: multi.is_shared_screen,
+      isOnlineMultiplayer: multi.is_online_multiplayer,
+      isLanMultiplayer: multi.is_lan_multiplayer,
+      isRemotePlayCompatible: multi.is_remote_play_compatible,
+      isHotSeat: multi.is_hot_seat,
+      minPlayers: multi.min_players,
+      maxPlayers: multi.max_players,
+      maxLocalCoopPlayers: multi.max_local_coop_players,
+      maxLocalCompetitivePlayers: multi.max_local_competitive_players,
+      maxSplitScreenPlayers: multi.max_split_screen_players,
+      screenType: multi.screen_type,
+      summary: multi.gameplay_summary,
+      notes: multi.notes,
+      reviewReason: (multi as any).review_reason ?? "",
+      verificationStatus: multi.verification_status,
+      confidenceScore: multi.confidence_score,
+      evidenceSource: multi.evidence_source,
     },
   };
 }
@@ -4334,6 +4382,14 @@ async function startServer() {
       dbConnected = true;
       schemaApplied = true;
       console.log("[NEXUS] ✓ Neon PostgreSQL schema ready");
+      await initMultiplayerSchema(pool).catch((e) => console.error("[NEXUS] Multiplayer schema init error:", e));
+      // In the background, a minute after start: only new games and ones an
+      // older classifier did (each start redid all ~11,500, one write each).
+      setTimeout(() => {
+        void loadMpCache(pool!).then(() => batchClassifyLibrary(pool!)).then((res) => {
+          log("INFO", `Multiplayer classification: ${res.classified} game(s) classified, ${res.kept} unchanged (${res.verified} corrected by hand)`, "multiplayer");
+        }).catch((e) => log("WARN", `Multiplayer classification: ${e?.message ?? e}`, "multiplayer"));
+      }, 60_000).unref?.();
     } catch (err) {
       console.error("[NEXUS] DB init error:", err);
       // Retry once after 15s (handles Neon cold-start)
@@ -4346,6 +4402,8 @@ async function startServer() {
           dbConnected = true;
           schemaApplied = true;
           console.log("[NEXUS] ✓ Neon PostgreSQL connected (retry)");
+          await initMultiplayerSchema(pool).catch(() => {});
+          void loadMpCache(pool).then(() => batchClassifyLibrary(pool!)).catch(() => {});
         } catch (e2) {
           // Do NOT null the pool here. The reconnect watchdog below starts with
           // `if (dbConnected || !pool) return;` — discarding the pool is what
@@ -4373,6 +4431,7 @@ async function startServer() {
       if (!schemaApplied) {
         // First successful connection of this process — create/patch tables.
         await client.query(DB_SCHEMA);
+        await initMultiplayerSchema(pool).catch(() => {});
         schemaApplied = true;
         log("INFO", "DB: schema applied on reconnect", "kernel");
       } else {
@@ -25482,6 +25541,36 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     }
   });
 
+  // Manual Intro Marker Override — allow user/admin to set or correct intro timings
+  app.post('/api/media/intro-markers/override', async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      const rel = String(req.body?.rel ?? '').trim();
+      const startMs = Math.round(Number(req.body?.startMs));
+      const endMs = Math.round(Number(req.body?.endMs));
+
+      if (!rel || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+        return res.status(400).json({ error: 'Valid rel, startMs, and endMs (endMs > startMs) are required.' });
+      }
+
+      const cache = await loadIntroCache();
+      const overrideEntry = {
+        startMs,
+        endMs,
+        source: 'manual_override',
+        confidence: 1.0,
+        updatedAt: Date.now(),
+      };
+      cache[rel] = overrideEntry;
+      await saveIntroCache();
+      log('INFO', `Custom intro marker saved for ${rel}: ${startMs}ms - ${endMs}ms`, 'media');
+      return res.json({ ok: true, marker: overrideEntry });
+    } catch (e: any) {
+      return res.status(500).json({ error: String(e?.message ?? e) });
+    }
+  });
+
   // ── Episode still image, for the Media Hub's per-episode card art ────────────
   // Was called by the frontend and allowlisted (see the CORS/API allowlist near
   // "/api/media/episode-poster") but never actually registered — every call
@@ -31775,51 +31864,32 @@ Format as JSON:
     res.json({ ok: true });
   });
 
-  // Co-Op game library — filtered to games known to support multiplayer and split-screen
-  const COOP_KEYWORDS_SRV = [
-    'mario','sonic','street fighter','mortal kombat','tekken','smash','double dragon','contra',
-    'turtles','streets of rage','golden axe','bomberman','kirby','battletoads','metal slug','nba','fifa',
-    'soccer','worms','diablo','gauntlet','castle crashers','river city','final fight','x-men','crash',
-    'racing','punch-out','bubble bobble','raiden','gunstar','sunset riders','captain commando',
-    'kart','goldeneye','perfect dark','timesplitters','halo','battlefront','gran turismo','burnout',
-    'need for speed','f-zero','wipeout','ridge racer','micro machines','twisted metal','split screen',
-    'splitscreen','tony hawk','smackdown','wwe','wwf','def jam','nfl blitz','nba jam','ssx','quake',
-    'unreal','doom','duke nukem','soulcalibur','virtua fighter','dead or alive','bloody roar','marvel vs',
-    'capcom vs','king of fighters','power stone','party','super monkey ball','multiplayer','2 player','4 player'
-  ];
+  // Co-Op game library — strictly filtered to verified cooperative and co-op campaign games.
+  // Competitive-only games (e.g. GoldenEye 007, Street Fighter II) are strictly excluded from co-op!
   app.get("/api/coop/games", async (_req, res) => {
-    // The keyword match MUST run across the whole library, in SQL.
-    // This previously selected "ORDER BY title ASC LIMIT 500" and filtered those
-    // 500 rows in JS — so on a real library it only ever inspected the first 500
-    // titles ALPHABETICALLY (which ended at "Bakuten Shoot Beyblade" here) and
-    // every co-op classic past the B's was invisible: Contra, Metal Slug,
-    // Streets of Rage, TMNT, Golden Axe, Sunset Riders. The browser showed 28
-    // mostly-irrelevant games out of 8,651 and looked broken.
     const toClient = (g: any) => ({ id: g.id, title: g.title, platform: g.platform, boxArt: g.box_art ?? g.boxArt });
-    const matches = (title: unknown) => {
-      const t = String(title ?? '').toLowerCase();
-      return COOP_KEYWORDS_SRV.some(k => t.includes(k));
-    };
 
     if (dbConnected && pool) {
       try {
-        // ILIKE ANY pushes the filter into Postgres so the whole table is
-        // considered, and only real matches cross the wire.
-        const patterns = COOP_KEYWORDS_SRV.map(k => `%${k}%`);
         const r = await pool.query(
-          `SELECT id, title, platform, box_art FROM games
-            WHERE relative_path IS NOT NULL AND relative_path <> ''
-              AND (title ILIKE ANY ($1::text[]) OR players LIKE '%2%' OR players LIKE '%4%')
-            ORDER BY title ASC
-            LIMIT 2000`,
-          [patterns],
+          `SELECT g.id, g.title, g.platform, g.box_art 
+           FROM games g
+           JOIN game_multiplayer gm ON g.id = gm.game_id
+           WHERE g.relative_path IS NOT NULL AND g.relative_path <> ''
+             AND (gm.has_coop_campaign = TRUE OR gm.is_local_coop = TRUE)
+           ORDER BY g.title ASC
+           LIMIT 2000`
         );
         return res.json({ games: r.rows.map(toClient) });
       } catch (e) {
-        log("WARN", `Co-op query failed, falling back to memory: ${String(e)}`, "coop");
+        log("WARN", `Co-op DB query failed, falling back to engine classification: ${String(e)}`, "coop");
       }
     }
-    const coop = (mem.games ?? []).filter((g: any) => matches(g.title));
+
+    const coop = (mem.games ?? []).filter((g: any) => {
+      const classified = classifyGame(g.id, g.title, g.platform, g.metadata?.genre ?? [], g.metadata?.players ?? '1');
+      return classified.has_coop_campaign || classified.is_local_coop;
+    });
     res.json({ games: coop.map(toClient) });
   });
 
@@ -32146,6 +32216,15 @@ Format as JSON:
     refreshMediaLibrary,
   });
 
+  registerMultiplayerApi({
+    app,
+    pool,
+    mem,
+    log: (lvl, msg, sub) => log(lvl, msg, sub ?? "multiplayer"),
+    requireAuth: requireAuthenticatedUser,
+    isAdmin: isAdminUser,
+  });
+
   const remoteControl = registerRemoteControl({
     httpServer,
     app,
@@ -32155,6 +32234,121 @@ Format as JSON:
       if (!tok) return null;
       try { const p = jwt.verify(tok, JWT_SECRET, { algorithms: ["HS256"] }) as any; return p?.userId ? String(p.userId) : null; } catch { return null; }
     },
+  });
+
+  // ── Backup & Recovery Centre Endpoints ───────────────────────
+  const backupCentre = getBackupCentre(PERSIST_DIR, pool);
+  backupCentre.init().catch(err => log("WARN", `Backup centre init: ${err.message}`, "backup"));
+
+  app.get("/api/backup/profiles", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      // Admins only: backups and diagnostics describe the whole host.
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can see this." });
+      if (!auth) return;
+      res.json({ ok: true, profiles: backupCentre.listProfiles() });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/backup/profiles", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can configure backup profiles." });
+      const profile = await backupCentre.saveProfile(req.body);
+      res.json({ ok: true, profile });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/backup/run/:profileId", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can run backups." });
+      const profileId = String(req.params.profileId);
+      const archive = await backupCentre.runBackup(profileId);
+      res.json({ ok: true, archive });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.get("/api/backup/archives", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      // Admins only: backups and diagnostics describe the whole host.
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can see this." });
+      if (!auth) return;
+      res.json({ ok: true, archives: backupCentre.listArchives() });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/backup/restore/preview", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can preview restores." });
+      const { archiveId } = req.body || {};
+      if (!archiveId) return res.status(400).json({ error: "archiveId is required" });
+      const preview = await backupCentre.previewRestore(String(archiveId));
+      res.json({ ok: true, preview });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/backup/restore/execute", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can restore backups." });
+      const { archiveId, categories } = req.body || {};
+      if (!archiveId || !Array.isArray(categories)) {
+        return res.status(400).json({ error: "archiveId and categories array are required" });
+      }
+      const result = await backupCentre.executeRestore(String(archiveId), categories);
+      res.json({ ok: true, result });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  // ── QA Test Suite & Diagnostic Engine Endpoints ───────────────
+  const qaSuite = getQASuite(PERSIST_DIR, pool);
+
+  app.get("/api/qa/status", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      // Admins only: backups and diagnostics describe the whole host.
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can see this." });
+      if (!auth) return;
+      const report = qaSuite.getLatestReport();
+      res.json({ ok: true, report });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
+  });
+
+  app.post("/api/qa/run", async (req, res) => {
+    try {
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can run full QA diagnostics." });
+      log("INFO", "Running comprehensive QA automated verification suite...", "qa");
+      const report = await qaSuite.runSuite();
+      res.json({ ok: true, report });
+    } catch (err: any) {
+      res.status(500).json({ error: String(err?.message ?? err) });
+    }
   });
 
   // Route WebSocket upgrades manually — multiple noServer instances on one httpServer

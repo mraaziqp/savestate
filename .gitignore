@@ -66,3 +66,6 @@ releases/
 
 # PS Vita app build output (vita/CMakeLists.txt)
 vita/build/
+
+# Local test data written by the QA suite and storage tools
+.nexus-persist/
