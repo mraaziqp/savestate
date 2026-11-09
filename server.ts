@@ -55,6 +55,7 @@ import {
   batchClassifyLibrary,
   loadMpCache,
   mpCache,
+  LOW_HEAP,
   classifyGame,
   findCuratedGame,
   registerMultiplayerApi,
@@ -3110,14 +3111,14 @@ function rowToGame(row: Record<string, any>) {
   const resolvedCore = storedCore && storedCore === expectedCore ? storedCore : expectedCore;
   // The saved classification (corrections included); worked out here only
   // for a game the background pass hasn't reached yet.
-  const multi = mpCache.get(String(row.id)) ?? classifyGame(
+  const multi = mpCache.get(String(row.id)) ?? (LOW_HEAP ? null : classifyGame(
     String(row.id),
     row.title,
     platform,
     Array.isArray(row.genre) ? row.genre : [],
     String(row.players ?? "1"),
     String(row.relative_path ?? "").split(/[\\/]/).pop() ?? ""
-  );
+  ));
   return {
     id: row.id,
     // Switch dumps carry the title ID and version numbers in the name
@@ -3143,7 +3144,7 @@ function rowToGame(row: Record<string, any>) {
       players: row.players ?? "1",
       rating: row.rating ?? 0,
     },
-    multiplayer: {
+    multiplayer: multi && {
       isSinglePlayer: multi.is_single_player,
       isLocalCoop: multi.is_local_coop,
       hasCoopCampaign: multi.has_coop_campaign,
@@ -4386,7 +4387,7 @@ async function startServer() {
       // In the background, a minute after start: only new games and ones an
       // older classifier did (each start redid all ~11,500, one write each).
       setTimeout(() => {
-        void loadMpCache(pool!).then(() => batchClassifyLibrary(pool!)).then((res) => {
+        void loadMpCache(pool!).then(() => (LOW_HEAP ? { classified: 0, kept: mpCache.size, verified: 0 } : batchClassifyLibrary(pool!))).then((res) => {
           log("INFO", `Multiplayer classification: ${res.classified} game(s) classified, ${res.kept} unchanged (${res.verified} corrected by hand)`, "multiplayer");
         }).catch((e) => log("WARN", `Multiplayer classification: ${e?.message ?? e}`, "multiplayer"));
       }, 60_000).unref?.();
@@ -4403,7 +4404,7 @@ async function startServer() {
           schemaApplied = true;
           console.log("[NEXUS] ✓ Neon PostgreSQL connected (retry)");
           await initMultiplayerSchema(pool).catch(() => {});
-          void loadMpCache(pool).then(() => batchClassifyLibrary(pool!)).catch(() => {});
+          void loadMpCache(pool).then(() => (LOW_HEAP ? null : batchClassifyLibrary(pool!))).catch(() => {});
         } catch (e2) {
           // Do NOT null the pool here. The reconnect watchdog below starts with
           // `if (dbConnected || !pool) return;` — discarding the pool is what

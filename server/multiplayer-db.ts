@@ -1,3 +1,4 @@
+import v8 from "node:v8";
 import { classifyFromEvidence, canonicalPlatform, CLASSIFIER_VERSION, stripDumpTags } from "./multiplayer-classify.ts";
 /**
  * SAVESTATE / NEXUSEMU — MULTIPLAYER & LOCAL CO-OP CLASSIFICATION ENGINE
@@ -1805,10 +1806,21 @@ const GM_COLS = ['game_id', 'is_single_player', 'is_local_coop', 'has_coop_campa
   'gameplay_summary', 'notes', 'verification_status', 'evidence_source', 'confidence_score', 'verified_by', 'verified_at',
   'evidence_detail', 'review_reason', 'classifier_version'] as const;
 
+/**
+ * A small host (the NAS: 490 MB of RAM, a 192 MB heap) can't hold the
+ * evidence index or every row's evidence text: loading them there kept it
+ * collecting garbage for 7-9 s at a time (2026-11-09). It keeps only what the
+ * game list shows and leaves classifying to the main host (same database).
+ */
+export const LOW_HEAP = v8.getHeapStatistics().heap_size_limit < 600 * 1024 * 1024;
+
 /** What the game list shows, kept in memory: the saved rows (corrections included). */
 export const mpCache = new Map<string, GameMultiplayerInfo>();
 export async function loadMpCache(pool: pg.Pool): Promise<number> {
-  const r = await pool.query('SELECT * FROM game_multiplayer');
+  const r = await pool.query(`SELECT game_id, is_single_player, is_local_coop, has_coop_campaign, is_local_competitive, is_local_versus,
+    is_split_screen, is_shared_screen, is_online_multiplayer, is_lan_multiplayer, is_remote_play_compatible, is_hot_seat,
+    min_players, max_players, max_local_coop_players, max_local_competitive_players, max_split_screen_players, screen_type,
+    gameplay_summary, verification_status, evidence_source, confidence_score, review_reason FROM game_multiplayer`);
   mpCache.clear();
   for (const row of r.rows) mpCache.set(String(row.game_id), row as GameMultiplayerInfo);
   return mpCache.size;
