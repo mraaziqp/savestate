@@ -21,6 +21,7 @@ import { getStorageRegistry } from "./storage-registry.ts";
 import { getMigrationEngine } from "./storage-migration.ts";
 import { getBackupCentre } from "./backup-centre.ts";
 import { classifyGame, findCuratedGame } from "./multiplayer-db.ts";
+import { detectConnectedGamepads, discoverDolphinDirs } from "./dolphin-controller.ts";
 
 export interface TestCaseResult {
   id: string;
@@ -125,6 +126,12 @@ export class QASuite {
       results.push(await this.testCoopCampaignVsCompetitiveVersus());
       results.push(await this.testSinglePlayerIsolation());
       results.push(await this.testMultiplayerDatabaseApi());
+    }
+
+    // 8. Controller & Hardware Provisioning Tests
+    if (!subsystemFilter || subsystemFilter === "controllers") {
+      results.push(await this.testControllerHardwareDetection());
+      results.push(await this.testDolphinControllerAutoProvisioning());
     }
 
     const totalDurationMs = Math.round(performance.now() - startTime);
@@ -759,6 +766,73 @@ export class QASuite {
         id: "multi_db_api_04",
         name: "Multiplayer Database Schema & Index Integrity",
         subsystem: "multiplayer",
+        passed: false,
+        durationMs: Math.round(performance.now() - t0),
+        error: err.message,
+      };
+    }
+  }
+
+  private async testControllerHardwareDetection(): Promise<TestCaseResult> {
+    const t0 = performance.now();
+    try {
+      const controllers = await detectConnectedGamepads();
+      if (!Array.isArray(controllers)) throw new Error("Controller detection returned nothing");
+      // A host with no controller plugged in is normal (players' pads are on
+      // their own devices), so that passes; only a broken lookup fails.
+      return {
+        id: "ctrl_hardware_detect_01",
+        name: "Controller detection on this host",
+        subsystem: "controllers",
+        passed: true,
+        durationMs: Math.round(performance.now() - t0),
+        details: controllers.length
+          ? `Detected ${controllers.length} controller(s): ${controllers.map((c) => c.name).join(", ")}.`
+          : "No controller is plugged into this host (fine: players use their own).",
+      };
+    } catch (err: any) {
+      return {
+        id: "ctrl_hardware_detect_01",
+        name: "Physical Gamepad & XInput Slot Detection",
+        subsystem: "controllers",
+        passed: false,
+        durationMs: Math.round(performance.now() - t0),
+        error: err.message,
+      };
+    }
+  }
+
+  private async testDolphinControllerAutoProvisioning(): Promise<TestCaseResult> {
+    const t0 = performance.now();
+    try {
+      // Read-only: a test must not rewrite anyone's controller settings.
+      // SIDevice 1 is Dolphin's N64 microphone; set on a GameCube port it makes
+      // the game ignore that controller (what broke GameCube input, 2026-11-09).
+      const dirs = discoverDolphinDirs();
+      const checked: string[] = [];
+      const wrong: string[] = [];
+      for (const dir of [...dirs.standaloneDirs, ...dirs.libretroDirs]) {
+        const ini = path.join(dir, "Dolphin.ini");
+        if (!existsSync(ini)) continue;
+        checked.push(ini);
+        const bad = [...readFileSync(ini, "utf8").matchAll(/^SIDevice([0-3])[ \t]*=[ \t]*1[ \t]*\r?$/gm)].map((m) => m[1]);
+        if (bad.length) wrong.push(`${ini} (port ${bad.map((p) => Number(p) + 1).join(", ")})`);
+      }
+      if (wrong.length) throw new Error(`GameCube ports set to the N64 microphone, so controllers won't respond: ${wrong.join("; ")}. Launching a GameCube game from SaveState repairs this.`);
+
+      return {
+        id: "ctrl_dolphin_provision_02",
+        name: "GameCube controller ports in Dolphin",
+        subsystem: "controllers",
+        passed: true,
+        durationMs: Math.round(performance.now() - t0),
+        details: checked.length ? `${checked.length} Dolphin config(s) checked; every GameCube port is a controller.` : "No Dolphin config on this host yet (it is made on the first GameCube launch).",
+      };
+    } catch (err: any) {
+      return {
+        id: "ctrl_dolphin_provision_02",
+        name: "GameCube Dolphin & Libretro Zero-Script Auto-Provisioning",
+        subsystem: "controllers",
         passed: false,
         durationMs: Math.round(performance.now() - t0),
         error: err.message,

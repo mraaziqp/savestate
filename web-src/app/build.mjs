@@ -988,9 +988,15 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   bh = patch(bh, "host quick start note", "Needs Docker. On Windows", "Auto-installs Node.js, RetroArch, FFmpeg, and Nexus in one command", "Needs Docker. On Windows, run it in WSL (Ubuntu) with Docker Desktop running.");
   // Windows needs no Docker any more (scripts/install-host.ps1 brings its own
   // database), so it comes first; Docker stays for Linux and NAS boxes.
-  bh = patch(bh, "host setup windows first", 'title:"Windows: one command"',
+  // (Skipped once the button below has replaced it, or its anchor is gone.)
+  if (!bh.includes('linkLabel:"Download SaveState Host"')) bh = patch(bh, "host setup windows first", 'title:"Windows: one command"',
     /title:"Install Docker",desc:"[^"]*",link:"https:\/\/docs\.docker\.com\/get-docker\/",linkLabel:"docker\.com"\}/,
     'title:"Windows: one command",desc:"Open PowerShell (Start menu, type PowerShell), paste this and press Enter. It installs everything SaveState needs, asks for your folders and opens SaveState. No Docker and no admin rights. Run it again to update.",cmd:"irm https://savestate.co.za/install-host.ps1 | iex"}');
+  // A button, not a command (2026-11-09): people download and double-click.
+  bh = patch(bh, "host setup windows button", 'linkLabel:"Download SaveState Host"',
+    /title:"Windows: one command",desc:"[^"]*",cmd:"irm https:\/\/savestate\.co\.za\/install-host\.ps1 \| iex"\}/,
+    'title:"Windows: download and double-click",desc:"Run SaveState-Host.exe. It installs everything SaveState needs (no Docker, no admin rights), asks for your films, music and games folders, and opens SaveState. The Start menu then has Open, Update and Uninstall.",link:"/api/downloads/host-setup",linkLabel:"Download SaveState Host"}');
+  bh = patch(bh, "host setup file name", "Run SaveState-Host.exe.", "Run SaveState-Host-Setup.exe.", "Run SaveState-Host.exe.");
   bh = patch(bh, "host setup linux step", 'title:"Linux or a NAS"',
     /title:"Run the installer",desc:"[^"]*",cmd:"curl -fsSL https:\/\/savestate\.co\.za\/install\.sh \| bash"\}/,
     'title:"Linux or a NAS",desc:"Needs Docker (most NAS boxes have it in their app centre). It asks for your folders and a port, then starts SaveState. Run it again to update.",cmd:"curl -fsSL https://savestate.co.za/install.sh | bash"}');

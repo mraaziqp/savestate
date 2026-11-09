@@ -61,6 +61,7 @@ function Clear-Folder($path) {
 if ($env:SAVESTATE_UNINSTALL -eq '1') {
   StopHost
   Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('Programs')) 'SaveState Host') -Recurse -Force -ErrorAction SilentlyContinue
   foreach ($d in 'app', 'node', 'ffmpeg') { Remove-Item -LiteralPath (Join-Path $Dir $d) -Recurse -Force -ErrorAction SilentlyContinue }
   Remove-Item -LiteralPath (Join-Path $Dir 'start-host.vbs') -Force -ErrorAction SilentlyContinue
   Write-Host "SaveState Host removed. Your accounts and settings are still in $Data (delete that folder to remove them too)."
@@ -185,6 +186,24 @@ try {
   $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
   if ($env:SAVESTATE_NO_TASK -ne '1') { Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Settings $settings -Description 'SaveState Host: films, music and games for your devices' -Force | Out-Null }
   Start-Process -FilePath 'wscript.exe' -ArgumentList "`"$vbs`""
+  # Buttons instead of commands: Start menu > SaveState Host > Open, Update, Uninstall.
+  if ($env:SAVESTATE_NO_TASK -ne '1') {
+    $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'SaveState Host'
+    New-Item -ItemType Directory -Force -Path $menu | Out-Null
+    $sh = New-Object -ComObject WScript.Shell
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $get = "[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm $Base/install-host.ps1 | iex"
+    $make = {
+      param($name, $target, $arguments, $icon)
+      $l = $sh.CreateShortcut((Join-Path $menu "$name.lnk"))
+      $l.TargetPath = $target; $l.Arguments = $arguments
+      if ($icon) { $l.IconLocation = $icon }
+      $l.Save()
+    }
+    & $make 'Open SaveState' "http://localhost:$port" '' ''
+    & $make 'Update SaveState Host' $ps "-NoProfile -ExecutionPolicy Bypass -Command `"$get; pause`"" "$ps,0"
+    & $make 'Uninstall SaveState Host' $ps "-NoProfile -ExecutionPolicy Bypass -Command `"`$env:SAVESTATE_UNINSTALL='1'; $get; pause`"" "$ps,0"
+  }
   $up = $false
   for ($i = 0; $i -lt 90 -and -not $up; $i++) {
     Start-Sleep -Seconds 2

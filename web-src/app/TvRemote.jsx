@@ -1717,6 +1717,13 @@ export function TvDisplayListener({ onOpenRemote }) {
   const [controllerCount, setControllerCount] = useState(0);
   const [showPairModal, setShowPairModal] = useState(false);
   const [isIdle, setIsIdle] = useState(false);
+  // Never over a game: every key pressed while playing woke the badge, so it
+  // kept flashing in the corner of the picture (2026-11-09).
+  const [inGame, setInGame] = useState(false);
+  useEffect(() => {
+    const t = setInterval(() => setInGame(!!(window.__nxGameOpen || document.getElementById("ejs-game-container"))), 1000);
+    return () => clearInterval(t);
+  }, []);
   const [volumeHud, setVolumeHud] = useState({ visible: false, text: "", icon: "🔊" });
   const [pointer, setPointer] = useState({ visible: false, x: 0, y: 0 });
 
@@ -2061,8 +2068,8 @@ export function TvDisplayListener({ onOpenRemote }) {
           fontSize: 12,
           fontWeight: 700,
           userSelect: "none",
-          opacity: isIdle ? 0 : 1,
-          pointerEvents: isIdle ? "none" : "auto",
+          opacity: isIdle || inGame ? 0 : 1,
+          pointerEvents: isIdle || inGame ? "none" : "auto",
           transition: "opacity 0.4s ease, transform 0.2s ease",
         }}
         title="Click to pair your cellphone as a TV remote"

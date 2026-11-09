@@ -2351,30 +2351,72 @@ function ensureStandaloneDolphinControllerConfig(emuPath) {
     if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'Dolphin Emulator', 'Config'));
     dirs.push(path.join(home, 'Documents', 'Dolphin Emulator', 'Config'));
     if (emuPath) dirs.push(path.join(path.dirname(emuPath), 'User', 'Config'));
+
+    // Also include RetroArch & SaveState Engine user config directories
+    const retroBase = 'C:\\RetroArch-Win64';
+    if (fs.existsSync(retroBase)) {
+      dirs.push(path.join(retroBase, 'saves', 'User', 'Config'));
+      dirs.push(path.join(retroBase, 'system', 'dolphin-emu', 'User', 'Config'));
+    }
+    const appData = process.env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    const nativeSaves = path.join(appData, 'NexusEmuHost', 'native-saves');
+    if (fs.existsSync(nativeSaves)) {
+      try {
+        for (const u of fs.readdirSync(nativeSaves)) {
+          const uPath = path.join(nativeSaves, u);
+          try {
+            if (fs.statSync(uPath).isDirectory()) {
+              dirs.push(path.join(uPath, 'User', 'Config'));
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+    const localApp = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
+    const clientRoot = path.join(localApp, 'NexusEmuClient');
+    dirs.push(path.join(clientRoot, 'engine', 'saves', 'User', 'Config'));
+    dirs.push(path.join(clientRoot, 'engine', 'system', 'dolphin-emu', 'User', 'Config'));
+    dirs.push(path.join(clientRoot, 'Emulation', 'saves', 'User', 'Config'));
   } else {
     dirs.push(path.join(home, '.config', 'dolphin-emu'));
     dirs.push(path.join(home, '.var', 'app', 'org.DolphinEmu.dolphin-emu', 'config', 'dolphin-emu'));
+    dirs.push(path.join(home, '.config', 'retroarch', 'saves', 'User', 'Config'));
+    dirs.push(path.join(home, '.config', 'retroarch', 'system', 'dolphin-emu', 'User', 'Config'));
   }
+
   for (const configDir of dirs) {
     try {
+      const isLibretro = /retroarch|native-saves|engine/i.test(configDir);
+      // RetroArch and engine folders only when that copy of Dolphin has
+      // already made them; never create folders for emulators not in use.
+      if (isLibretro && !fs.existsSync(configDir)) continue;
       ensureDirSync(configDir);
       const gcPadPath = path.join(configDir, 'GCPadNew.ini');
       let gcPadText = fs.existsSync(gcPadPath) ? fs.readFileSync(gcPadPath, 'utf8') : '';
+
+      // Write the bindings when missing or broken; a player's own remaps stay.
       if (!fs.existsSync(gcPadPath) || gcPadText.length < 100 || gcPadText.includes('Buttons/Z = `D`') || gcPadText.includes('WGInput')) {
-        fs.writeFileSync(gcPadPath, IS_WIN ? DOLPHIN_STANDALONE_WIN_GCPAD : DOLPHIN_STANDALONE_LINUX_GCPAD, 'utf8');
+        fs.writeFileSync(gcPadPath, isLibretro ? DOLPHIN_GCPAD_INI : (IS_WIN ? DOLPHIN_STANDALONE_WIN_GCPAD : DOLPHIN_STANDALONE_LINUX_GCPAD), 'utf8');
       }
+
       const wiiPath = path.join(configDir, 'WiimoteNew.ini');
       if (!fs.existsSync(wiiPath) || fs.statSync(wiiPath).size < 100) {
-        fs.writeFileSync(wiiPath, IS_WIN ? DOLPHIN_STANDALONE_WIN_WIIMOTE : DOLPHIN_STANDALONE_LINUX_WIIMOTE, 'utf8');
+        fs.writeFileSync(wiiPath, isLibretro ? DOLPHIN_WIIMOTE_INI : (IS_WIN ? DOLPHIN_STANDALONE_WIN_WIIMOTE : DOLPHIN_STANDALONE_LINUX_WIIMOTE), 'utf8');
       }
+
       const dolPath = path.join(configDir, 'Dolphin.ini');
       let dolText = fs.existsSync(dolPath) ? fs.readFileSync(dolPath, 'utf8') : '';
-      // Fix SIDevice: 1 is Standard Controller. 6 was mistakenly GBA link cable!
-      dolText = dolText.replace(/SIDevice\d\s*=\s*6/g, (m) => m.replace('6', '1'));
+      // Dolphin's SIDevice numbers (standalone and libretro alike): 0 none,
+      // 1 N64 microphone, 5 GBA link, 6 Standard Controller, 12 WiiU adapter.
+      // An earlier "fix" wrote 1 believing it meant Standard Controller, so
+      // every pad became a microphone and GameCube games ignored the buttons
+      // (2026-11-09). 1 and missing become 6; any other choice is kept.
+      const targetSI = 6;
+      dolText = dolText.replace(/^(SIDevice[0-3][ \t]*=[ \t]*)1([ \t]*\r?)$/gm, `$1${targetSI}$2`);
       if (!dolText.includes('[Core]')) {
-        dolText = `[Core]\nSIDevice0 = 1\nSIDevice1 = 1\nSIDevice2 = 1\nSIDevice3 = 1\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
+        dolText = `[Core]\nSIDevice0 = ${targetSI}\nSIDevice1 = ${targetSI}\nSIDevice2 = ${targetSI}\nSIDevice3 = ${targetSI}\nWiimoteSource0 = 1\nWiimoteSource1 = 1\n${dolText}`;
       } else {
-        if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', '[Core]\nSIDevice0 = 1\nSIDevice1 = 1\nSIDevice2 = 1\nSIDevice3 = 1');
+        if (!dolText.includes('SIDevice0')) dolText = dolText.replace('[Core]', `[Core]\nSIDevice0 = ${targetSI}\nSIDevice1 = ${targetSI}\nSIDevice2 = ${targetSI}\nSIDevice3 = ${targetSI}`);
         if (!dolText.includes('WiimoteSource0')) dolText = dolText.replace('[Core]', '[Core]\nWiimoteSource0 = 1\nWiimoteSource1 = 1');
       }
       fs.writeFileSync(dolPath, dolText, 'utf8');

@@ -109,6 +109,8 @@ export function PlayOverlay() {
   const timers = useRef([]);
   const clear = () => { timers.current.forEach(clearInterval); timers.current = []; };
 
+
+
   useEffect(() => {
     const on = (e) => {
       const d = e.detail ?? {};

@@ -64,6 +64,12 @@ import { applyServiceKeysSync, createServiceKeys } from "./server/service-keys.t
 import { createUploadBatches } from "./server/upload-batches.ts";
 import { initReceipts, receipt, addLiveSource } from "./server/receipts.ts";
 import { createIncompleteFiles } from "./server/incomplete.ts";
+import {
+  detectConnectedGamepads,
+  configureDolphinControllers,
+  discoverDolphinDirs,
+  type ControllerLayout,
+} from "./server/dolphin-controller.ts";
 
 // A public /vita page (2026-10-22/23) signed a 30-day host-admin token,
 // userId "vita-device", for every visitor and put it in the page. Those tokens
@@ -19245,6 +19251,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
 
     for (const fix of fixes) {
       try {
+        if (fix === 'configure_dolphin_controller' || fix === 'configure_gamecube_controller' || fix === 'fix_controllers') {
+          const cfg = await configureDolphinControllers();
+          results.push({ fix, ok: cfg.ok, detail: cfg.message });
+          continue;
+        }
         if (fix === 'install_retroarch') {
           const existing = await detectRetroArchPath();
           let exePath: string | null = existing;
@@ -19591,6 +19602,39 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         return res.json({ ok: true, installed: true, path: installed });
       }
       return res.status(400).json({ ok: false, error: "Auto-install only supported on Linux. Download from dolphin-emu.org" });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  // ── Controller Auto-Configuration & Diagnostics ─────
+  app.get("/api/controllers/status", async (_req, res) => {
+    try {
+      const controllers = await detectConnectedGamepads();
+      const dirs = discoverDolphinDirs();
+      res.json({
+        ok: true,
+        controllers,
+        activeControllersCount: controllers.filter((c) => c.connected).length,
+        dolphinPaths: dirs,
+      });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  app.post("/api/controllers/configure-dolphin", async (req, res) => {
+    try {
+      // Rewrites the host's emulator settings: admins only.
+      const auth = requireAuthenticatedUser(req, res);
+      if (!auth) return;
+      if (!(await isAdminUser(auth))) return res.status(403).json({ error: "Only administrators can change the host's controller settings." });
+      const { layout = "modern", deadzone = 10.0 } = req.body ?? {};
+      const result = await configureDolphinControllers({
+        layout: layout as ControllerLayout,
+        deadzone: typeof deadzone === "number" ? deadzone : 10.0,
+      });
+      res.json(result);
     } catch (e: any) {
       res.status(500).json({ ok: false, error: String(e?.message ?? e) });
     }
@@ -30425,6 +30469,14 @@ Format as JSON:
     res.sendFile(path.join(process.cwd(), 'scripts', 'install-host.ps1'), (err) => {
       if (err && !res.headersSent) res.status(404).type('text/plain').send('Write-Error "The installer is missing on this host."\n');
     });
+  });
+  // The "Download SaveState Host" button: a double-click setup, no command to type.
+  app.get('/api/downloads/host-setup', async (_req, res) => {
+    const file = path.join(process.cwd(), 'releases', 'updates', 'SaveState-Host.exe');
+    if (await fsAccess(file).then(() => true, () => false)) return res.redirect(302, '/updates/SaveState-Host.exe');
+    const up = (app as any).locals.nxUpstream;
+    if (up) return res.redirect(302, `${up}/api/downloads/host-setup`);
+    res.status(404).json({ error: 'The host setup isn\'t on this server yet.' });
   });
   app.get('/api/downloads/host-info', async (_req, res) => {
     const dir = path.join(process.cwd(), 'releases', 'updates');

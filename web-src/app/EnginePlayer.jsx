@@ -476,17 +476,21 @@ export function EnginePlayer({ engine, game, onExit, onUseRetroArch }) {
       else if (name === "menu") setMenu((m) => !m);
     };
 
-    // The page's controllers: those the engine doesn't read itself, on the
-    // ports after the engine's. Guide or Back + RB/LB/Start/RT/LT are hotkeys
-    // (Back alone stays Select); the game doesn't see a controller in a hotkey.
+    // The page's controllers: sent over WebSocket so the engine and games respond
+    // immediately without requiring manual configuration. Guide or Back + RB/LB/Start/RT/LT
+    // are hotkeys (Back alone stays Select); the game doesn't see a controller in a hotkey.
     const sent = [];
     const pollPads = (now) => {
       const all = navigator.getGamepads ? [...navigator.getGamepads()] : [];
+      // Xbox-type pads the engine already reads itself (XInput) are left out:
+      // sending them from the page as well put the same pad on player 1 twice,
+      // and the two copies fought over every button (reverted 2026-11-09).
       const engineReads = !!S.info?.nativeControllers && S.nativeCount > 0;
       const mine = all.filter((g) => g && g.connected && !(engineReads && ENGINE_PAD.test(g.id)));
       const map = S.labels ? PAD_LABELS : PAD_POSITION;
       const ports = new Map();
       mine.forEach((g, i) => {
+        // On the ports after the engine's own controllers.
         const port = Math.min(S.nativeCount + i, 7);
         const P = (S.pads[g.index] ??= { prev: 0, used: false, combo: false, hkLt: false, hkRt: false, rawLt: false, rawRt: false });
         let bits = 0;

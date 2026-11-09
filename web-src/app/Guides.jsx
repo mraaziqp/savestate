@@ -346,11 +346,10 @@ const GUIDES = [
     body: (
       <>
         <p className="lead">A host is the PC (or NAS) that holds your films, music and games and serves them to every other device. Setting one up takes a few minutes.</p>
-        <div className="nxg-sec"><h4>Windows: one command</h4>
+        <div className="nxg-sec"><h4>Windows: download and double-click</h4>
           <ol>
-            <li>Open <b>PowerShell</b> (Start menu, type PowerShell). No administrator needed.</li>
-            <li>Paste <C>irm https://savestate.co.za/install-host.ps1 | iex</C> and press Enter.</li>
-            <li>It downloads Node.js (nodejs.org), SaveState and ffmpeg (gyan.dev), checking each against its published checksum. SaveState brings its own private database, so there is no Docker or database to install.</li>
+            <li><a href="/api/downloads/host-setup">Download SaveState Host</a> and double-click <b>SaveState-Host.exe</b>. No administrator needed. (If Windows says it protected your PC, choose <b>More info</b> &gt; <b>Run anyway</b>.)</li>
+            <li>It downloads Node.js (nodejs.org), SaveState and ffmpeg (from the builds ffmpeg.org links to), checking each against its published checksum. SaveState brings its own private database, so there is no Docker or database to install.</li>
             <li>Pick your <b>Films &amp; shows</b>, <b>Music</b> and <b>Games</b> folders when asked (Cancel skips one; add it later).</li>
             <li>SaveState starts, opens in your browser, and starts again every time you sign in to Windows. <b>The first account you create becomes the owner.</b></li>
           </ol></div>
@@ -362,8 +361,7 @@ const GUIDES = [
           <p>A free Cloudflare Tunnel gives the host a web address that works anywhere, without opening ports on your router: install <C>cloudflared</C>, then <C>cloudflared tunnel --url http://localhost:3000</C> for a quick test address, or a named tunnel for your own domain.</p></div>
         <div className="nxg-sec"><h4>Updating, removing, and where things are</h4>
           <ul>
-            <li><b>Update:</b> run the same command again. Accounts, settings and the library stay.</li>
-            <li><b>Remove:</b> <C>$env:SAVESTATE_UNINSTALL=1; irm https://savestate.co.za/install-host.ps1 | iex</C>. Your data stays in <C>%LOCALAPPDATA%\SaveStateHost\data</C> until you delete it.</li>
+            <li><b>Open, update or remove:</b> Start menu &gt; <b>SaveState Host</b> &gt; <b>Open SaveState</b>, <b>Update SaveState Host</b> or <b>Uninstall SaveState Host</b>. Updating keeps accounts, settings and the library; uninstalling keeps your data in <C>%LOCALAPPDATA%\SaveStateHost\data</C> until you delete it.</li>
             <li><b>If it won't start:</b> the logs are in <C>%LOCALAPPDATA%\SaveStateHost\data\logs</C> (<C>host.log</C>, <C>server.log</C>).</li>
             <li><b>Games</b> play in SaveState's own player; nothing else to install. Systems that need a BIOS say so on the game's page: add it in <b>Set up games</b>.</li>
           </ul></div>

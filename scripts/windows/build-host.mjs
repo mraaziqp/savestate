@@ -82,4 +82,66 @@ const bytes = readFileSync(zip);
 const sha256 = createHash("sha256").update(bytes).digest("hex");
 writeFileSync(zip.replace(/\.zip$/, ".json"), JSON.stringify({ version, file: path.basename(zip), size: statSync(zip).size, sha256, builtAt: new Date().toISOString() }, null, 2));
 rmSync(stage, { recursive: true, force: true });
+
+// 4. SaveState-Host.exe: what people download and double-click instead of
+//    typing a command. A few lines of C# built with the compiler every
+//    Windows 10/11 has (.NET Framework's csc.exe), with a manifest saying it
+//    runs as the user. Not IExpress: its packages were taken for installers
+//    and never started the setup (2026-11-09), and Windows asks for admin
+//    rights for unsigned programs without that manifest whose names contain
+//    Setup/Install/Update. It runs the same installer
+//    (scripts/install-host.ps1, fetched from the site so it is always the
+//    current one) and keeps the window open to read the result.
+if (process.platform === "win32") {
+  const work = path.join(root, "releases", "host-setup-stage");
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true });
+  const ps = `-NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; irm https://savestate.co.za/install-host.ps1 | iex"`;
+  writeFileSync(path.join(work, "host.cs"), `using System;
+using System.Diagnostics;
+using System.Reflection;
+[assembly: AssemblyTitle("SaveState Host")]
+[assembly: AssemblyProduct("SaveState")]
+[assembly: AssemblyVersion("${version}.0")]
+class Program {
+  static int Main() {
+    try { Console.Title = "SaveState Host"; } catch {}
+    Console.WriteLine("Setting up SaveState Host on this PC. This takes a few minutes.");
+    Console.WriteLine();
+    int code = 1;
+    try {
+      var psi = new ProcessStartInfo("powershell.exe", ${JSON.stringify(ps)});
+      psi.UseShellExecute = false;
+      using (var p = Process.Start(psi)) { p.WaitForExit(); code = p.ExitCode; }
+    } catch (Exception e) { Console.WriteLine("Couldn't start PowerShell: " + e.Message); }
+    Console.WriteLine();
+    Console.WriteLine("You can close this window.");
+    try { if (!Console.IsInputRedirected) Console.ReadKey(true); } catch {}
+    return code;
+  }
+}
+`);
+  writeFileSync(path.join(work, "host.manifest"), `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" name="SaveState.Host"/>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges>
+    <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+  </requestedPrivileges></security></trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1"><application>
+    <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+  </application></compatibility>
+</assembly>
+`);
+  const exe = path.join(outDir, "SaveState-Host.exe");
+  rmSync(exe, { force: true });
+  const win = process.env.SystemRoot ?? "C:\\Windows";
+  const csc = [path.join(win, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"), path.join(win, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe")].find(existsSync);
+  if (!csc) throw new Error("the .NET Framework C# compiler (csc.exe) isn't on this PC");
+  const icon = path.join(root, "src-tauri", "icons", "icon.ico");
+  execFileSync(csc, ["/nologo", "/target:exe", "/optimize+", "/platform:anycpu", `/out:${exe}`, `/win32manifest:${path.join(work, "host.manifest")}`,
+    ...(existsSync(icon) ? [`/win32icon:${icon}`] : []), path.join(work, "host.cs")], { stdio: "inherit" });
+  rmSync(work, { recursive: true, force: true });
+  if (!existsSync(exe)) throw new Error("csc didn't make SaveState-Host.exe");
+  console.log(`SaveState-Host.exe (${(statSync(exe).size / 1024).toFixed(0)} KB)`);
+}
 console.log(`SaveState Host ${version}: ${path.basename(zip)} (${(bytes.length / 1048576).toFixed(0)} MB, sha256 ${sha256.slice(0, 16)}...)`);

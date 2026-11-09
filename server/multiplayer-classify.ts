@@ -175,8 +175,10 @@ export function classifyFromEvidence(input: { title: string; platform: string; f
     };
     out.max_players = c.max_players || out.max_players;
     out.max_local_coop_players = c.max_local_coop_players || (out.modes.local_coop ? out.max_players : 0);
+    // Curated entries are written into the code, not checked by a person:
+    // never VERIFIED on their own, whatever the entry says (only an admin's
+    // correction is). A database that disagrees sends the game to review.
     out.status = "HIGH_CONFIDENCE"; out.evidence_source = "curated_reference"; out.confidence = 0.85;
-    // A database that contradicts the curated entry sends it to review.
     if (lbHit && lbHit.coop === 1 && !out.modes.local_coop) out.review_reason = "LaunchBox lists it as cooperative; the curated entry says it isn't";
     if (lbHit && lbHit.coop === 0 && out.modes.local_coop) out.review_reason = "The curated entry says co-op; LaunchBox says it isn't cooperative";
     if (out.review_reason) { out.status = "NEEDS_REVIEW"; out.confidence = 0.5; }
