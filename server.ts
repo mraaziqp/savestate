@@ -20761,6 +20761,16 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       return res.status(400).json({ error: "Invalid core request" });
     }
 
+    // SaveState's own build of the core (engine/cores/build-core-windows.sh,
+    // from the core's official source) comes before libretro's.
+    const ownBuild = path.join(process.cwd(), "releases", "cores", coreOs, arch, file);
+    try {
+      await fsAccess(ownBuild);
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("X-Nexus-Core-Source", "savestate-build");
+      return res.sendFile(ownBuild);
+    } catch { /* none of our own: the mirror below */ }
+
     const cachedPath = path.join(NATIVE_CORE_DIR, coreOs, arch, file);
     try {
       await fsAccess(cachedPath);

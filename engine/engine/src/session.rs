@@ -293,6 +293,15 @@ impl Session {
             return Err(msg);
         }
 
+        // Windows paths with backslashes only: FinalBurn Neo splits the folder
+        // from the name on '\', so "E:/ROMS/NeoGeo/mslug.zip" found the game but
+        // none of its files and showed "romset missing files" (2026-11-10).
+        #[cfg(windows)]
+        if let Some(p) = path.as_mut() {
+            if !vfs::is_remote(p) && p.contains('/') {
+                *p = p.replace('/', "\\");
+            }
+        }
         let c_path = path.as_deref().map(|p| CString::new(p).unwrap_or_default());
         if path.is_some() && !need_fullpath {
             let p = path.as_deref().unwrap_or_default();
