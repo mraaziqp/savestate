@@ -283,12 +283,19 @@ export function createDrives(deps: DrivesDeps) {
       const proc = running.get(j.id);
       // 10 minutes (was 30): the page showed "gamebackup (D)" frozen at 91%
       // for 20 minutes with four files at "100%" (2026-10-28).
-      if (proc && j.lastProgressAt && now - j.lastProgressAt > 10 * 60_000) {
+      // It goes back in the queue when its rclone has really ended (the close
+      // handler), not now: on a choked disk a killed rclone waits for its reads
+      // before it can end, and requeueing at once started another copy beside
+      // it every 10 minutes (six of the same upload reading E:, 2026-11-11).
+      if (proc && !restarting.has(j.id) && j.lastProgressAt && now - j.lastProgressAt > 10 * 60_000) {
         deps.log("WARN", `Upload ${j.id} made no progress for 10 minutes; restarting it`);
         j.lastError = "Stalled; restarted automatically";
-        j.status = "queued";
         restarting.add(j.id);
+        stoppingSince.set(j.id, now);
         proc.kill();
+      } else if (proc && restarting.has(j.id) && now - (stoppingSince.get(j.id) ?? now) > 15 * 60_000 && !stuckWarned.has(j.id)) {
+        stuckWarned.add(j.id);
+        deps.log("WARN", `Upload ${j.id}: its rclone hasn't ended 15 minutes after being stopped (the disk isn't answering); not starting another`);
       }
     }
     // Paused by the owner: the running copy stops now and goes back in the
@@ -357,10 +364,11 @@ export function createDrives(deps: DrivesDeps) {
         runningId = j.id;
         if (forceRestartCopying || (j.stats?.speed != null && j.stats.speed < 15 * 1024)) {
           const proc = running.get(j.id);
-          if (proc) {
+          // Requeued by the close handler once this rclone has really ended.
+          if (proc && !restarting.has(j.id)) {
             deps.log("INFO", `Restarting slow/stalled upload ${j.id} (${j.label}) to advance queue`);
-            j.status = "queued";
             restarting.add(j.id);
+            stoppingSince.set(j.id, now);
             proc.kill();
             count++;
           }
@@ -378,6 +386,11 @@ export function createDrives(deps: DrivesDeps) {
     return { queuedCount: count, message: `Started and queued ${count} upload job(s)`, runningId };
   }
   const restarting = new Set<string>();
+  // When a restart's rclone was told to stop, and which were reported as not ending.
+  const stoppingSince = new Map<string, number>();
+  const stuckWarned = new Set<string>();
+  /** True while this process (a job's rclone) hasn't ended, even if it was told to. */
+  const alive = (p?: ChildProcess) => !!p && p.exitCode === null && p.signalCode === null;
   /** Uploads whose rclone just started: its first count follows the last run's. */
   const freshRun = new Set<string>();
   // When each running copy started (this run, not the job's first).
@@ -691,6 +704,11 @@ export function createDrives(deps: DrivesDeps) {
   const doneOf = (j: OffloadJob) => (j.sendBytes && j.sendBytes >= j.stats.totalBytes ? Math.max(0, j.sendBytes - j.stats.totalBytes + j.stats.bytes) : (j.carriedBytes ?? 0) + j.stats.bytes);
 
   async function runCopy(job: OffloadJob) {
+    // Never a second rclone for one folder: the last one is still ending.
+    if (alive(running.get(job.id))) {
+      deps.log("WARN", `Upload ${job.id}: the previous copy hasn't ended yet; not starting another`);
+      return;
+    }
     const bin = await findRclone();
     if (!bin) { job.status = "failed"; job.lastError = "rclone is not installed on the host"; return saveNow(); }
     if (!(await reachable(job.source, 15_000))) { failed(job, `The folder ${job.source} is not reachable (disk asleep or unplugged?)`); return saveNow(); }
@@ -746,9 +764,13 @@ export function createDrives(deps: DrivesDeps) {
     };
     proc.stdout!.on("data", onData);
     proc.stderr!.on("data", onData);
+    const myRc = jobRc.get(job.id);
     proc.on("close", (code) => {
-      running.delete(job.id);
-      jobRc.delete(job.id);
+      // Only this run's entries: an older rclone ending late must not erase
+      // the record of the one that replaced it.
+      if (running.get(job.id) === proc) running.delete(job.id);
+      if (jobRc.get(job.id) === myRc) jobRc.delete(job.id);
+      stoppingSince.delete(job.id); stuckWarned.delete(job.id);
       if (job.status === "paused") { saveNow(); return pump(); }
       if (restarting.delete(job.id)) { job.status = "queued"; saveNow(); return pump(); }
       if (code === 0) {
@@ -772,6 +794,13 @@ export function createDrives(deps: DrivesDeps) {
   }
 
   async function runVerify(job: OffloadJob, only?: string[]) {
+    // One check per folder at a time (two of the same ran side by side, 2026-11-11).
+    if (alive(running.get(job.id)) || verifyStarting.has(job.id)) return;
+    verifyStarting.add(job.id);
+    try { await runVerifyInner(job, only); } finally { verifyStarting.delete(job.id); }
+  }
+  const verifyStarting = new Set<string>();
+  async function runVerifyInner(job: OffloadJob, only?: string[]) {
     const bin = await findRclone();
     if (!bin) return;
     job.status = "verifying";
@@ -794,7 +823,7 @@ export function createDrives(deps: DrivesDeps) {
     running.set(job.id, proc);
     proc.stderr!.on("data", () => {});
     proc.on("close", async () => {
-      running.delete(job.id);
+      if (running.get(job.id) === proc) running.delete(job.id);
       if (job.status === "paused") { saveNow(); return pump(); }
       const lines = (await readFile(report, "utf8").catch(() => "")).split(/\r?\n/).filter(Boolean);
       const v = { at: Date.now(), matched: 0, missing: 0, differ: 0, errors: 0, matchedBytes: 0, problems: [] as string[], recheck: [] as string[] };

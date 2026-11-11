@@ -1244,6 +1244,24 @@ for (const f of ["index.html", "manifest.webmanifest"]) {
   if (ep !== before) writeFileSync(file, ep);
 }
 
+// 3s. On a phone a Genesis game showed the Master System pad ("1", "2", no
+//     Start), so most games couldn't get past their title screen (2026-11-11).
+//     Genesis, Sega CD and 32X named no EmulatorJS layout, and EmulatorJS then
+//     took Genesis Plus GX's first system, the Master System. They name their
+//     own: A, B, C and Start.
+{
+  const file = path.join(assets, find("touchLayouts-"));
+  let tl = readFileSync(file, "utf8");
+  const before = tl;
+  tl = patch(tl, "genesis touch layout", 'genesis:{label:"Genesis",ejsControlScheme:"segaMD"',
+    'genesis:{label:"Genesis",ejsControlScheme:null', 'genesis:{label:"Genesis",ejsControlScheme:"segaMD"');
+  tl = patch(tl, "sega cd touch layout", 'segacd:{label:"Sega CD",ejsControlScheme:"segaCD"',
+    'segacd:{label:"Sega CD",ejsControlScheme:null', 'segacd:{label:"Sega CD",ejsControlScheme:"segaCD"');
+  tl = patch(tl, "32x touch layout", 'sega32x:{label:"Sega 32X",ejsControlScheme:"sega32x"',
+    'sega32x:{label:"Sega 32X",ejsControlScheme:null', 'sega32x:{label:"Sega 32X",ejsControlScheme:"sega32x"');
+  if (tl !== before) writeFileSync(file, tl);
+}
+
 // 4. index.html loads the boot script ahead of the app.
 {
   const file = path.join(dist, "index.html");
