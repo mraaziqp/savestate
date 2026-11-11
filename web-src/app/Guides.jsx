@@ -346,17 +346,19 @@ const GUIDES = [
     body: (
       <>
         <p className="lead">A host is the PC (or NAS) that holds your films, music and games and serves them to every other device. Setting one up takes a few minutes.</p>
-        <div className="nxg-sec"><h4>Windows: download and double-click</h4>
+        <div className="nxg-sec"><h4>Windows: one button in the app</h4>
           <ol>
-            <li><a href="/api/downloads/host-setup">Download SaveState Host</a> and double-click <b>SaveState-Host.exe</b>. No administrator needed. (If Windows says it protected your PC, choose <b>More info</b> &gt; <b>Run anyway</b>.)</li>
-            <li>It downloads Node.js (nodejs.org), SaveState and ffmpeg (from the builds ffmpeg.org links to), checking each against its published checksum. SaveState brings its own private database, so there is no Docker or database to install.</li>
-            <li>Pick your <b>Films &amp; shows</b>, <b>Music</b> and <b>Games</b> folders when asked (Cancel skips one; add it later).</li>
-            <li>SaveState starts, opens in your browser, and starts again every time you sign in to Windows. <b>The first account you create becomes the owner.</b></li>
-          </ol></div>
+            <li>Install the <a href="/api/downloads/desktop?platform=windows">SaveState app for Windows</a> and open it.</li>
+            <li>Go to <b>Become a Host</b> and press <b>Set up this PC as a host</b>.</li>
+            <li>Choose your <b>Films &amp; series</b>, <b>Music</b> and <b>Games</b> folders (any can be skipped and added later), then <b>Set up now</b>.</li>
+            <li>The app shows each step and tells you when it's ready (a few minutes). No commands and no administrator. It installs Node.js, SaveState with its own private database, and ffmpeg, each checked against its published checksum.</li>
+            <li>Press <b>Open my host</b>. <b>The first account you create there becomes the owner.</b> It starts again by itself every time you sign in to Windows.</li>
+          </ol>
+          <p>Without the app: <a href="/api/downloads/host-setup">SaveState-Host.exe</a> does the same in a window of its own.</p></div>
         <div className="nxg-sec"><h4>Linux or a NAS</h4>
           <p>With Docker installed: <C>curl -fsSL https://savestate.co.za/install.sh | bash</C>. It asks for the folders and a port, and the first account becomes the owner here too.</p></div>
         <div className="nxg-sec"><h4>Phones and TVs at home</h4>
-          <p>The installer prints an address like <C>http://192.168.1.20:3000</C>; open it on any device on the same Wi-Fi. If they can't connect, allow SaveState when Windows asks about the firewall, or run the installer once as administrator (it opens the port for home networks only).</p></div>
+          <p>Become a Host shows the address for phones and TVs (like <C>http://192.168.1.20:3000</C>), with a Copy button; open it on any device on the same Wi-Fi. If Windows asks whether SaveState may use the network, choose <b>Allow</b>.</p></div>
         <div className="nxg-sec"><h4>From outside the house (optional)</h4>
           <p>A free Cloudflare Tunnel gives the host a web address that works anywhere, without opening ports on your router: install <C>cloudflared</C>, then <C>cloudflared tunnel --url http://localhost:3000</C> for a quick test address, or a named tunnel for your own domain.</p></div>
         <div className="nxg-sec"><h4>Updating, removing, and where things are</h4>

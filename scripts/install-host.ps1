@@ -14,7 +14,7 @@
 # Run it again to update; your settings, accounts and library stay.
 # No administrator rights are needed. For a scripted install, set any of
 # SAVESTATE_MEDIA_DIR, SAVESTATE_MUSIC_DIR, SAVESTATE_GAMES_DIR (no folder
-# dialogs then), SAVESTATE_PORT, SAVESTATE_NO_TASK=1 (don't start with
+# dialogs then), SAVESTATE_UNATTENDED=1 (no dialogs at all), SAVESTATE_PORT, SAVESTATE_NO_TASK=1 (don't start with
 # Windows) and SAVESTATE_NO_BROWSER=1. To remove it:
 #   $env:SAVESTATE_UNINSTALL=1; irm https://savestate.co.za/install-host.ps1 | iex
 
@@ -148,7 +148,9 @@ try {
   $cfg = if (Test-Path $CfgFile) { (Get-Content $CfgFile -Raw).TrimStart([char]0xFEFF) | ConvertFrom-Json } else { New-Object psobject }
   Add-Type -AssemblyName System.Windows.Forms
   $preset = @{ mediaDir = $env:SAVESTATE_MEDIA_DIR; musicDir = $env:SAVESTATE_MUSIC_DIR; gamesDir = $env:SAVESTATE_GAMES_DIR }
-  $scripted = [bool]($env:SAVESTATE_MEDIA_DIR -or $env:SAVESTATE_MUSIC_DIR -or $env:SAVESTATE_GAMES_DIR)
+  # SAVESTATE_UNATTENDED=1: run by the SaveState app (Become a Host > Set up
+  # this PC), which asked for the folders itself; never a dialog from here.
+  $scripted = [bool]($env:SAVESTATE_UNATTENDED -eq '1' -or $env:SAVESTATE_MEDIA_DIR -or $env:SAVESTATE_MUSIC_DIR -or $env:SAVESTATE_GAMES_DIR)
   function Pick($key, $what) {
     $now = $cfg.$key
     if ($scripted) {

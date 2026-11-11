@@ -151,6 +151,7 @@ const before = shell;
     `NxRemote=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.TvRemote}))),` +
     `NxLibrary=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.LibraryManager}))),` +
     `NxPlayTogether=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.PlayTogetherModal}))),` +
+    `NxHostSetup=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.HostSetup}))),` +
     `NxProfiles=(0,s.lazy)(()=>NxLoad().then(t=>({default:t.ProfileLayer})));` +
     // Welcome when: an ordinary browser tab on the host's own site, and either
     // nobody is signed in or the address carries a password-reset link.
@@ -173,7 +174,7 @@ const before = shell;
     'const j=new URLSearchParams;for(const[k,w]of Object.entries(a))j.set(k,typeof w=="string"?w:JSON.stringify(w??""));let p;try{p=await Ge(l,{method:"POST",contentType:"application/x-www-form-urlencoded; charset=UTF-8",body:j.toString(),timeoutMs:n})}catch{continue}const b=await p.json().catch(()=>null);if(p.ok&&(b?.success??b?.ok??!0))return{ok:!0,status:p.status,data:b};if(b)return{ok:!1,status:p.status,data:b};last={ok:!1,status:p.status,data:null}}return last}' +
     'async function fc(t,a){for(const r of Ys()){try{const o=await Ge(`${r}${t}`,{method:"GET",timeoutMs:a});if(!o.ok)continue;return{ok:!0,data:await o.json().catch(()=>null)}}catch{}}return{ok:!1,data:null}}' +
     'async function uo(t){for(const n of Ys()){try{if((await Ge(`${n}/health`,{method:"GET",timeoutMs:t})).ok)return!0}catch{}}return!1}';
-  shell = patch(shell, "launcher asked once", 'const t=["http://127.0.0.1:17373","http://127.0.0.1:17374"];', from, to);
+  shell = patch(shell, "launcher asked once", 'async function uo(t){for(const n of Ys())', from, to);
 }
 
 // 3q. A game card's small "Play" button let its click reach the card, whose
@@ -628,6 +629,14 @@ shell = patch(shell, "first-visit update notice", "__nxHadSW",
   if (!current) throw new Error('patch "app version": anchor not found');
   if (current !== version) shell = shell.split(`"${current}"`).join(`"${version}"`);
 }
+
+// Become a Host starts with one button that sets this PC up from inside the
+// app (HostSetup.jsx; the launcher runs the installer and reports each step).
+// People read the whole page, scrolled for the setup, downloaded a file and
+// ran it (2026-11-12). The page's other sections stay below it.
+shell = patch(shell, "become a host one button", "x===\"become-host\"&&(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHostSetup,{})})",
+  'x==="become-host"&&(0,e.jsx)(il,{}),',
+  'x==="become-host"&&(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHostSetup,{})}),(0,e.jsx)(il,{})]}),');
 
 // Nothing listens on 127.0.0.1:17374 any more (the PowerShell launcher that
 // used it is gone; the PC launcher and the app use 17373). Asking it anyway

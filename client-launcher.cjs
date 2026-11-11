@@ -4616,7 +4616,7 @@ function healthPayload() {
     // v14: games kept as a folder (an extracted PS3 game) are fetched whole, or used in place on the host PC.
     engine: IS_WIN,
     platform: process.platform,
-    features: ['setup-consoles', 'bios', 'rom-folder'],
+    features: ['setup-consoles', 'bios', 'rom-folder', 'host-setup'],
     native: true,
     embedded: 'electron',
     canPickFolder: true,
@@ -4636,6 +4636,126 @@ function healthPayload() {
     autostartMethod: 'electron-app',
     protocolHandler: false,
   };
+}
+
+// ── This PC as a SaveState host, set up from inside the app ───────────────
+// Become a Host > "Set up this PC as a host": the app asks for the folders
+// (Windows' own folder dialogs), then this runs the same installer as the
+// SaveState-Host.exe download (install-host.ps1, from savestate.co.za) with
+// no window, no prompts and no admin rights, and reports each step to the
+// page. Before, people read a page, downloaded a file and ran it.
+// SAVESTATE_HOST_DIR: the installer's own test switch (a scratch install).
+const HOST_DIR = process.env.SAVESTATE_HOST_DIR || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'SaveStateHost');
+const HOST_SITE = 'https://savestate.co.za';
+const HOST_STEPS = ['Node.js', 'SaveState', 'Streaming tools', 'Your folders', 'Starting SaveState'];
+let hostJob = null;
+
+function lanAddress() {
+  const ifs = os.networkInterfaces();
+  const all = [];
+  for (const [name, list] of Object.entries(ifs)) {
+    for (const a of list || []) {
+      if (a.family !== 'IPv4' || a.internal) continue;
+      // Not the virtual adapters (WSL, Hyper-V, VPNs): phones can't reach those.
+      if (/vEthernet|WSL|Hyper-V|VirtualBox|VMware|Tailscale|ZeroTier|Loopback/i.test(name)) continue;
+      all.push(a.address);
+    }
+  }
+  return all.find((a) => /^192\.168\./.test(a)) || all.find((a) => /^10\./.test(a)) || all[0] || null;
+}
+
+function publicHostJob(j) {
+  if (!j) return null;
+  return {
+    state: j.state, step: j.step, steps: HOST_STEPS, stepText: j.stepText,
+    lines: j.lines.slice(-12), url: j.url, lanUrl: j.lanUrl, error: j.error,
+    startedAt: j.startedAt, endedAt: j.endedAt, firewallNote: j.firewallNote,
+  };
+}
+
+async function hostStatus() {
+  let cfg = {};
+  try { cfg = JSON.parse((await fsp.readFile(path.join(HOST_DIR, 'data', 'host.json'), 'utf8')).replace(/^\uFEFF/, '')); } catch { /* not set up */ }
+  const installed = fs.existsSync(path.join(HOST_DIR, 'app', 'host.mjs'));
+  const port = Number(cfg.port) || 3000;
+  const up = async (p) => fetch(`http://127.0.0.1:${p}/api/health`, { signal: AbortSignal.timeout(2500) }).then((r) => r.ok, () => false);
+  const running = installed ? await up(port) : false;
+  let version = null;
+  try { version = JSON.parse(await fsp.readFile(path.join(HOST_DIR, 'app', 'package.json'), 'utf8')).version || null; } catch { /* none */ }
+  // A SaveState started some other way (Docker, a developer copy) already
+  // answering here: setting up a second one is offered, not pushed.
+  let otherPort = null;
+  if (!installed) for (const p of [3000, 3001, 3002]) { if (await up(p)) { otherPort = p; break; } }
+  const lan = lanAddress();
+  return {
+    ok: true, supported: IS_WIN, installed, running, port, version,
+    url: `http://localhost:${port}`, lanUrl: lan ? `http://${lan}:${port}` : null,
+    otherHost: otherPort ? { port: otherPort, url: `http://localhost:${otherPort}` } : null,
+    folders: { mediaDir: cfg.mediaDir || null, musicDir: cfg.musicDir || null, gamesDir: cfg.gamesDir || null },
+    job: publicHostJob(hostJob),
+  };
+}
+
+async function startHostSetup(body) {
+  if (!IS_WIN) return { status: 400, json: { ok: false, error: 'Setting up a host from the app works on Windows. On Linux or a NAS, use the installer in Help & guides.' } };
+  if (hostJob && hostJob.state === 'running') return { status: 200, json: { ok: true, job: publicHostJob(hostJob) } };
+  const dirs = {};
+  for (const k of ['mediaDir', 'musicDir', 'gamesDir']) {
+    const v = body && typeof body[k] === 'string' ? body[k].trim() : '';
+    if (!v) continue;
+    if (!fs.existsSync(v)) return { status: 400, json: { ok: false, error: `That folder doesn't exist any more: ${v}` } };
+    dirs[k] = v;
+  }
+  let script;
+  try {
+    const r = await fetch(`${HOST_SITE}/install-host.ps1`, { signal: AbortSignal.timeout(60_000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    script = await r.text();
+  } catch (e) {
+    return { status: 502, json: { ok: false, error: `Couldn't download the host installer (${e && e.message ? e.message : e}). Check the internet connection and try again.` } };
+  }
+  if (!/SaveState Host for Windows/.test(script)) return { status: 502, json: { ok: false, error: "The download wasn't the SaveState host installer; nothing was changed." } };
+  const file = path.join(os.tmpdir(), `savestate-host-setup-${Date.now()}.ps1`);
+  await fsp.writeFile(file, script, 'utf8');
+  const env = { ...process.env, SAVESTATE_UNATTENDED: '1', SAVESTATE_NO_BROWSER: '1' };
+  delete env.SAVESTATE_MEDIA_DIR; delete env.SAVESTATE_MUSIC_DIR; delete env.SAVESTATE_GAMES_DIR;
+  if (dirs.mediaDir) env.SAVESTATE_MEDIA_DIR = dirs.mediaDir;
+  if (dirs.musicDir) env.SAVESTATE_MUSIC_DIR = dirs.musicDir;
+  if (dirs.gamesDir) env.SAVESTATE_GAMES_DIR = dirs.gamesDir;
+  const ps = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const job = { state: 'running', step: 0, stepText: 'Getting ready', lines: [], url: null, lanUrl: null, error: null, startedAt: Date.now(), endedAt: null, sawRunning: false, errLines: [], firewallNote: false };
+  hostJob = job;
+  let child;
+  try {
+    child = spawn(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    job.state = 'failed'; job.error = `Couldn't start the installer: ${e && e.message ? e.message : e}`; job.endedAt = Date.now();
+    return { status: 500, json: { ok: false, error: job.error } };
+  }
+  const onLine = (raw, isErr) => {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim()) return;
+    if (isErr) { if (!/^\s*(At |\+ |CategoryInfo|FullyQualifiedErrorId|~)/.test(line)) job.errLines.push(line.trim()); return; }
+    const step = /^\[(\d)\/5\]\s+(.+)$/.exec(line.trim());
+    if (step) { job.step = Number(step[1]); job.stepText = HOST_STEPS[job.step - 1] || step[2]; return; }
+    if (/SaveState is running\./.test(line)) job.sawRunning = true;
+    const here = /On this PC:\s+(http\S+)/.exec(line); if (here) job.url = here[1];
+    const lan = /Phones and TVs:\s+(http\S+)/.exec(line); if (lan) job.lanUrl = lan[1];
+    if (/firewall/i.test(line)) job.firewallNote = true;
+    job.lines.push(line.trim());
+    if (job.lines.length > 200) job.lines.splice(0, job.lines.length - 200);
+  };
+  const splitter = (isErr) => { let buf = ''; return (d) => { buf += d.toString('utf8'); let i; while ((i = buf.indexOf('\n')) >= 0) { onLine(buf.slice(0, i), isErr); buf = buf.slice(i + 1); } }; };
+  child.stdout.on('data', splitter(false));
+  child.stderr.on('data', splitter(true));
+  child.on('close', (code) => {
+    job.endedAt = Date.now();
+    if (code === 0 && job.sawRunning) { job.state = 'done'; job.step = 5; job.stepText = 'Ready'; }
+    else { job.state = 'failed'; job.error = job.errLines[0] || `The setup stopped before finishing (code ${code}).`; }
+    launcherLog(`[host setup] ${job.state}${job.error ? `: ${job.error}` : ''} in ${Math.round((job.endedAt - job.startedAt) / 1000)} s`);
+    fsp.unlink(file).catch(() => {});
+  });
+  return { status: 200, json: { ok: true, job: publicHostJob(job) } };
 }
 
 /**
@@ -5167,6 +5287,26 @@ function startEmbeddedLauncher(opts = {}) {
         const body = await readBody(req);
         const result = await handleLaunchExe(body);
         send(result.json, result.status);
+        return;
+      }
+
+      // This PC as a host (Become a Host > Set up this PC as a host).
+      if (req.method === 'GET' && p === '/host/status') {
+        send(await hostStatus());
+        return;
+      }
+      if (req.method === 'POST' && p === '/host/setup') {
+        const r = await startHostSetup(await readBody(req).catch(() => ({})));
+        send(r.json, r.status);
+        return;
+      }
+      // Opens this PC's own host in the browser (only that address).
+      if (req.method === 'POST' && p === '/host/open') {
+        const st = await hostStatus();
+        if (!st.installed && !st.otherHost) { send({ ok: false, error: 'SaveState Host isn’t set up on this PC yet.' }, 400); return; }
+        const url = st.installed ? st.url : st.otherHost.url;
+        try { spawn('explorer.exe', [url], { detached: true, stdio: 'ignore', windowsHide: true }).unref(); } catch { /* the page shows the address */ }
+        send({ ok: true, url });
         return;
       }
 

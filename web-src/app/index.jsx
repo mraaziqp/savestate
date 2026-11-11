@@ -45,4 +45,5 @@ export { ControllerTester } from "./ControllerTester.jsx";
 export { BackupCentre } from "./BackupCentre.jsx";
 export { QADashboard } from "./QADashboard.jsx";
 export { HostWizard } from "./HostWizard.jsx";
+export { HostSetup } from "./HostSetup.jsx";
 export { PlayTogetherModal } from "./PlayTogetherModal.jsx";

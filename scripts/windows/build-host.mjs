@@ -35,7 +35,9 @@ cpSync(path.join(root, "host", "host.mjs"), path.join(stage, "host.mjs"));
 // (web/), the TV, watch and launcher pages (public/), the launcher it hands to
 // PCs, the install scripts it serves, and the co-op list. Without web/ the
 // Files section answered 404 on a new host.
-for (const item of ["web", "public", "client-launcher.cjs", "nucleus-compatibility.json",
+// releases/cores: SaveState's own builds of the emulator cores (game-tested),
+// which a new host serves to its players ahead of libretro's.
+for (const item of ["web", "public", "client-launcher.cjs", "nucleus-compatibility.json", "releases/cores/windows",
   "scripts/install.sh", "scripts/install-host.ps1", "scripts/client-install-linux.sh", "scripts/gamepad-bridge.py"]) {
   const from = path.join(root, item);
   if (existsSync(from)) cpSync(from, path.join(stage, item), { recursive: true });
