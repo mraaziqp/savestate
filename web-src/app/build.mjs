@@ -629,6 +629,14 @@ shell = patch(shell, "first-visit update notice", "__nxHadSW",
   if (current !== version) shell = shell.split(`"${current}"`).join(`"${version}"`);
 }
 
+// Nothing listens on 127.0.0.1:17374 any more (the PowerShell launcher that
+// used it is gone; the PC launcher and the app use 17373). Asking it anyway
+// logged a refused connection on Remote Play whenever 17373 was slow
+// (page audit, 2026-11-11). An address added in settings still counts.
+shell = patch(shell, "launcher address list", 'const t=["http://127.0.0.1:17373"];try{const a=(localStorage.getItem(lo)',
+  'const t=["http://127.0.0.1:17373","http://127.0.0.1:17374"];try{const a=(localStorage.getItem(lo)',
+  'const t=["http://127.0.0.1:17373"];try{const a=(localStorage.getItem(lo)');
+
 if (shell !== before) writeFileSync(path.join(assets, shellFile), shell);
 
 // 3. The music player: stream URLs carry the token, for clients (the desktop
