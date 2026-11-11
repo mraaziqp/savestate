@@ -1427,16 +1427,17 @@ async function resolveRomPathAnywhere(configRoot: string, game: Record<string, a
     } catch { /* try root-relative fallback */ }
   }
 
-  // Try the relative path under each root (primary first, then extras).
+  // Try the relative path under each root, all at once, first answer wins:
+  // one at a time, a missing file on a choked disk (E:, seconds per lookup,
+  // 2026-11-11) held up finding the same game moved to another drive.
   const allRoots = [configRoot, ...extraRoots.filter(r => r && r !== configRoot)];
   if (cleanRel) {
-    for (const root of allRoots) {
+    const hit = await Promise.any(allRoots.map(async (root) => {
       const rooted = path.resolve(root, cleanRel);
-      try {
-        await fsAccess(rooted);
-        return { absolutePath: rooted, relativePath: `./${cleanRel}` };
-      } catch { /* try next root */ }
-    }
+      await fsAccess(rooted);
+      return rooted;
+    })).catch(() => null);
+    if (hit) return { absolutePath: hit, relativePath: `./${cleanRel}` };
   }
 
   // Basename search across all roots as a last resort.

@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "savestate-desktop"
-version = "1.0.83"
+version = "1.0.85"
 dependencies = [
  "tauri",
  "tauri-build",

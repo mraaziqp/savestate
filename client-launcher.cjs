@@ -41,6 +41,11 @@
 // installed and running), this module logs and backs off — the UI works the
 // same against either implementation.
 
+// Sixteen threads for disk work (Node's default is 4), set before anything
+// touches the disk: four reads stuck on a choked drive (E:, 2026-11-11) held
+// every other request, the health check included, and every Play failed.
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '16';
+
 const http = require('http');
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -3122,35 +3127,10 @@ const SCAN_MAX_DEPTH = 6;
 const SCAN_MAX_FILES = 200_000;
 const SCAN_SKIP_DIR_NAMES = new Set(['system volume information', '$recycle.bin', 'node_modules', '.git']);
 
-function walkAndCollect(dir, depth, budget, out) {
-  if (depth > SCAN_MAX_DEPTH || budget.count > SCAN_MAX_FILES) return;
-  let entries;
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return; // missing/unreadable (e.g. a drive that isn't plugged in right now) — not an error, just nothing found here
-  }
-  for (const entry of entries) {
-    if (budget.count > SCAN_MAX_FILES) return;
-    if (!entry.isFile()) continue;
-    budget.count++;
-    if (!ROM_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
-    // No stat per file here: with a torrent writing to the same disk each one
-    // took up to 5 s, and E:\ROMS (6,535 files) took 81 s to list. The file
-    // that is actually chosen is checked instead (findRomAnywhere).
-    out.push({
-      path: path.join(dir, entry.name),
-      nameNoExt: path.parse(entry.name).name,
-      normalized: normalizeForMatch(entry.name),
-    });
-  }
-  for (const entry of entries) {
-    if (budget.count > SCAN_MAX_FILES) return;
-    if (!entry.isDirectory()) continue;
-    if (SCAN_SKIP_DIR_NAMES.has(entry.name.toLowerCase()) || entry.name.startsWith('.')) continue;
-    walkAndCollect(path.join(dir, entry.name), depth + 1, budget, out);
-  }
-}
+// The folder walk itself is walkAndCollectAsync (below, beside the index):
+// no stat per file there, since with a torrent writing to the same disk each
+// one took up to 5 s and E:\ROMS (6,535 files) took 81 s to list; the file
+// that is actually chosen is checked instead (findRomAnywhere).
 
 // findRomAnywhere used to re-walk every configured root from scratch on
 // every single launch/cache-rom call — fine for a small romDirectory, but
@@ -3163,22 +3143,85 @@ function walkAndCollect(dir, depth, budget, out) {
 const ROM_INDEX_CACHE = new Map(); // root -> { entries, builtAt }
 const ROM_INDEX_TTL_MS = 5 * 60_000;
 
-function getRomIndex(root, forceRefresh) {
-  const cached = ROM_INDEX_CACHE.get(root);
-  if (!forceRefresh && cached && Date.now() - cached.builtAt < ROM_INDEX_TTL_MS) {
-    return cached.entries;
+// Built in the background with non-blocking reads and kept on disk: the walk
+// used to run inside Play with blocking reads, and on a choked drive one
+// press froze the whole launcher for minutes ("found 158 s, ready to check
+// 513 s", 2026-11-11) while every other Play answered "Launch request failed".
+const ROM_INDEX_FILE = path.join(clientRoot, 'rom-index.json');
+const romIndexBuilding = new Map(); // root -> Promise<entries>
+try {
+  const saved = JSON.parse(fs.readFileSync(ROM_INDEX_FILE, 'utf8'));
+  // Served at once after a restart and refreshed in the background.
+  for (const [root, v] of Object.entries(saved || {})) if (Array.isArray(v?.entries)) ROM_INDEX_CACHE.set(root, { entries: v.entries, builtAt: 0 });
+} catch { /* first run */ }
+let romIndexSaveTimer = null;
+function saveRomIndexes() {
+  if (romIndexSaveTimer) return;
+  romIndexSaveTimer = setTimeout(() => {
+    romIndexSaveTimer = null;
+    const out = {};
+    for (const [root, v] of ROM_INDEX_CACHE) out[root] = { entries: v.entries };
+    fsp.writeFile(ROM_INDEX_FILE, JSON.stringify(out)).catch(() => {});
+  }, 2000);
+  romIndexSaveTimer.unref?.();
+}
+
+async function walkAndCollectAsync(dir, depth, budget, out) {
+  if (depth > SCAN_MAX_DEPTH || budget.count > SCAN_MAX_FILES) return;
+  let entries;
+  try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const entry of entries) {
+    if (budget.count > SCAN_MAX_FILES) return;
+    if (!entry.isFile()) continue;
+    budget.count++;
+    if (!ROM_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) continue;
+    out.push({ path: path.join(dir, entry.name), nameNoExt: path.parse(entry.name).name, normalized: normalizeForMatch(entry.name) });
   }
-  const entries = [];
-  if (fs.existsSync(root)) walkAndCollect(root, 0, { count: 0 }, entries);
-  ROM_INDEX_CACHE.set(root, { entries, builtAt: Date.now() });
-  return entries;
+  for (const entry of entries) {
+    if (budget.count > SCAN_MAX_FILES) return;
+    if (!entry.isDirectory()) continue;
+    if (SCAN_SKIP_DIR_NAMES.has(entry.name.toLowerCase()) || entry.name.startsWith('.')) continue;
+    await walkAndCollectAsync(path.join(dir, entry.name), depth + 1, budget, out);
+  }
+}
+
+/** One background walk per folder at a time; resolves with its files. */
+function buildRomIndex(root) {
+  if (romIndexBuilding.has(root)) return romIndexBuilding.get(root);
+  const job = (async () => {
+    const entries = [];
+    try { await fsp.access(root); await walkAndCollectAsync(root, 0, { count: 0 }, entries); } catch { /* not there now */ }
+    ROM_INDEX_CACHE.set(root, { entries, builtAt: Date.now() });
+    saveRomIndexes();
+    return entries;
+  })().finally(() => romIndexBuilding.delete(root));
+  romIndexBuilding.set(root, job);
+  return job;
+}
+
+/** What is indexed now, never waiting; an old or missing index is rebuilt behind it. */
+function getRomIndex(root) {
+  const cached = ROM_INDEX_CACHE.get(root);
+  if (!cached || Date.now() - cached.builtAt >= ROM_INDEX_TTL_MS) void buildRomIndex(root);
+  return cached ? cached.entries : [];
+}
+
+/** A fresh index for a deliberate scan, waiting at most `waitMs` (then what there is). */
+async function getRomIndexFresh(root, waitMs = 60_000) {
+  const fresh = await Promise.race([buildRomIndex(root), new Promise((r) => setTimeout(() => r(null), waitMs).unref?.())]);
+  return fresh ?? (ROM_INDEX_CACHE.get(root)?.entries ?? []);
 }
 
 // Config changes (a folder added/removed, or a drive that's now
-// plugged in/out) must not keep serving a stale index until the TTL happens
-// to expire on its own.
+// plugged in/out): rebuilt in the background, the old list served meanwhile.
 function invalidateRomIndexes() {
-  ROM_INDEX_CACHE.clear();
+  for (const v of ROM_INDEX_CACHE.values()) v.builtAt = 0;
+}
+
+/** A file's size, or null when it's missing, empty or its disk doesn't answer within `ms`. */
+async function sizeWithin(p, ms = 4000) {
+  const st = await Promise.race([fsp.stat(p).catch(() => null), new Promise((r) => setTimeout(() => r(null), ms).unref?.())]);
+  return st && st.isFile() && st.size > 0 ? st.size : null;
 }
 
 function findInIndex(entries, gameId, normalizedTitle) {
@@ -3210,7 +3253,7 @@ function findInIndex(entries, gameId, normalizedTitle) {
 // what lets an existing local ROM get found and launched directly instead of
 // Nexus downloading a duplicate copy from the host every time.
 const CLOUD_ROOT = /nexus-cloud-media|google ?drive|[\\/]my drive([\\/]|$)/i;
-function findRomAnywhere(cfg, gameId, title, platform, relativePath) {
+async function findRomAnywhere(cfg, gameId, title, platform, relativePath) {
   const safeName = sanitizeName(title);
   // Fast path: exact match in the conventional <romDir>/<platform> folder —
   // covers everything Nexus itself has ever downloaded, no directory walk needed.
@@ -3224,16 +3267,27 @@ function findRomAnywhere(cfg, gameId, title, platform, relativePath) {
   // is only on Drive comes from the host instead, as on any other PC.
   const roots = [resolveRomDirectory(cfg), ...(Array.isArray(cfg.extraRomDirs) ? cfg.extraRomDirs : [])]
     .filter((r) => r && String(r).trim() && !CLOUD_ROOT.test(String(r)));
-  const usable = (p) => { try { return fs.statSync(p).size > 0; } catch { return false; } };
+  // Non-blocking, with a time limit: a disk that doesn't answer counts as
+  // "not here" and the game comes from the host instead.
+  const usable = async (p) => (await sizeWithin(p)) !== null;
   // 1. The host's own file, looked up directly (no folder walk): <root>/<its
-  //    path on the host> or <root>/<its file name>.
+  //    path on the host> or <root>/<its file name>. All asked at once; the
+  //    first folder in order that has it wins.
   const relParts = relativePath ? String(relativePath).split(/[\\/]/).filter((s) => s && s !== '.' && s !== '..') : [];
-  if (wantName) {
-    for (const root of roots) {
-      for (const p of [path.join(root, ...relParts), path.join(root, relParts[relParts.length - 1] || '')]) {
-        if (relParts.length && usable(p)) return p;
-      }
+  if (wantName && relParts.length) {
+    const tries = roots.flatMap((root) => [path.join(root, ...relParts), path.join(root, relParts[relParts.length - 1])]);
+    const checks = tries.map((p) => fsp.stat(p).then((st) => (st.isFile() && st.size > 0 ? st.size : null), () => null));
+    const SLOW = Symbol('slow');
+    const quick = await Promise.all(checks.map((c) => Promise.race([c, new Promise((r) => setTimeout(() => r(SLOW), 4000).unref?.())])));
+    let hit = tries.find((_p, i) => quick[i] !== null && quick[i] !== SLOW);
+    // A busy disk answering slowly is not "the game isn't here": wait for it
+    // (up to 2 minutes) rather than download a multi-GB disc from the host,
+    // which reads that same disk ("ROM download failed" for a PS2 game on E:).
+    if (!hit && quick.includes(SLOW)) {
+      const full = await Promise.race([Promise.all(checks), new Promise((r) => setTimeout(() => r(null), 120_000).unref?.())]);
+      if (full) hit = tries.find((_p, i) => full[i] !== null);
     }
+    if (hit) return hit;
   }
   // 2. The same file name anywhere in those folders, before any title match:
   //    by title alone "Shrek 2 (USA).7z" won over "Shrek 2 (USA).iso" beside
@@ -3241,13 +3295,13 @@ function findRomAnywhere(cfg, gameId, title, platform, relativePath) {
   if (wantName) {
     for (const root of roots) {
       const same = getRomIndex(root).find((e) => path.basename(e.path).toLowerCase() === wantName);
-      if (same && usable(same.path)) return same.path;
+      if (same && await usable(same.path)) return same.path;
     }
   }
   // 3. By title.
   for (const root of roots) {
     const found = findInIndex(getRomIndex(root), gameId, normalizedTitle);
-    if (found && usable(found)) return found;
+    if (found && await usable(found)) return found;
   }
   return null;
 }
@@ -4268,7 +4322,7 @@ async function handleLaunch(body, origin) {
   }
   let romFile = mirroredValid
     ? mirroredFile
-    : findRomAnywhere(cfg, gameId, title, platform, relativePath);
+    : await findRomAnywhere(cfg, gameId, title, platform, relativePath);
 
   // A game kept as a folder (PS3) plays only when the whole folder is here.
   lap('found');
@@ -4780,7 +4834,7 @@ function startEmbeddedLauncher(opts = {}) {
         })();
         const existing = mirroredValid
           ? mirroredFile
-          : findRomAnywhere(cfg, body.gameId, body.title, body.platform, body.relativePath);
+          : await findRomAnywhere(cfg, body.gameId, body.title, body.platform, body.relativePath);
         // A game kept as a folder (PS3): the whole folder, answered once it's
         // here like a single file (progress through /cache-rom/progress).
         const folderRoot = ps3FolderRoot(mirroredFile) || ps3FolderRoot(existing);
@@ -4975,7 +5029,7 @@ function startEmbeddedLauncher(opts = {}) {
           // answer — force a fresh walk rather than serving a cached index
           // that might be minutes stale, and this also warms the cache that
           // findRomAnywhere() reads from on the next launch attempt.
-          const entries = exists ? getRomIndex(root, true) : [];
+          const entries = exists ? await getRomIndexFresh(root, 60_000) : [];
           perRoot.push({ root, filesFound: entries.length, exists });
           totalFound += entries.length;
           filesScanned += entries.length;
@@ -5076,7 +5130,7 @@ function startEmbeddedLauncher(opts = {}) {
         cfg.extraRomDirs = Array.from(new Set([...(Array.isArray(cfg.extraRomDirs) ? cfg.extraRomDirs : []), dir]));
         saveConfig(cfg);
         invalidateRomIndexes();
-        const found = getRomIndex(dir, true).length;
+        const found = (await getRomIndexFresh(dir, 30_000)).length;
         send({ ok: true, path: dir, filesFound: found, extraRomDirs: cfg.extraRomDirs });
         return;
       }

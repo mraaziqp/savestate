@@ -1,6 +1,6 @@
 [package]
 name = "savestate-desktop"
-version = "1.0.83"
+version = "1.0.85"
 description = "SaveState for Windows: the site in its own window, with the game launcher"
 edition = "2021"
 publish = false
