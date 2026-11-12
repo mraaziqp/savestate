@@ -207,7 +207,16 @@ pub fn curated(library_name: &str) -> HashMap<String, String> {
         "FinalBurn Neo" => &[("fbneo-allow-patched-romsets", "enabled"), ("fbneo-load-subsystem-from-parent", "enabled")],
         "Mupen64Plus-Next" => &[("mupen64plus-rdp-plugin", "gliden64"), ("mupen64plus-rsp-plugin", "hle"), ("mupen64plus-43screensize", "1280x960"), ("mupen64plus-EnableNativeResFactor", "4")],
         "PPSSPP" => &[("ppsspp_internal_resolution", "1920x1088"), ("ppsspp_fast_memory", "enabled"), ("ppsspp_frameskip", "0")],
-        "dolphin-emu" => &[("dolphin_efb_scale", "x3 (1920 x 1584)"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled"), ("dolphin_texture_cache_accuracy", "512"), ("dolphin_wait_for_shaders", "enabled")],
+        // Not "wait for shaders": it waits for Dolphin's background shader
+        // workers, and in the engine those can't start (no shared GL context:
+        // "Failed to initialize shader compiler worker thread"), so any scene
+        // needing a new shader hung for 20 s or more and the page said the game
+        // stopped responding (Crazy Taxi, 2026-11-12). Shaders are made as
+        // they're needed instead, and kept in the shader cache.
+        // x2 (1280 x 1056), not x3: on a GPU whose memory is mostly taken (an
+        // AI model held 6 GB of 8 on this PC) x3 left Dolphin swapping and
+        // freezing; the page shows it at about that size anyway.
+        "dolphin-emu" => &[("dolphin_efb_scale", "x2 (1280 x 1056)"), ("dolphin_fast_disc_speed", "enabled"), ("dolphin_dsp_hle", "enabled"), ("dolphin_texture_cache_accuracy", "512"), ("dolphin_wait_for_shaders", "disabled")],
         "Flycast" => &[("reicast_internal_resolution", "1920x1440"), ("reicast_threaded_rendering", "enabled"), ("reicast_hle_bios", "enabled")],
         "LRPS2" | "PCSX2" => &[("pcsx2_renderer", "Auto"), ("pcsx2_upscale_multiplier", "3x Native (~1080p)"), ("pcsx2_fastboot", "enabled")],
         "melonDS DS" => &[("melonds_sysfile_mode", "builtin"), ("melonds_render_mode", "software")],

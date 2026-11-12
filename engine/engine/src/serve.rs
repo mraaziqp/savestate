@@ -732,6 +732,7 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
     let mut last_video_push = Instant::now() - Duration::from_secs(1);
     // Per-second statistics.
     let (mut stat_at, mut stat_frames, mut stat_run, mut stat_late) = (Instant::now(), 0u32, Duration::ZERO, 0u32);
+    let run_started = Instant::now();
     let mut frame_ms = 0.0f64;
     let mut sram_at = Instant::now();
     let mut sram_hash = session.memory(libretro_sys::RETRO_MEMORY_SAVE_RAM).map(fnv);
@@ -1157,8 +1158,12 @@ fn emulation(cfg: SessionConfig, states_dir: PathBuf, game_name: String, idle_ex
 
         if stat_at.elapsed() >= Duration::from_secs(1) {
             let secs = stat_at.elapsed().as_secs_f64();
-            // Measure save states once the game has run a second.
-            if cost.is_none() {
+            // Measure save states once the game runs steadily (30+ frames in the
+            // last second, 3 s in), not one second after the loop started:
+            // Dolphin answers serialize_size by making a whole save state, and
+            // asked while it was still booting (Crazy Taxi's first frame took
+            // 14 s) it froze the game for 20 s and more (2026-11-12).
+            if cost.is_none() && stat_frames >= 30 && run_started.elapsed() >= Duration::from_secs(3) {
                 let size = session.serialize_size();
                 let c = if size == 0 {
                     StateCost { bytes: 0, ms: 0.0 }
