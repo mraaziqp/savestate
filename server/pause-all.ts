@@ -24,10 +24,10 @@
 // restart while paused stays paused.
 import type express from "express";
 import path from "node:path";
-import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { execFile, spawn } from "node:child_process";
 import { addLiveSource } from "./receipts.ts";
+import { cleanEnv, type ModelServer } from "./model-server.ts";
 
 type Qbt = { host: string; cookie: string };
 type State = { paused: boolean; since: number | null; torrents: string[]; model: "stopped" | null;
@@ -39,9 +39,8 @@ export function createPauseAll(deps: {
   persistDir: string;
   isAdmin: (req: express.Request) => Promise<boolean>;
   qbt: () => Promise<Qbt | null>;
-  ollamaUrl: string;
-  /** The Agent Builder's folder, for its hold file (data/host-holds.json); null when it is not on this PC. */
-  agentBuilderDir: string | null;
+  /** The AI model server (server/model-server.ts), held off while paused. */
+  model: ModelServer;
   /** Called after every change (uploads stop at once rather than at their next turn). */
   changed: (paused: boolean) => void;
   /** Moves savestate.co.za to the NAS or back (server/serving.ts); null where there's no NAS. */
@@ -52,7 +51,10 @@ export function createPauseAll(deps: {
 }) {
   const file = path.join(deps.persistDir, "pause-all.json");
   let state: State = { ...OFF };
-  readFile(file, "utf8").then((t) => { state = { ...state, ...JSON.parse(t) }; if (state.paused) deps.changed(true); }).catch(() => {});
+  readFile(file, "utf8").then((t) => {
+    state = { ...state, ...JSON.parse(t) };
+    if (state.paused) { deps.changed(true); void deps.model.hold("pause all", true).catch(() => {}); }
+  }).catch(() => {});
   const save = () => writeFile(file, JSON.stringify(state)).catch(() => {});
 
   // qBittorrent 5 calls it stop/start, 4 pause/resume.
@@ -82,48 +84,11 @@ export function createPauseAll(deps: {
     if (q) await qbtCall(q, ["start", "resume"], state.torrents);
   }
 
-  // ── The AI model server ───────────────────────────────────────────────
-  const holdsFile = deps.agentBuilderDir ? path.join(deps.agentBuilderDir, "data", "host-holds.json") : null;
-  async function setHold(on: boolean) {
-    if (!holdsFile) return;
-    const holds = await readFile(holdsFile, "utf8").then((t) => JSON.parse(t) as Record<string, unknown>).catch(() => ({} as Record<string, unknown>));
-    if (on) holds["model-server"] = { since: new Date().toISOString(), by: "SaveState pause all" };
-    else delete holds["model-server"];
-    await writeFile(holdsFile, JSON.stringify(holds)).catch(() => {});
-  }
-  const ollamaUp = () => fetch(`${deps.ollamaUrl}/api/tags`, { signal: AbortSignal.timeout(4000) }).then((r) => r.ok, () => false);
-  const killOllama = () => new Promise<void>((done) => {
-    if (process.platform !== "win32") return done();
-    // Every Ollama process (the server, its tray app) and the model runner.
-    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-      "Get-Process | Where-Object { $_.Name -match '^(ollama|llama-server)' } | Stop-Process -Force -ErrorAction SilentlyContinue"],
-      { windowsHide: true, timeout: 20_000 }, () => done());
-  });
+  // ── The AI model server (server/model-server.ts) ─────────────────────
   async function modelOff(): Promise<string> {
-    if (!(await ollamaUp())) return "";
-    // Let go of the model first (a clean unload), then stop the server.
-    const loaded = await fetch(`${deps.ollamaUrl}/api/ps`, { signal: AbortSignal.timeout(5000) })
-      .then((r) => r.json()).then((j: any) => (j.models ?? []).map((m: any) => String(m.name))).catch(() => [] as string[]);
-    for (const name of loaded) {
-      await fetch(`${deps.ollamaUrl}/api/generate`, { method: "POST", body: JSON.stringify({ model: name, keep_alive: 0 }), signal: AbortSignal.timeout(20_000) }).catch(() => null);
-    }
-    await setHold(true);
-    await killOllama();
-    state.model = "stopped";
-    return "the AI model server";
-  }
-  async function modelOn() {
-    await setHold(false);
-    // The Agent Builder's launcher brings it back once the hold is gone; when
-    // nothing does within 40 s, it is started here, set up as its Host Manager does.
-    for (let i = 0; i < 8; i++) { if (await ollamaUp()) return; await new Promise((r) => setTimeout(r, 5000)); }
-    const exe = [path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Ollama", "ollama.exe"), "C:\\Program Files\\Ollama\\ollama.exe"].find((p) => existsSync(p));
-    if (!exe) return;
-    const child = spawn(exe, ["serve"], {
-      cwd: path.dirname(exe), detached: true, windowsHide: true, stdio: "ignore",
-      env: { ...(await cleanEnv()), OLLAMA_CONTEXT_LENGTH: process.env.OLLAMA_NUM_CTX || "16384", OLLAMA_FLASH_ATTENTION: "1", OLLAMA_KV_CACHE_TYPE: "q8_0", OLLAMA_MAX_LOADED_MODELS: "1" },
-    });
-    child.unref();
+    const stopped = await deps.model.hold("pause all", true);
+    if (stopped || deps.model.stoppedHere()) state.model = "stopped";
+    return stopped ? "the AI model server" : "";
   }
 
   // ── Apps on this PC (Windows) ────────────────────────────────────────
@@ -165,17 +130,10 @@ export function createPauseAll(deps: {
     state.apps = apps;
     return closed;
   }
-  // The apps start without SaveState's own settings. Started with this
-  // server's environment, Sonarr took its PORT=3000 and listened on 3000
+  // The apps start without SaveState's own settings (cleanEnv). Started with
+  // this server's environment, Sonarr took its PORT=3000 and listened on 3000
   // beside SaveState, and the public site answered with Sonarr's login
   // (2026-10-28). Nothing from .env (keys, secrets) goes to them either.
-  async function cleanEnv() {
-    const env: NodeJS.ProcessEnv = { ...process.env };
-    const dotenv = await readFile(path.join(process.cwd(), ".env"), "utf8").catch(() => "");
-    for (const line of dotenv.split(/\r?\n/)) { const k = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line)?.[1]; if (k) delete env[k]; }
-    for (const k of Object.keys(env)) if (/^(PORT|HOST|URLS|HTTPS?_PORTS|ASPNETCORE_.*|DOTNET_URLS|NODE_.*|NEXUS_.*|UV_THREADPOOL_SIZE)$/i.test(k)) delete env[k];
-    return env;
-  }
   async function openApps() {
     const env = await cleanEnv();
     for (const a of state.apps ?? []) {
@@ -218,15 +176,14 @@ export function createPauseAll(deps: {
     const wasModel = state.model === "stopped";
     const apps = (state.apps ?? []).map((a) => a.name);
     deps.log("INFO", `Resumed after ${Math.round((Date.now() - (state.since ?? Date.now())) / 60_000)} min: ${state.torrents.length} torrent(s)${apps.length ? `, ${apps.join(", ")}` : ""}${wasModel ? " and the AI model server" : ""} started again`);
-    if (wasModel) void modelOn().catch(() => {});
+    void deps.model.hold("pause all", false).catch(() => {});
     if (state.site === "nas" && deps.moveSite && auth) void deps.moveSite("pc", auth).catch((e) => deps.log("WARN", `Resume: the site stays on the NAS: ${e?.message ?? e}`));
     state = { ...OFF };
     await save();
   }
-  // Torrents the Arr apps add while paused are stopped too, and the model
-  // server again if something starts it.
+  // Torrents the Arr apps add while paused are stopped too (the model server
+  // keeps itself off while held).
   setInterval(() => { if (state.paused) void stopTorrents().then((n) => { if (n) void save(); }); }, 60_000).unref?.();
-  setInterval(() => { if (state.paused) void modelOff().then((m) => { if (m) void save(); }); }, 20_000).unref?.();
 
   // The Activity page shows the pause (and its Resume) while it lasts.
   addLiveSource(() => state.paused ? [{

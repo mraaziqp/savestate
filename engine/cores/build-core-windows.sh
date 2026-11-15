@@ -41,6 +41,11 @@ spec() {
     mupen64plus_next) echo "https://github.com/libretro/mupen64plus-libretro-nx.git|.|make platform=win|mupen64plus_next_libretro.dll" ;;
     ppsspp)          echo "https://github.com/hrydgard/ppsspp.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DLIBRETRO=ON -DCMAKE_SHARED_LINKER_FLAGS=-static && cmake --build build-win --target ppsspp_libretro -j JOBS|build-win/lib/ppsspp_libretro.dll" ;;
     flycast)         echo "https://github.com/flyinghead/flycast.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DLIBRETRO=ON -DUSE_HOST_LIBZIP=OFF -DUSE_LUA=OFF -DUSE_BREAKPAD=OFF && cmake --build build-win --target flycast_libretro -j JOBS|build-win/flycast_libretro.dll" ;;
+    # libretro builds Dolphin's Windows core with MinGW too (MXE); the DLL lands in Binaries.
+    # USE_SYSTEM_LIBS=OFF: its bundled libraries, not MSYS2's (zstd linked twice otherwise).
+    dolphin)         echo "https://github.com/libretro/dolphin.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DLIBRETRO=ON -DENABLE_LTO=OFF -DUSE_SYSTEM_LIBS=OFF -DENABLE_QT=OFF -DENABLE_NOGUI=OFF -DENABLE_TESTS=OFF -DUSE_DISCORD_PRESENCE=OFF -DENABLE_AUTOUPDATE=OFF -DUSE_UPNP=OFF && cmake --build build-win --target dolphin_libretro -j JOBS|build-win/Binaries/dolphin_libretro.dll" ;;
+    # Settings from libretro's own CI for Citra (MinGW on Windows).
+    citra)           echo "https://github.com/libretro/citra.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=OFF -DENABLE_DEDICATED_ROOM=OFF -DENABLE_SDL2=OFF -DENABLE_QT=OFF -DENABLE_WEB_SERVICE=OFF -DENABLE_SCRIPTING=OFF -DENABLE_OPENAL=OFF -DENABLE_LIBUSB=OFF -DCITRA_ENABLE_BUNDLE_TARGET=OFF -DCITRA_WARNINGS_AS_ERRORS=OFF -DENABLE_OPT=0 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 && cmake --build build-win --target citra_libretro -j JOBS|build-win/bin/Release/citra_libretro.dll" ;;
     melondsds)       echo "https://github.com/JesseTG/melonds-ds.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release && cmake --build build-win -j JOBS|build-win/src/libretro/melondsds_libretro.dll" ;;
     *) return 1 ;;
   esac

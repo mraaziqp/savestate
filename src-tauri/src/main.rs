@@ -28,7 +28,60 @@ fn client_dir() -> PathBuf {
     base.join("NexusEmuClient")
 }
 
+/// PCs set up with the one-click installer run their own copy of the launcher
+/// (NexusEmuClient, kept going by nexus-runner.vbs), which nothing updated: a
+/// newer app's fixes never reached it. When this app's copy is newer (the
+/// installer keeps each file's build time) and different, it replaces that
+/// copy and stops the old process; the runner starts the new one in ~10 s.
+/// Never a downgrade, and nothing at all on PCs without that setup.
+fn refresh_client_launcher(res: &std::path::Path) {
+    let bundled = res.join("client-launcher.cjs");
+    let installed = client_dir().join("client-launcher.cjs");
+    let (Ok(b), Ok(i)) = (std::fs::metadata(&bundled), std::fs::metadata(&installed)) else { return };
+    let (Ok(bm), Ok(im)) = (b.modified(), i.modified()) else { return };
+    if bm <= im {
+        return;
+    }
+    let (Ok(new), Ok(old)) = (std::fs::read(&bundled), std::fs::read(&installed)) else { return };
+    if new == old {
+        return;
+    }
+    let tmp = installed.with_extension("cjs.new");
+    if std::fs::write(&tmp, &new).is_err() {
+        return;
+    }
+    if std::fs::rename(&tmp, &installed).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    let mut stop = Command::new("powershell.exe");
+    stop.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"name='node.exe'\" | Where-Object { $_.CommandLine -like '*NexusEmuClient*client-launcher.cjs*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        stop.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = stop.status();
+    // Wait for the old one to let go of the port, so this app starts the new
+    // launcher at once (the runner took about a minute to get round to it).
+    for _ in 0..20 {
+        if !launcher_running() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 fn start_launcher(app: &tauri::AppHandle) -> Option<Child> {
+    if let Ok(res) = app.path().resource_dir() {
+        refresh_client_launcher(&res);
+    }
     if launcher_running() {
         return None;
     }

@@ -1970,8 +1970,28 @@ function pickWritableCoreDir(retroarchPath) {
 // already laid out as dolphin-emu/Sys/... so it extracts straight in.
 const CORE_SYSTEM_FILES = {
   dolphin: { url: 'https://buildbot.libretro.com/assets/system/Dolphin.zip', marker: path.join('dolphin-emu', 'Sys', 'codehandler.bin') },
-  ppsspp: { url: 'https://buildbot.libretro.com/assets/system/PPSSPP.zip', marker: path.join('PPSSPP', 'installed') },
+  ppsspp: { url: 'https://buildbot.libretro.com/assets/system/PPSSPP.zip', marker: path.join('PPSSPP', 'installed'),
+    // libretro's pack has no VFPU tables (PPSSPP's exact sin/sqrt/... maths,
+    // "Error loading 'vfpu/vfpu_sin_lut8192.dat'"); the host serves them,
+    // packed from PPSSPP's official release.
+    extras: [{ hostFile: 'ppsspp-vfpu.zip', marker: path.join('PPSSPP', 'vfpu', 'vfpu_sin_lut8192.dat') }] },
 };
+
+// Extra system files the host serves (/api/emulator/core-system/<file>) into a system folder.
+async function ensureCoreSystemExtras(spec, systemDir) {
+  for (const x of (spec && spec.extras) || []) {
+    if (fs.existsSync(path.join(systemDir, x.marker))) continue;
+    let host = '';
+    try { host = fs.readFileSync(hostUrlFile, 'utf8').trim().replace(/\/+$/, ''); } catch { /* no host recorded */ }
+    if (!host) continue;
+    try {
+      const res = await fetch(`${host}/api/emulator/core-system/${x.hostFile}`, { signal: AbortSignal.timeout(120_000) });
+      if (!res.ok) continue;
+      ensureDirSync(systemDir);
+      await extractZip(Buffer.from(await res.arrayBuffer()), systemDir);
+    } catch (e) { console.error('[client-launcher] system extras:', e && e.message ? e.message : e); }
+  }
+}
 
 const DOLPHIN_GCPAD_INI = `[GCPad1]
 Device = Libretro/0/Joypad
@@ -2778,6 +2798,7 @@ async function ensureCoreSystemFiles(retroarchPath, coreId) {
   if (!spec) return { ok: true, detail: 'No system files needed' };
   const systemDir = path.join(path.dirname(retroarchPath), 'system');
   if (fs.existsSync(path.join(systemDir, spec.marker))) {
+    await ensureCoreSystemExtras(spec, systemDir);
     return { ok: true, installed: false, detail: 'System files already present' };
   }
   try {
@@ -2785,6 +2806,7 @@ async function ensureCoreSystemFiles(retroarchPath, coreId) {
     if (!res.ok) return { ok: false, detail: `System files download failed: HTTP ${res.status}` };
     ensureDirSync(systemDir);
     await extractZip(Buffer.from(await res.arrayBuffer()), systemDir);
+    await ensureCoreSystemExtras(spec, systemDir);
     const ok = fs.existsSync(path.join(systemDir, spec.marker));
     return ok
       ? { ok: true, installed: true, detail: 'System files installed' }
@@ -3253,6 +3275,24 @@ function findInIndex(entries, gameId, normalizedTitle) {
 // what lets an existing local ROM get found and launched directly instead of
 // Nexus downloading a duplicate copy from the host every time.
 const CLOUD_ROOT = /nexus-cloud-media|google ?drive|[\\/]my drive([\\/]|$)/i;
+// True when a big file reads as zeros at its start, middle and end: a
+// torrent's pre-allocated placeholder, not a game yet (three 64 KB reads).
+async function isEmptyPlaceholder(file) {
+  let fh = null;
+  try {
+    const { size } = await fs.promises.stat(file);
+    if (size < 1024 * 1024) return false;
+    fh = await fs.promises.open(file, 'r');
+    const buf = Buffer.alloc(65536);
+    for (const frac of [0, 0.5, 0.999]) {
+      const at = Math.max(0, Math.floor(size * frac) - buf.length);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, at);
+      for (let i = 0; i < bytesRead; i += 64) if (buf[i] !== 0) return false;
+    }
+    return true;
+  } catch { return false; } finally { if (fh) await fh.close().catch(() => {}); }
+}
+
 async function findRomAnywhere(cfg, gameId, title, platform, relativePath) {
   const safeName = sanitizeName(title);
   // Fast path: exact match in the conventional <romDir>/<platform> folder —
@@ -3978,9 +4018,51 @@ function installedRetroArch() {
 
 // A core for the engine: from RetroArch's cores when present, otherwise the
 // host's mirror or libretro's buildbot (coreDownloadUrls), into engine/cores.
+// Which build each engine core is (sha256 of the host's zip) and when the
+// host was last asked. A core once on the PC was never replaced, so SaveState's
+// own builds never reached PCs that already had libretro's copy.
+const coreSourcesFile = () => path.join(engineCoresDir, 'core-sources.json');
+function readCoreSources() { try { return JSON.parse(fs.readFileSync(coreSourcesFile(), 'utf8')) || {}; } catch { return {}; } }
+function writeCoreSources(s) { try { fs.writeFileSync(coreSourcesFile(), JSON.stringify(s, null, 2)); } catch { /* next time */ } }
+
+// At most every 6 hours per core: when the host has its own build of this core
+// and it differs from the copy here, the new one is fetched, checked and swapped
+// in (not while a running game has the core loaded: then next time).
+async function refreshEngineCore(coreId, file) {
+  const sources = readCoreSources();
+  const rec = sources[coreId] || {};
+  if (Date.now() - (rec.checkedAt || 0) < 6 * 3600_000) return;
+  const url = coreDownloadUrls(coreId).find((u) => u.includes('/api/emulator/native-core/'));
+  if (!url) return;
+  rec.checkedAt = Date.now(); sources[coreId] = rec; writeCoreSources(sources);
+  const head = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(5000) }).catch(() => null);
+  const sha = head && head.ok && head.headers.get('x-nexus-core-source') === 'savestate-build' ? head.headers.get('x-nexus-core-sha256') : null;
+  if (!sha || sha === rec.sha256) return;
+  const res = await fetch(url, { signal: AbortSignal.timeout(120_000) }).catch(() => null);
+  if (!res || !res.ok) return;
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (crypto.createHash('sha256').update(buf).digest('hex') !== sha) return;
+  const tmp = path.join(engineCoresDir, `.new-${coreId}`);
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true }); ensureDirSync(tmp);
+    await extractZip(buf, tmp);
+    const fresh = path.join(tmp, path.basename(file));
+    if (!fs.existsSync(fresh)) return;
+    fs.renameSync(fresh, file);
+    const s = readCoreSources(); s[coreId] = { ...(s[coreId] || {}), sha256: sha, checkedAt: Date.now(), updatedAt: new Date().toISOString() }; writeCoreSources(s);
+    console.log(`[engine] ${coreId} core updated to the host's own build`);
+  } catch (e) {
+    // EBUSY/EPERM: a game has it open. Ask again next time.
+    const s = readCoreSources(); if (s[coreId]) { s[coreId].checkedAt = 0; writeCoreSources(s); }
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+
 async function ensureEngineCore(coreId) {
   const file = path.join(engineCoresDir, `${coreId}_libretro${CORE_EXT}`);
-  if (fs.existsSync(file)) return { ok: true, path: file };
+  if (fs.existsSync(file)) {
+    await refreshEngineCore(coreId, file).catch(() => {});
+    return { ok: true, path: file };
+  }
   ensureDirSync(engineCoresDir);
   const ra = installedRetroArch();
   const local = ra ? firstExisting(getCoreDirs(ra).map((d) => path.join(d, `${coreId}_libretro${CORE_EXT}`))) : null;
@@ -3995,7 +4077,11 @@ async function ensureEngineCore(coreId) {
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length < 4096) { last = 'not a core'; continue; }
       await extractZip(buf, engineCoresDir);
-      if (fs.existsSync(file)) return { ok: true, path: file, from: url.includes('/api/emulator/native-core/') ? 'host' : 'buildbot' };
+      if (fs.existsSync(file)) {
+        const sha = res.headers.get('x-nexus-core-source') === 'savestate-build' ? res.headers.get('x-nexus-core-sha256') : null;
+        const s = readCoreSources(); s[coreId] = { sha256: sha || null, checkedAt: Date.now(), updatedAt: new Date().toISOString() }; writeCoreSources(s);
+        return { ok: true, path: file, from: url.includes('/api/emulator/native-core/') ? 'host' : 'buildbot' };
+      }
       last = 'the download had no core in it';
     } catch (e) { last = e && e.message ? e.message : String(e); }
   }
@@ -4022,6 +4108,7 @@ async function ensureEngineSystemFiles(coreId) {
       } catch (e) { console.error('[engine] system files:', e && e.message ? e.message : e); }
     }
   }
+  if (spec) await ensureCoreSystemExtras(spec, engineSystemDir);
   const cfg = loadConfig();
   for (const dir of [raSystem, path.join(cfg.emulationRoot || clientRoot, 'bios')]) {
     if (!dir || !fs.existsSync(dir)) continue;
@@ -4323,6 +4410,12 @@ async function handleLaunch(body, origin) {
   let romFile = mirroredValid
     ? mirroredFile
     : await findRomAnywhere(cfg, gameId, title, platform, relativePath);
+
+  // A disc a torrent hasn't filled in yet is full size but all zeros: the
+  // emulator then fails with something cryptic. Say what it is instead.
+  if (romFile && await isEmptyPlaceholder(romFile)) {
+    return { status: 409, json: { success: false, code: 'still_downloading', error: `${title || path.basename(romFile)} hasn't finished downloading yet: its file is still empty. It plays once the download completes.` } };
+  }
 
   // A game kept as a folder (PS3) plays only when the whole folder is here.
   lap('found');
@@ -4971,6 +5064,10 @@ function startEmbeddedLauncher(opts = {}) {
           }
           downloadProgress.delete(key);
           send({ success: true, cached: true, alreadyExisted: false, file: ebootOf(folderRoot), romDirectory: folderRoot });
+          return;
+        }
+        if (existing && await isEmptyPlaceholder(existing)) {
+          send({ success: false, code: 'still_downloading', error: `${body.title || path.basename(existing)} hasn't finished downloading yet: its file is still empty. It plays once the download completes.` }, 409);
           return;
         }
         if (existing) {

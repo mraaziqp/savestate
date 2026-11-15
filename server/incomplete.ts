@@ -28,7 +28,16 @@ foreach ($root in $env:NX_ROOTS.Split([char]10)) {
   }
 }`;
 
-export function createIncompleteFiles(deps: { roots: () => Promise<string[]>; log: (level: string, msg: string) => void; hold?: () => boolean }) {
+export function createIncompleteFiles(deps: {
+  roots: () => Promise<string[]>; log: (level: string, msg: string) => void; hold?: () => boolean;
+  /**
+   * Files a torrent client says are not finished. A client that writes each
+   * file out in full first (zeros, not sparse: the BitTorrent app did that
+   * to the Dreamcast set) leaves nothing the sparse check can see, so 425
+   * empty discs listed as games and failed to start.
+   */
+  torrentFiles?: () => Promise<Incomplete[]>;
+}) {
   let byPath = new Map<string, Incomplete>();
   let scannedAt = 0;
   let running: Promise<void> | null = null;
@@ -39,7 +48,11 @@ export function createIncompleteFiles(deps: { roots: () => Promise<string[]>; lo
       const roots = [...new Set((await deps.roots().catch(() => [])).filter(Boolean))];
       // Folders on Google Drive are never half-downloaded torrents.
       const local = roots.filter((r) => /^[A-Za-z]:[\\/]/.test(r) && !/nexus-cloud-media|My Drive/i.test(r));
-      if (!local.length) { byPath = new Map(); scannedAt = Date.now(); return; }
+      const fromTorrents = await (deps.torrentFiles?.() ?? Promise.resolve([] as Incomplete[])).catch(() => [] as Incomplete[]);
+      if (!local.length) {
+        byPath = new Map(fromTorrents.map((f) => [path.resolve(f.path).toLowerCase(), f]));
+        scannedAt = Date.now(); return;
+      }
       const out = await new Promise<string>((resolve) => {
         execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", SCRIPT],
           { windowsHide: true, timeout: 5 * 60_000, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, NX_ROOTS: local.join("\n") } },
@@ -51,6 +64,10 @@ export function createIncompleteFiles(deps: { roots: () => Promise<string[]>; lo
         if (!p || !size) continue;
         const s = Number(size), o = Number(onDisk);
         if (s > 0) next.set(path.resolve(p).toLowerCase(), { path: p, size: s, onDisk: o, share: o / s });
+      }
+      for (const f of fromTorrents) {
+        const k = path.resolve(f.path).toLowerCase();
+        if (!next.has(k)) next.set(k, f);
       }
       if (next.size !== byPath.size) deps.log("INFO", `${next.size} file(s) still downloading in the game folders`);
       byPath = next;

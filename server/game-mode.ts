@@ -7,8 +7,17 @@
  *     so streams to other people keep going but never win against the game;
  *   - holds back background work (library scans, artwork, compression,
  *     wanted-retries; callers ask `active()` before starting);
- *   - switches qBittorrent to its alternative speed limits.
+ *   - switches qBittorrent to its alternative speed limits;
+ *   - stops the AI model server (Ollama: 4-6 GB of the graphics card's memory)
+ *     and keeps it off until the game ends (server/model-server.ts);
+ *   - drops the helper apps (qBittorrent, Sonarr, Radarr, Prowlarr,
+ *     FlareSolverr, rclone) to idle priority, and Drive for Desktop and
+ *     Jarvis's ffmpeg to below-normal.
  * Everything is put back a little after the game exits.
+ *
+ * A game played through SaveState's own engine counts too: its picture shows
+ * inside the SaveState app, so the window in front is the app, not a game;
+ * the engine running is what tells.
  *
  * Detection (Windows): one small PowerShell helper stays running and reports
  * the foreground window's process and the shell's "a full-screen Direct3D app
@@ -26,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
+import type { ModelServer } from "./model-server.ts";
 
 export type GameModeDeps = {
   persistDir: string;
@@ -35,6 +45,8 @@ export type GameModeDeps = {
   gpuLoad: () => number;
   /** Turn qBittorrent's alternative speed limits on or off; resolves false when it is not reachable. */
   throttleTorrents?: (on: boolean) => Promise<boolean>;
+  /** The AI model server, held off during games. */
+  model?: ModelServer;
   /** Tell signed-in admins (SSE). */
   announce?: (state: GameModeStatus) => void;
   log: (level: string, msg: string) => void;
@@ -93,7 +105,10 @@ while ($true) {
     $p = Get-Process -Id $fgPid
     if ($p) { $name = $p.ProcessName; $exe = $p.Path }
   }
-  [Console]::Out.WriteLine(('{0}|{1}|{2}|{3}' -f $state, $fgPid, $name, $exe))
+  # SaveState's engine plays inside the app's window: running is what counts.
+  $eng = Get-Process -Name 'savestate-engine' -ErrorAction SilentlyContinue | Select-Object -First 1
+  $engPid = if ($eng) { $eng.Id } else { 0 }
+  [Console]::Out.WriteLine(('{0}|{1}|{2}|{4}|{3}' -f $state, $fgPid, $name, $exe, $engPid))
   Start-Sleep -Seconds 5
 }
 `;
@@ -136,6 +151,7 @@ export function createGameMode(deps: GameModeDeps) {
       deps.log("INFO", "Game mode: torrents back to full speed (slowed for a game before the server restarted)");
     }, 90_000).unref?.();
   }).catch(() => {});
+  setTimeout(() => { if (!active) void deps.model?.hold("a game", false).catch(() => {}); }, 90_000).unref?.();
   let helper: ChildProcess | null = null;
   let helperBackoff = 5_000;
   let goneAt = 0;
@@ -180,9 +196,19 @@ export function createGameMode(deps: GameModeDeps) {
     // ffmpeg and rclone uploads started from now on inherit a below-normal class from this
     // process; the ones already running are changed here.
     const cls = low ? "BelowNormal" : "Normal";
-    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
-      `Get-CimInstance Win32_Process -Filter "ParentProcessId=${process.pid}" | Where-Object { $_.Name -match '^(ffmpeg|ffprobe|rclone)' } | ForEach-Object { try { (Get-Process -Id $_.ProcessId).PriorityClass = '${cls}' } catch {} }`],
-      { windowsHide: true, timeout: 20_000 }, () => {});
+    // The helper apps go to idle (their disk access drops to background
+    // priority too); Drive for Desktop serves the library to people watching,
+    // so it and Jarvis's camera ffmpeg only go to below-normal. A SaveState
+    // engine game is raised a step instead.
+    const idle = low ? "Idle" : "Normal";
+    const engine = low ? "AboveNormal" : "Normal";
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", [
+      `Get-CimInstance Win32_Process -Filter "ParentProcessId=${process.pid}" | Where-Object { $_.Name -match '^(ffmpeg|ffprobe|rclone)' } | ForEach-Object { try { (Get-Process -Id $_.ProcessId).PriorityClass = '${cls}' } catch {} }`,
+      `Get-Process -Name qbittorrent,Sonarr,Sonarr.Console,Radarr,Radarr.Console,Prowlarr,Prowlarr.Console,flaresolverr,rclone -ErrorAction SilentlyContinue | ForEach-Object { try { $_.PriorityClass = '${idle}' } catch {} }`,
+      `Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*FlareSolverr*' } | ForEach-Object { try { $_.PriorityClass = '${idle}' } catch {} }`,
+      `Get-Process -Name GoogleDriveFS,ffmpeg -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'GoogleDriveFS' -or $_.Path -like '*JarvisDevice*' } | ForEach-Object { try { $_.PriorityClass = '${cls}' } catch {} }`,
+      `Get-Process -Name savestate-engine -ErrorAction SilentlyContinue | ForEach-Object { try { $_.PriorityClass = '${engine}' } catch {} }`,
+    ].join("; ")], { windowsHide: true, timeout: 30_000 }, () => {});
   }
 
   async function apply(next: boolean, why: string) {
@@ -190,6 +216,7 @@ export function createGameMode(deps: GameModeDeps) {
     active = next;
     since = next ? Date.now() : null;
     setPriorities(next);
+    if (deps.model) void deps.model.hold("a game", next).catch(() => {});
     if (deps.throttleTorrents) {
       // Only undo a throttle this module applied, never one the owner set by hand.
       if (next) { if (!torrentsThrottled) setThrottled(await deps.throttleTorrents(true).catch(() => false)); }
@@ -199,7 +226,7 @@ export function createGameMode(deps: GameModeDeps) {
     deps.announce?.(status());
   }
 
-  function onTick(state: number, pid: number, name: string, exe: string) {
+  function onTick(state: number, pid: number, name: string, exe: string, enginePid = 0) {
     foreground = name || null;
     if (setting !== "auto") return;
     if (game && !alive(game.pid)) {
@@ -218,6 +245,10 @@ export function createGameMode(deps: GameModeDeps) {
       game = { pid, name: exe ? path.win32.basename(exe, ".exe") : name, reason };
       goneAt = 0;
       void apply(true, `${game.name} (${reason})`);
+    } else if (!reason && enginePid && !game) {
+      game = { pid: enginePid, name: "SaveState game", reason: "SaveState engine" };
+      goneAt = 0;
+      void apply(true, "a SaveState game (engine running)");
     }
   }
 
@@ -237,10 +268,10 @@ export function createGameMode(deps: GameModeDeps) {
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i).trim();
         buf = buf.slice(i + 1);
-        const [state, pid, name, ...exe] = line.split("|");
+        const [state, pid, name, engine, ...exe] = line.split("|");
         if (!/^\d+$/.test(state ?? "")) continue;
         if (++lines === 1) helperBackoff = 5_000;
-        try { onTick(Number(state), Number(pid) || 0, name ?? "", exe.join("|")); } catch { /* never kill the reader */ }
+        try { onTick(Number(state), Number(pid) || 0, name ?? "", exe.join("|"), Number(engine) || 0); } catch { /* never kill the reader */ }
       }
     });
     const ended = () => {

@@ -43,6 +43,7 @@ import { createPerf } from "./server/perf.ts";
 import { installDnsCache } from "./server/dns-cache.ts";
 import { createServing } from "./server/serving.ts";
 import { createPauseAll } from "./server/pause-all.ts";
+import { createModelServer } from "./server/model-server.ts";
 import { registerLibraryManagerApi } from "./server/library-manager.ts";
 import { registerRemoteControl } from "./server/remote-control.ts";
 import { getBackupCentre } from "./server/backup-centre.ts";
@@ -6142,6 +6143,9 @@ async function startServer() {
     // JWT here would simply push every device back to the external dependency
     // this route exists to remove. Nothing user-specific is exposed.
     "/api/emulator/native-core/",
+    // Free data files emulator cores need beside them (PPSSPP's VFPU tables,
+    // from its official release): releases/cores/system. Never BIOS or keys.
+    "/api/emulator/core-system/",
     "/api/downloads/",    // APK / installer downloads — public so any device can get the app
     "/api/webhooks/arr",        // called by Sonarr/Radarr; authenticated by shared secret, not JWT
     "/api/minigames/publish",   // the agent builder; authenticated by a publish key, not JWT (server/minigames.ts)
@@ -6342,8 +6346,16 @@ async function startServer() {
     log: (level, msg) => log(level, msg, "downloads"),
   }).register(app);
 
+  // The AI model server (Ollama), held off by pause all and during games.
+  const modelServer = createModelServer({
+    persistDir: PERSIST_DIR,
+    ollamaUrl: process.env.OLLAMA_URL?.trim() || "http://127.0.0.1:11434",
+    agentBuilderDir,
+    log: (level, msg) => log(level, msg, "system"),
+  });
   // Steps aside while a game runs on this PC (server/game-mode.ts).
   const gameMode = createGameMode({
+    model: modelServer,
     persistDir: PERSIST_DIR,
     pcGameDirs: () => pcGamesCache.map((g) => g.installDir ?? "").filter(Boolean),
     gpuLoad: () => { gpuLoadWantedAt = Date.now(); return gpuLoadCache; },
@@ -6375,8 +6387,7 @@ async function startServer() {
     persistDir: PERSIST_DIR,
     isAdmin: async (req) => (await access.callerOf(req)).admin,
     qbt: () => qbtAuthed(),
-    ollamaUrl: process.env.OLLAMA_URL?.trim() || "http://127.0.0.1:11434",
-    agentBuilderDir,
+    model: modelServer,
     changed: () => { try { drives.nudge(); } catch { /* not started yet: its own timer catches up */ } },
     log: (level, msg) => log(level, msg, "system"),
     // While paused, the NAS serves the site (when it's up), so this PC does no work for visitors.
@@ -6511,7 +6522,31 @@ async function startServer() {
         "E:\\Downloads"
       ];
     },
-    log: (level, msg) => log(level, msg, "incomplete")
+    log: (level, msg) => log(level, msg, "incomplete"),
+    // qBittorrent's own per-file progress: unfinished files of unfinished torrents.
+    torrentFiles: async () => {
+      const q = await qbtAuthed().catch(() => null);
+      if (!q) return [];
+      const headers = { Cookie: q.cookie, Referer: q.host };
+      const list = (await fetch(`${q.host}/api/v2/torrents/info?filter=downloading`, { headers, signal: AbortSignal.timeout(10_000) })
+        .then((r) => r.json()).catch(() => [])) as Array<{ hash: string; progress: number; save_path: string; state: string }>;
+      const all = (await fetch(`${q.host}/api/v2/torrents/info`, { headers, signal: AbortSignal.timeout(10_000) })
+        .then((r) => r.json()).catch(() => [])) as typeof list;
+      // Not while a torrent is being checked: files it hasn't reached yet read
+      // 0% then (1,400 good Dreamcast discs would vanish from Games for hours).
+      const open = [...new Map([...list, ...all.filter((t) => t.progress < 1)].map((t) => [t.hash, t])).values()]
+        .filter((t) => !/^(checking|metaDL|forcedMetaDL|missingFiles|error)/i.test(t.state));
+      const out: Array<{ path: string; size: number; onDisk: number; share: number }> = [];
+      for (const t of open) {
+        const files = (await fetch(`${q.host}/api/v2/torrents/files?hash=${t.hash}`, { headers, signal: AbortSignal.timeout(20_000) })
+          .then((r) => r.json()).catch(() => [])) as Array<{ name: string; size: number; progress: number; priority: number }>;
+        for (const f of files) {
+          if (f.priority === 0 || f.progress >= 1 || !f.size) continue;
+          out.push({ path: path.join(t.save_path, f.name), size: f.size, onDisk: Math.round(f.size * f.progress), share: f.progress });
+        }
+      }
+      return out;
+    },
   });
   globalIncompleteFiles = incompleteFiles;
 
@@ -15006,6 +15041,9 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // Every 30 minutes: removed from the download client with their files,
   // blocklisted so the same release is never grabbed again, and searched for.
   const FAKE_RELEASE = /executable file|No files found are eligible for import|\.(exe|scr|lnk|bat|cmd|msi|com|pif|vbs)\b/i;
+  // A "video" that arrives as a disc image or a program (The Simpsons S38E06
+  // came as an .iso: "Unable to determine if file is a sample").
+  const FAKE_PATH = /\.(iso|exe|scr|lnk|bat|cmd|msi|com|pif|vbs)$/i;
   async function clearFakeReleases(): Promise<string[]> {
     const cfg = await loadArrConfig();
     const done: string[] = [];
@@ -15024,9 +15062,24 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
         const t = await r.text();
         return t ? JSON.parse(t) : null;
       };
-      const q = await call("GET", "/queue?pageSize=500").catch(() => null);
-      const fakes = (q?.records ?? []).filter((r: any) => (r.trackedDownloadState === "importPending" || r.trackedDownloadState === "importBlocked")
-        && FAKE_RELEASE.test([r.errorMessage, ...(r.statusMessages ?? []).flatMap((m: any) => [m.title, ...(m.messages ?? [])])].join(" ")));
+      const q = await call("GET", `/queue?pageSize=500&${app.name === "Sonarr" ? "includeEpisode" : "includeMovie"}=true`).catch(() => null);
+      const stuck = (q?.records ?? []).filter((r: any) => r.trackedDownloadState === "importPending" || r.trackedDownloadState === "importBlocked");
+      const fakes = stuck.filter((r: any) => FAKE_PATH.test(String(r.outputPath ?? ""))
+        || FAKE_RELEASE.test([r.errorMessage, ...(r.statusMessages ?? []).flatMap((m: any) => [m.title, ...(m.messages ?? [])])].join(" ")));
+      // Leftovers: a season pack whose episodes were imported long ago stays
+      // "blocked" in the queue for good (already imported, or not an upgrade).
+      // Only the queue entry goes; the download and its files are left alone.
+      // Sonarr lists a pack once per episode, and clearing one entry clears the
+      // whole download: only when every episode in it is in the library.
+      const settled = (r: any) => !fakes.includes(r) && (r.episode?.hasFile || r.movie?.hasFile)
+        && (r.statusMessages ?? []).flatMap((m: any) => m.messages ?? []).every((m: string) => /already imported|not an upgrade|not a quality revision upgrade|single episode file contains all episodes/i.test(m));
+      const byDownload = new Map<string, any[]>();
+      for (const r of q?.records ?? []) { const k = String(r.downloadId ?? r.id); byDownload.set(k, [...(byDownload.get(k) ?? []), r]); }
+      for (const group of byDownload.values()) {
+        if (!group.every((r) => stuck.includes(r) && settled(r))) continue;
+        const ok = await call("DELETE", `/queue/${group[0].id}?removeFromClient=false&blocklist=false&skipRedownload=true`).then(() => true, () => false);
+        if (ok) done.push(`${app.name}: "${group[0].title}" is already in the library (queue entry cleared)`);
+      }
       const again: number[] = [];
       for (const r of fakes) {
         const ok = await call("DELETE", `/queue/${r.id}?removeFromClient=true&blocklist=true&skipRedownload=true`).then(() => true, () => false);
@@ -15035,7 +15088,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       }
       if (again.length) await call("POST", "/command", { name: app.cmd, [app.ids]: [...new Set(again)] }).catch(() => {});
     }
-    if (done.length) log("WARN", `Fake releases: ${done.join("; ")}`, "arr");
+    if (done.length) log("WARN", `Download queue: ${done.join("; ")}`, "arr");
     return done;
   }
   setInterval(() => { if (!holdBackground()) void clearFakeReleases().catch(() => {}); }, 30 * 60_000).unref?.();
@@ -20796,6 +20849,18 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   const NATIVE_CORE_DIR = path.join(EJS_CACHE_DIR, "native-cores");
   const nativeCoreInFlight = new Map<string, Promise<Buffer>>();
 
+  // Data files a core needs beside it that libretro's system packs lack
+  // (PPSSPP's VFPU tables), packed from the emulator's official release.
+  app.get("/api/emulator/core-system/:file", async (req, res) => {
+    const file = String(req.params.file ?? "");
+    if (!/^[a-z0-9][a-z0-9_-]*\.zip$/i.test(file)) return res.status(400).json({ error: "Invalid file" });
+    const p = path.join(process.cwd(), "releases", "cores", "system", file);
+    try { await fsAccess(p); } catch { return res.status(404).json({ error: "Not found" }); }
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    return res.sendFile(p);
+  });
+
   app.get("/api/emulator/native-core/:os/:arch/:file", async (req, res) => {
     const { os: coreOs, arch, file } = req.params as Record<string, string>;
     // Whitelist every component — these compose into an upstream URL and a
@@ -20813,6 +20878,11 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
       await fsAccess(ownBuild);
       res.setHeader("Content-Type", "application/zip");
       res.setHeader("X-Nexus-Core-Source", "savestate-build");
+      // Launchers compare this with the copy they have and update to a new build.
+      const sha = await readFile(path.join(path.dirname(ownBuild), "cores.json"), "utf8")
+        .then((t) => Object.values(JSON.parse(t) as Record<string, { file?: string; sha256?: string }>).find((c) => c.file === file)?.sha256)
+        .catch(() => undefined);
+      if (sha && /^[0-9a-f]{64}$/.test(sha)) res.setHeader("X-Nexus-Core-Sha256", sha);
       return res.sendFile(ownBuild);
     } catch { /* none of our own: the mirror below */ }
 
