@@ -79,11 +79,15 @@ export function createModelServer(deps: {
     return true;
   }
 
+  // "stoppedHere" stays set until the server is really back: a game that
+  // starts again while it is coming back (several in a row) must not make
+  // SaveState forget that it owes the restart (it did, 2026-11-15).
+  const backUp = async () => { stoppedHere = false; await save(); deps.log("INFO", "AI model server is back"); };
   async function startNow() {
     // The Agent Builder's launcher brings it back once the hold is gone; when
     // nothing does within 40 s, it is started here, set up as its Host Manager does.
-    for (let i = 0; i < 8; i++) { if (await ollamaUp()) return; await new Promise((r) => setTimeout(r, 5000)); }
-    if (reasons.size) return; // held again meanwhile
+    for (let i = 0; i < 8; i++) { if (await ollamaUp()) return backUp(); await new Promise((r) => setTimeout(r, 5000)); }
+    if (reasons.size) return; // held again meanwhile: started when that lets go
     const exe = [path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Ollama", "ollama.exe"), "C:\\Program Files\\Ollama\\ollama.exe"].find((p) => existsSync(p));
     if (!exe) return;
     const child = spawn(exe, ["serve"], {
@@ -91,6 +95,8 @@ export function createModelServer(deps: {
       env: { ...(await cleanEnv()), OLLAMA_CONTEXT_LENGTH: process.env.OLLAMA_NUM_CTX || "16384", OLLAMA_FLASH_ATTENTION: "1", OLLAMA_KV_CACHE_TYPE: "q8_0", OLLAMA_MAX_LOADED_MODELS: "1" },
     });
     child.unref();
+    for (let i = 0; i < 12; i++) { await new Promise((r) => setTimeout(r, 5000)); if (await ollamaUp()) return backUp(); }
+    deps.log("WARN", "AI model server did not come back; it is started again next time a game ends");
   }
 
   let busy: Promise<unknown> = Promise.resolve();
@@ -117,12 +123,15 @@ export function createModelServer(deps: {
       let started = false;
       if (!reasons.size) {
         await setHold(false);
-        if (stoppedHere) { stoppedHere = false; started = true; void startNow().catch(() => {}); deps.log("INFO", "AI model server starting again"); }
+        if (stoppedHere) { started = true; void startNow().catch(() => {}); deps.log("INFO", "AI model server starting again"); }
       } else await setHold(true);
       await save();
       return started;
     });
   }
+
+  // A restart still owed from before this server started (killed mid-game).
+  setTimeout(() => { void loaded.then(() => { if (!reasons.size && stoppedHere) void startNow().catch(() => {}); }); }, 60_000).unref?.();
 
   // Something may start it while held (a tray app, a manual start).
   setInterval(() => {
