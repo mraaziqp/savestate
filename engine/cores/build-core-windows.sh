@@ -11,6 +11,9 @@
 set -u
 # MSYS2's login shell has its own PATH: Node.js (for cores.json) is added.
 export PATH="$PATH:/c/Program Files/nodejs"
+# CMake reads the CPU from this on Windows; MSYS2's login shell drops it, and
+# then PPSSPP's cpu_features stops with "Unsupported architectures".
+export PROCESSOR_ARCHITECTURE="${PROCESSOR_ARCHITECTURE:-AMD64}"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 SRC=/g/Projects/savestate-cores-win
 # CORES_OUT: build somewhere else first (a staging folder) and publish a core
@@ -32,10 +35,11 @@ spec() {
     gambatte)        echo "https://github.com/libretro/gambatte-libretro.git|.|make platform=win|gambatte_libretro.dll" ;;
     stella)          echo "https://github.com/stella-emu/stella.git|src/os/libretro|make platform=win|stella_libretro.dll" ;;
     fbneo)           echo "https://github.com/libretro/FBNeo.git|src/burner/libretro|make platform=win|fbneo_libretro.dll" ;;
-    # The libretro makefile: mGBA's CMake build insists on libepoxy on Windows.
-    mgba)            echo "https://github.com/libretro/mgba.git|.|make -f Makefile.libretro platform=win|mgba_libretro.dll" ;;
+    # SKIP_LIBRARY: only the libretro core. The full library insists on
+    # libepoxy on Windows ("Windows requires epoxy module!"); the core doesn't.
+    mgba)            echo "https://github.com/libretro/mgba.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRETRO=ON -DSKIP_LIBRARY=ON -DBUILD_QT=OFF -DBUILD_SDL=OFF -DUSE_EPOXY=OFF -DBUILD_GL=OFF -DBUILD_GLES2=OFF -DBUILD_GLES3=OFF -DUSE_FFMPEG=OFF -DUSE_SQLITE3=OFF -DUSE_ELF=OFF -DUSE_DISCORD_RPC=OFF -DUSE_LUA=OFF -DUSE_JSON_C=OFF -DUSE_EDITLINE=OFF -DUSE_LIBZIP=OFF -DUSE_PNG=OFF -DUSE_ZLIB=OFF -DCMAKE_SHARED_LINKER_FLAGS='-static -static-libgcc -static-libstdc++' && cmake --build build-win --target mgba_libretro -j JOBS|build-win/mgba_libretro.dll" ;;
     mupen64plus_next) echo "https://github.com/libretro/mupen64plus-libretro-nx.git|.|make platform=win|mupen64plus_next_libretro.dll" ;;
-    ppsspp)          echo "https://github.com/hrydgard/ppsspp.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DLIBRETRO=ON && cmake --build build-win --target ppsspp_libretro -j JOBS|build-win/lib/ppsspp_libretro.dll" ;;
+    ppsspp)          echo "https://github.com/hrydgard/ppsspp.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_PROCESSOR=x86_64 -DLIBRETRO=ON -DCMAKE_SHARED_LINKER_FLAGS=-static && cmake --build build-win --target ppsspp_libretro -j JOBS|build-win/lib/ppsspp_libretro.dll" ;;
     flycast)         echo "https://github.com/flyinghead/flycast.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release -DLIBRETRO=ON -DUSE_HOST_LIBZIP=OFF -DUSE_LUA=OFF -DUSE_BREAKPAD=OFF && cmake --build build-win --target flycast_libretro -j JOBS|build-win/flycast_libretro.dll" ;;
     melondsds)       echo "https://github.com/JesseTG/melonds-ds.git|.|cmake -G Ninja -B build-win -DCMAKE_BUILD_TYPE=Release && cmake --build build-win -j JOBS|build-win/src/libretro/melondsds_libretro.dll" ;;
     *) return 1 ;;

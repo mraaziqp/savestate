@@ -1006,14 +1006,20 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   // Windows needs no Docker any more (scripts/install-host.ps1 brings its own
   // database), so it comes first; Docker stays for Linux and NAS boxes.
   // (Skipped once the button below has replaced it, or its anchor is gone.)
-  if (!bh.includes('linkLabel:"Download SaveState Host"')) bh = patch(bh, "host setup windows first", 'title:"Windows: one command"',
+  if (!bh.includes('linkLabel:"Download SaveState Host"') && !bh.includes('title:"Windows: one button in the app"')) bh = patch(bh, "host setup windows first", 'title:"Windows: one command"',
     /title:"Install Docker",desc:"[^"]*",link:"https:\/\/docs\.docker\.com\/get-docker\/",linkLabel:"docker\.com"\}/,
     'title:"Windows: one command",desc:"Open PowerShell (Start menu, type PowerShell), paste this and press Enter. It installs everything SaveState needs, asks for your folders and opens SaveState. No Docker and no admin rights. Run it again to update.",cmd:"irm https://savestate.co.za/install-host.ps1 | iex"}');
   // A button, not a command (2026-11-09): people download and double-click.
-  bh = patch(bh, "host setup windows button", 'linkLabel:"Download SaveState Host"',
+  const inApp = bh.includes('title:"Windows: one button in the app"');
+  if (!inApp) bh = patch(bh, "host setup windows button", 'linkLabel:"Download SaveState Host"',
     /title:"Windows: one command",desc:"[^"]*",cmd:"irm https:\/\/savestate\.co\.za\/install-host\.ps1 \| iex"\}/,
     'title:"Windows: download and double-click",desc:"Run SaveState-Host.exe. It installs everything SaveState needs (no Docker, no admin rights), asks for your films, music and games folders, and opens SaveState. The Start menu then has Open, Update and Uninstall.",link:"/api/downloads/host-setup",linkLabel:"Download SaveState Host"}');
-  bh = patch(bh, "host setup file name", "Run SaveState-Host.exe.", "Run SaveState-Host-Setup.exe.", "Run SaveState-Host.exe.");
+  if (!inApp) bh = patch(bh, "host setup file name", "Run SaveState-Host.exe.", "Run SaveState-Host-Setup.exe.", "Run SaveState-Host.exe.");
+  // The one-button setup in the app replaces the download (2026-11-15: no
+  // file to download and run, just a button).
+  bh = patch(bh, "host setup windows in the app", 'title:"Windows: one button in the app"',
+    'title:"Windows: download and double-click",desc:"Run SaveState-Host.exe. It installs everything SaveState needs (no Docker, no admin rights), asks for your films, music and games folders, and opens SaveState. The Start menu then has Open, Update and Uninstall.",link:"/api/downloads/host-setup",linkLabel:"Download SaveState Host"}',
+    'title:"Windows: one button in the app",desc:"In the SaveState app, press \\u201cSet up this PC as a host\\u201d at the top of this page. It installs everything by itself (no commands, no admin rights), asks for your folders with Windows\\u2019 own folder windows, and tells you when it\\u2019s ready.",link:"/api/downloads/desktop?platform=windows",linkLabel:"Get the SaveState app"}');
   bh = patch(bh, "host setup linux step", 'title:"Linux or a NAS"',
     /title:"Run the installer",desc:"[^"]*",cmd:"curl -fsSL https:\/\/savestate\.co\.za\/install\.sh \| bash"\}/,
     'title:"Linux or a NAS",desc:"Needs Docker (most NAS boxes have it in their app centre). It asks for your folders and a port, then starts SaveState. Run it again to update.",cmd:"curl -fsSL https://savestate.co.za/install.sh | bash"}');

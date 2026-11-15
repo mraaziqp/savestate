@@ -14997,6 +14997,50 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     return done;
   }
   setInterval(() => { if (!holdBackground()) void retryWantedArr().catch(() => {}); }, 12 * 3600_000).unref?.();
+
+  // ── Fake releases ─────────────────────────────────────────────────────
+  // Some torrents named like an episode hold a program (.exe, .scr) or a disc
+  // image instead of video. Sonarr rightly won't import them, so they sat in
+  // the queue as "import pending" forever and the episode never came:
+  // VisionQuest had four of its eight episodes stuck like that (2026-11-15).
+  // Every 30 minutes: removed from the download client with their files,
+  // blocklisted so the same release is never grabbed again, and searched for.
+  const FAKE_RELEASE = /executable file|No files found are eligible for import|\.(exe|scr|lnk|bat|cmd|msi|com|pif|vbs)\b/i;
+  async function clearFakeReleases(): Promise<string[]> {
+    const cfg = await loadArrConfig();
+    const done: string[] = [];
+    if (!cfg) return done;
+    for (const app of [
+      { name: "Sonarr", base: cfg.sonarrUrl, key: cfg.sonarrApiKey, cmd: "EpisodeSearch", ids: "episodeIds", id: "episodeId" },
+      { name: "Radarr", base: cfg.radarrUrl, key: cfg.radarrApiKey, cmd: "MoviesSearch", ids: "movieIds", id: "movieId" },
+    ]) {
+      if (!app.base || !app.key) continue;
+      const call = async (method: string, p: string, body?: unknown) => {
+        const r = await fetch(`${String(app.base).replace(/\/$/, "")}/api/v3${p}`, {
+          method, headers: { "X-Api-Key": String(app.key), "Content-Type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000),
+        });
+        if (!r.ok) throw new Error(`${p} ${r.status}`);
+        const t = await r.text();
+        return t ? JSON.parse(t) : null;
+      };
+      const q = await call("GET", "/queue?pageSize=500").catch(() => null);
+      const fakes = (q?.records ?? []).filter((r: any) => (r.trackedDownloadState === "importPending" || r.trackedDownloadState === "importBlocked")
+        && FAKE_RELEASE.test([r.errorMessage, ...(r.statusMessages ?? []).flatMap((m: any) => [m.title, ...(m.messages ?? [])])].join(" ")));
+      const again: number[] = [];
+      for (const r of fakes) {
+        const ok = await call("DELETE", `/queue/${r.id}?removeFromClient=true&blocklist=true&skipRedownload=true`).then(() => true, () => false);
+        if (ok && r[app.id]) again.push(r[app.id]);
+        if (ok) done.push(`${app.name}: removed and blocklisted "${r.title}" (not a video)`);
+      }
+      if (again.length) await call("POST", "/command", { name: app.cmd, [app.ids]: [...new Set(again)] }).catch(() => {});
+    }
+    if (done.length) log("WARN", `Fake releases: ${done.join("; ")}`, "arr");
+    return done;
+  }
+  setInterval(() => { if (!holdBackground()) void clearFakeReleases().catch(() => {}); }, 30 * 60_000).unref?.();
+  setTimeout(() => { void clearFakeReleases().catch(() => {}); }, 5 * 60_000).unref?.();
+
   app.post("/api/arr/retry-wanted", async (req, res) => {
     const auth = requireAuthenticatedUser(req, res);
     if (!auth) return;

@@ -422,6 +422,71 @@ import "./savesync.js";
     } catch { /* not allowed here (no gesture, a desktop browser): leave it */ }
   };
 
+  // Full screen during a game turns a phone sideways by itself, and a Rotate
+  // button turns it (or back) with one tap. A browser refuses the turn at game
+  // start (no tap to answer), and the player's own full-screen button never
+  // asked: people had to switch on their phone's auto-rotate (2026-11-15).
+  const nxPhone = () => {
+    try { return matchMedia("(pointer: coarse)").matches && Math.min(screen.width, screen.height) < 820; } catch { return false; }
+  };
+  const nxGameOpen = () => !!(window.__nxGameOpen || document.querySelector("#ejs-game-container, .nxe"));
+  let nxWantPortrait = false;
+  const nxLock = async (mode) => {
+    try {
+      if (window.Capacitor?.isNativePlatform?.()) {
+        await window.Capacitor.nativePromise("NxAndroid", "orientation", { mode });
+        return true;
+      }
+    } catch { /* an older app: the browser's way below */ }
+    try {
+      if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+      }
+      await screen.orientation?.lock?.(mode);
+      return true;
+    } catch { return false; }
+  };
+  document.addEventListener("fullscreenchange", () => {
+    if (!nxPhone()) return;
+    try {
+      if (document.fullscreenElement && nxGameOpen()) screen.orientation?.lock?.(nxWantPortrait ? "portrait" : "landscape").catch(() => {});
+      else if (!document.fullscreenElement) { screen.orientation?.unlock?.(); nxWantPortrait = false; }
+    } catch { /* not supported */ }
+  });
+  let nxRotateBtn = null;
+  const nxRotateSync = () => {
+    const show = nxPhone() && nxGameOpen();
+    if (show && !nxRotateBtn) {
+      nxRotateBtn = document.createElement("button");
+      nxRotateBtn.type = "button";
+      nxRotateBtn.setAttribute("aria-label", "Rotate the game");
+      nxRotateBtn.textContent = "↻ Rotate";
+      // Below the player's own toolbar (title, save, pause, full screen, close).
+      nxRotateBtn.style.cssText = "position:fixed;top:calc(env(safe-area-inset-top,0px) + 68px);left:8px;z-index:2147483000;" +
+        "padding:5px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.22);background:rgba(10,12,28,.6);color:#fff;font:600 12px system-ui,sans-serif;" +
+        "backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);opacity:.8";
+      nxRotateBtn.addEventListener("click", async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const landscapeNow = (screen.orientation?.type ?? "").startsWith("landscape") || innerWidth > innerHeight;
+        nxWantPortrait = landscapeNow;
+        await nxLock(landscapeNow ? "portrait" : "landscape");
+      });
+      document.body.appendChild(nxRotateBtn);
+    } else if (!show && nxRotateBtn) {
+      nxRotateBtn.remove(); nxRotateBtn = null;
+    }
+    if (nxRotateBtn) {
+      // Sideways the toolbar's middle is empty (the pad's L button sits under
+      // it on the left); upright the toolbar is full, so just below it.
+      const wide = innerWidth > innerHeight;
+      const st = nxRotateBtn.style;
+      st.top = wide ? "calc(env(safe-area-inset-top,0px) + 10px)" : "calc(env(safe-area-inset-top,0px) + 68px)";
+      st.left = wide ? "50%" : "8px";
+      st.transform = wide ? "translateX(-50%)" : "none";
+    }
+  };
+  setInterval(nxRotateSync, 1000);
+
   // ── Controller navigation ───────────────────────────────────────────────
   // The shell's gamepad loop hands every press here first (build.mjs,
   // "controller navigation hook"); false leaves it to the shell (LB/RB switch
