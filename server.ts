@@ -44,6 +44,7 @@ import { installDnsCache } from "./server/dns-cache.ts";
 import { createServing } from "./server/serving.ts";
 import { createPauseAll } from "./server/pause-all.ts";
 import { createModelServer } from "./server/model-server.ts";
+import { watchFlareSolverr } from "./server/flaresolverr-watch.ts";
 import { registerLibraryManagerApi } from "./server/library-manager.ts";
 import { registerRemoteControl } from "./server/remote-control.ts";
 import { getBackupCentre } from "./server/backup-centre.ts";
@@ -11406,7 +11407,10 @@ async function startServer() {
       };
     } catch { return none; }
   }
-  app.get('/api/torrent/download-status', async (_req, res) => {
+  app.get('/api/torrent/download-status', async (req, res) => {
+    // The host's own downloads are no business of someone without access to
+    // the library: a brand-new account saw a "2" on Downloads (2026-11-16).
+    if (!(await access.callerOf(req).catch(() => null))?.media) return res.json({ ok: true, total: 0, downloads: [] });
     if (!dlStatus || Date.now() - dlStatus.at > 5_000) dlStatus = { at: Date.now(), body: readDownloadStatus() };
     return res.json(await dlStatus.body);
   });
@@ -15109,6 +15113,8 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   }
   setInterval(() => { if (!holdBackground()) void clearFakeReleases().catch(() => {}); }, 30 * 60_000).unref?.();
   setTimeout(() => { void clearFakeReleases().catch(() => {}); }, 5 * 60_000).unref?.();
+  // Restarts FlareSolverr when it stops answering (server/flaresolverr-watch.ts).
+  watchFlareSolverr({ hold: () => holdBackground(), log: (level, msg) => log(level, msg, "arr") });
 
   app.post("/api/arr/retry-wanted", async (req, res) => {
     const auth = requireAuthenticatedUser(req, res);

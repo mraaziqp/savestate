@@ -411,7 +411,7 @@ shell = patch(shell, "plans", `import(${APP}).then(t=>({default:t.PlansPage}))`,
 shell = patch(shell, "setup guide", `x==="emulation"&&(0,e.jsx)(NxSetup,{isAdmin:Pe("manage_system")})`,
   `x==="emulation"&&Pe("manage_system")&&(0,e.jsx)(Cl,{})`,
   `x==="emulation"&&(0,e.jsx)(NxSetup,{isAdmin:Pe("manage_system")})`);
-shell = patch(shell, "emulation is not admin-only", `"users","access","cloud"])`,
+shell = patch(shell, "emulation is not admin-only", `"users","access","cloud"`,
   `"users","access","emulation","cloud"])`, `"users","access","cloud"])`);
 
 // Cloud: the two-account Drive file manager and upload jobs, with the old
@@ -634,9 +634,20 @@ shell = patch(shell, "first-visit update notice", "__nxHadSW",
 // app (HostSetup.jsx; the launcher runs the installer and reports each step).
 // People read the whole page, scrolled for the setup, downloaded a file and
 // ran it (2026-11-12). The page's other sections stay below it.
-shell = patch(shell, "become a host one button", "x===\"become-host\"&&(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHostSetup,{})})",
+// Members saw an empty page under Connections (it is drawn for admins only):
+// the tab is an admin tab now.
+shell = patch(shell, "connections admin only", '"access","cloud","connections"])',
+  'Da=new Set(["activity","scanner","sync","vaults","forge","storage","hosthealth","settings","logs","users","access","cloud"])',
+  'Da=new Set(["activity","scanner","sync","vaults","forge","storage","hosthealth","settings","logs","users","access","cloud","connections"])');
+shell = patch(shell, "become a host one button","x===\"become-host\"&&(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHostSetup,{})})",
   'x==="become-host"&&(0,e.jsx)(il,{}),',
   'x==="become-host"&&(0,e.jsxs)(e.Fragment,{children:[(0,e.jsx)(s.Suspense,{fallback:null,children:(0,e.jsx)(NxHostSetup,{})}),(0,e.jsx)(il,{})]}),');
+// Under the one button, the old page repeated it all in technical terms
+// ("Make Me a Host", BYOC, LAN address, a three-tab guide). It folds away
+// under "More about hosting" for anyone curious (2026-11-16).
+shell = patch(shell, "become a host details", "More about hosting (for the technically curious)",
+  'children:(0,e.jsx)(NxHostSetup,{})}),(0,e.jsx)(il,{})]}),',
+  'children:(0,e.jsx)(NxHostSetup,{})}),(0,e.jsxs)("details",{style:{margin:"4px 24px 24px"},children:[(0,e.jsx)("summary",{style:{cursor:"pointer",color:"#94a3b8",fontSize:14,padding:"10px 0"},children:"More about hosting (for the technically curious)"}),(0,e.jsx)(il,{})]})]}),');
 
 // Nothing listens on 127.0.0.1:17374 any more (the PowerShell launcher that
 // used it is gone; the PC launcher and the app use 17373). Asking it anyway
@@ -769,6 +780,45 @@ for (const chunk of ["MediaHub-", "WatchParty-"]) {
   const before = mh;
   mh = patch(mh, "video retries with a limit", "a.__nxFixed=!0", "a.on(z.Events.ERROR,(y,I)=>{if(I?.fatal){if(I.type===z.ErrorTypes.NETWORK_ERROR){a.startLoad();return}if(I.type===z.ErrorTypes.MEDIA_ERROR){a.recoverMediaError();return}Re(Math.max(0,Math.floor(t.currentTime||0))),ut(!0)}})", "a.on(z.Events.ERROR,(y,I)=>{const R=a.__nx||(a.__nx={net:0,med:0,medAt:0,stalls:[]});if(!I?.fatal){if(I?.details===z.ErrorDetails.BUFFER_STALLED_ERROR&&a.__nxFixed&&a.currentLevel>0){const now=Date.now();R.stalls=R.stalls.filter(x=>now-x<6e4).concat(now);if(R.stalls.length>=2){R.stalls=[];a.nextLevel=a.currentLevel-1}}return}if(I.type===z.ErrorTypes.NETWORK_ERROR&&R.net<5){R.net++;setTimeout(()=>{try{a.startLoad()}catch{}},Math.min(15e3,1e3*2**(R.net-1)));return}if(I.type===z.ErrorTypes.MEDIA_ERROR&&R.med<3){const now=Date.now();R.med++;if(now-R.medAt<3e3)try{a.swapAudioCodec()}catch{}R.medAt=now;a.recoverMediaError();return}Re(Math.max(0,Math.floor(t.currentTime||0))),ut(!0)}),a.on(z.Events.FRAG_LOADED,()=>{a.__nx&&(a.__nx.net=0)}),a.on(z.Events.MANIFEST_PARSED,()=>{try{if(a.levels.length<2)return;const want=innerWidth<900?720:Math.min(1080,Math.max(720,(window.screen?.height||1080)*(window.devicePixelRatio||1)));let idx=0;a.levels.forEach((l,i)=>{if((l.height||0)<=want&&(l.height||0)>=(a.levels[idx].height||0))idx=i});a.startLevel=idx;a.currentLevel=idx;a.__nxFixed=!0}catch{}})");
   if (mh !== before) writeFileSync(file, mh);
+}
+
+// 3h2. Movies & TV for people who aren't technical (2026-11-16): the header
+//      said "Nexus Stream Deck" and "auto-group episodes ... on clients", a
+//      "Total" box counted photos too, a "Root" box showed a folder path (or
+//      "-"), and the featured film or show was its file name ("the simpsons
+//      s38e07 1080p web h264 cakes[EZTVx to]"). Now: plain words, the boxes
+//      that mean something, and "The Simpsons · S38 E07" / "Michael (2026)".
+{
+  const file = path.join(assets, find("MediaHub-"));
+  let mh = readFileSync(file, "utf8");
+  const before = mh;
+  mh = patch(mh, "movies header words", 'children:"Your library"',
+    'children:"Nexus Stream Deck"', 'children:"Your library"');
+  mh = patch(mh, "movies header subtitle", 'children:"Films and shows from your host. Pick up where you left off on any screen."',
+    'children:"Upload complete folders, auto-group episodes, and watch instantly on clients."',
+    'children:"Films and shows from your host. Pick up where you left off on any screen."');
+  mh = patch(mh, "movies no total box", '[{label:"Videos",value:o?.videos??0},',
+    '[{label:"Total",value:o?.total??0},{label:"Videos",value:o?.videos??0},', '[{label:"Videos",value:o?.videos??0},');
+  mh = patch(mh, "movies root box for admins", '{className:"hidden md:block rounded-xl p-3 nx-admin-only",',
+    '{className:"hidden md:block rounded-xl p-3",style:{background:"rgba(34,211,238,0.06)",border:"1px solid rgba(34,211,238,0.14)"},children:[(0,e.jsx)("p",{className:"text-[10px] text-cyan-300/70",children:"Root"',
+    '{className:"hidden md:block rounded-xl p-3 nx-admin-only",style:{background:"rgba(34,211,238,0.06)",border:"1px solid rgba(34,211,238,0.14)"},children:[(0,e.jsx)("p",{className:"text-[10px] text-cyan-300/70",children:"Root"');
+  mh = patch(mh, "featured title", 'children:nxNice(oe,je)}', 'children:je(oe.name)}', 'children:nxNice(oe,je)}');
+  if (!mh.includes("function nxNice(")) {
+    mh = "function nxNice(o,f){try{const n=String(o&&o.name||\"\").replace(/\\.[^.]+$/,\"\");if(o&&o.category===\"series\"&&o.seriesTitle){const t=String(o.seriesTitle).replace(/\\b[a-z]/g,c=>c.toUpperCase());return o.season!=null&&o.episode!=null?t+\" \\u00b7 S\"+String(o.season).padStart(2,\"0\")+\" E\"+String(o.episode).padStart(2,\"0\"):t}const m=/^(.*?)[\\s._([]+((?:19|20)\\d\\d)(?=[\\s._)\\]]|$)/.exec(n.replace(/^\\s*\\[[^\\]]*\\]\\s*[-\\u2013]?\\s*/,\"\"));if(m&&m[1].replace(/[._]+/g,\" \").trim().length>1)return m[1].replace(/[._]+/g,\" \").trim()+\" (\"+m[2]+\")\";return f?f(o.name):n}catch{return f?f(o&&o.name):o&&o.name}}\n" + mh;
+  }
+  if (mh !== before) writeFileSync(file, mh);
+}
+
+// 3h3. Hosts: "Manage Access & Invite Links" showed to people who can't
+//      manage anything (a new account waiting for approval): admins only.
+{
+  const file = path.join(assets, find("HostDirectory-"));
+  let hd = readFileSync(file, "utf8");
+  const before = hd;
+  hd = patch(hd, "manage access for admins", 'hover:bg-nexus-accent/15 transition-colors nx-admin-only",children:[(0,e.jsx)(B,{className:"w-4 h-4"})," Manage Access & Invite Links',
+    'hover:bg-nexus-accent/15 transition-colors",children:[(0,e.jsx)(B,{className:"w-4 h-4"})," Manage Access & Invite Links',
+    'hover:bg-nexus-accent/15 transition-colors nx-admin-only",children:[(0,e.jsx)(B,{className:"w-4 h-4"})," Manage Access & Invite Links');
+  if (hd !== before) writeFileSync(file, hd);
 }
 
 // 3i. eBooks: the shelf stayed on a spinner until a cover lookup finished
