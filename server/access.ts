@@ -123,6 +123,9 @@ const RULES: Rule[] = [
   ["*", /^\/api\/nas\/(drives|pools|allocation|keys)/, "admin"],
   ["*", /^\/api\/emulator\/(install-|auto-fix|bios\/upload)/, "admin"],
   ["MUT", "/api/cores/", "admin"],
+  // Reading the download set-up is for library members too (server.ts gives
+  // them only whether it works); changing it stays with admins.
+  ["GET", /^\/api\/(arr|torrent)\/config$/, "media"],
   ["*", /^\/api\/arr\/(config|install-webhook|release-policy|sources\/sync|approve|reject|remove|retry-wanted)/, "admin"],
   ["*", /^\/api\/torrent\/(config|test|action|set-location|drives)/, "admin"],
   ["*", /^\/api\/media\/(scan|scan-pc-videos|organize|rename-series|enrich|subtitles\/auto-fetch-all)/, "admin"],

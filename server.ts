@@ -11149,11 +11149,13 @@ async function startServer() {
   }
 
   // Save / get qBittorrent connection config
-  app.get('/api/torrent/config', async (_req, res) => {
+  app.get('/api/torrent/config', async (req, res) => {
     const cfg = await loadQbtConfig();
     if (!cfg) return res.json({ configured: false });
     const cookie = await qbtLogin(cfg).catch(() => null);
     const connected = cookie !== null;
+    // Members get whether it works, not the address and login name.
+    if (!(await access.callerOf(req)).admin) return res.json({ configured: true, connected });
     const version = connected ? await qbtVersion(cfg, cookie).catch(() => null) : null;
     return res.json({ configured: true, host: cfg.host, username: cfg.username, connected, version });
   });
@@ -11859,13 +11861,18 @@ async function startServer() {
     res.json({ ok: true, callback: callback.replace(ARR_WEBHOOK_SECRET, "***"), results: out });
   });
 
-  app.get('/api/arr/config', async (_req, res) => {
+  app.get('/api/arr/config', async (req, res) => {
     const cfg = await loadArrConfig();
     if (!cfg) return res.json({ configured: false });
     const [radarrConnected, sonarrConnected] = await Promise.all([
       pingArr(cfg.radarrUrl, cfg.radarrApiKey),
       pingArr(cfg.sonarrUrl, cfg.sonarrApiKey),
     ]);
+    // Members' Downloads and Discover pages ask too (they were refused, a red
+    // error each visit): they get whether it works, not the addresses.
+    if (!(await access.callerOf(req)).admin) {
+      return res.json({ configured: true, radarrConfigured: !!cfg.radarrApiKey, radarrConnected, sonarrConfigured: !!cfg.sonarrApiKey, sonarrConnected });
+    }
     return res.json({
       configured: true,
       radarrUrl: cfg.radarrUrl,
