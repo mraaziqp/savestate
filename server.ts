@@ -2842,17 +2842,30 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
   // Non-media root folders to skip (game boxart, ROMs, emulators, system folders, build artifacts, code repos)
   const SKIP_ROOT_DIRS = /^(\.nxweb|nexus-art|NexusROMs|Emu|SteamLibrary|\$RECYCLE\.BIN|\.Trash-\d+|\.git|\.nexus-data|System Volume Information|node_modules|dist|build|FlareSolver|quarantine|cores|\.claude|\.gemini|NexussEmu|NexusWinHostData|pics|Projects|AlphaTraders|BCXConnect|financeplay|Project Cupid|Sdk|android-sdk|AndroidStudioProjects|releases|backups|target|cargo-home)$/i;
 
+  // The limit counts videos: photos and subtitles have their own. One Drive
+  // root holding photo backups ("From this PC") filled all 20,000 places with
+  // pictures before the walk reached the films (the NAS listed 8, 2026-11-16).
+  // Walking every photo of every backup then stalled the NAS for minutes (its
+  // Drive mount answers slowly): the films, shows and downloads are walked
+  // first, the backup folders last, and the walk stops after three times the
+  // limit in media files seen.
+  let videoCount = 0, otherCount = 0, seen = 0;
+  const LAST_AT_TOP = /^(From this PC|music|photos?|pictures?|phone.*|backups?|camera.*)$/i;
+  const done = () => videoCount >= limit || seen >= limit * 3;
   async function walk(dir: string) {
-    if (out.length >= limit) return;
+    if (done()) return;
     let entries: any[];
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
+    if (path.resolve(dir) === rootResolved) {
+      entries.sort((a: any, b: any) => Number(LAST_AT_TOP.test(String(a.name))) - Number(LAST_AT_TOP.test(String(b.name))));
+    }
 
     for (const e of entries) {
-      if (out.length >= limit) return;
+      if (done()) return;
       const entryName = String(e.name);
       if (e.isDirectory()) {
         if (SKIP_ROOT_DIRS.test(entryName)) continue;
@@ -2870,7 +2883,9 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
       const isImage = IMAGE_EXT.has(ext);
       const isSubtitle = SUBTITLE_EXT.has(ext);
       if (!isVideo && !isImage && !isSubtitle) continue;
+      seen++;
       if (isImage && isReleaseJunk(entryName)) continue;
+      if (!isVideo && otherCount >= limit) continue;
       try {
         const s = await stat(full);
         if (isVideo) {
@@ -2887,6 +2902,7 @@ async function scanMediaDir(root: string, limit = 20000): Promise<MediaItem[]> {
         const name = path.basename(full);
         const nameNoExt = path.basename(full, ext);
         const seriesMeta = detectSeriesMeta(nameNoExt, relPath);
+        if (isVideo) videoCount++; else otherCount++;
         out.push({
           id: crypto.createHash("md5").update(full.toLowerCase()).digest("hex"),
           name,
@@ -22225,10 +22241,17 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
   // captures, phone and WhatsApp videos, meeting recordings): not films or
   // shows, so the library leaves them out (?personal=1 lists them too). The
   // files themselves stay where they are.
-  const PERSONAL_NAME = /^(VID|IMG|PXL|MVIMG|MOV|DSC|GOPR|DJI)[-_]?\d{6,}|WA\d{4}|WhatsApp Video|Screen ?Recording|Screen Shot|_replay_\d{4}|^unknown_\d{4}|Meeting Recording|Google Chrome \d{4}-\d\d|mylivewallpapers|^\d{4}[-.]\d\d[-.]\d\d[ _-]\d\d[-.]\d\d|^[\d\s,()._-]+$/i;
-  const PERSONAL_DIR = /[\\/](Captures|radeon|Recordings|Screen ?Recordings|Camera|DCIM|WhatsApp[^\\/]*|Snapchat|Instagram|TikTok)[\\/]/i;
-  const BACKUP_AREA = /[\\/]nexus-cloud-media[\\/](From this PC|music)[\\/]|^C:[\\/]Users[\\/][^\\/]+[\\/]Videos[\\/]/i;
+  // 2026-11-16: the NAS listed ~90 of them as films (its Drive path has no
+  // "nexus-cloud-media"), and on the PC WhatsApp "Screen_Recording_..." files,
+  // mock interviews and "Apex Legends_2022.07.30" game clips showed as films.
+  const PERSONAL_NAME = /^(VID|IMG|PXL|MVIMG|MOV|DSC|GOPR|DJI)[-_]?\d{6,}|WA\d{4}|WhatsApp Video|Screen[ _-]?Recording|Screen[ _-]?Shot|_replay_\d{4}|^unknown_\d{4}|Meeting Recording|Google Chrome \d{4}-\d\d|mylivewallpapers|XRecorder|SaveTube|Full Course|Tutorial|\bDiscussion\b|Webinar|Lecture|Mock Interview|^\d{4}[-.]\d\d[-.]\d\d[ _-]\d\d[-.]\d\d|^\d{6,}_\d{6,}_\d{6,}_n$|^[\d\s,()._-]+$/i;
+  const PERSONAL_DIR = /[\\/](Captures|radeon|Recordings|Screen ?Recordings|Camera|DCIM|WhatsApp[^\\/]*|Snapchat|[^\\/]*Instagram[^\\/]*|TikTok|XRecorder[^\\/]*|Phone ?switch[^\\/]*|My Pictures|Mock Interview[^\\/]*)[\\/]/i;
+  // The backup folders, on this PC's Drive or on the NAS's copy of Drive.
+  const BACKUP_AREA = /[\\/](From this PC|music)[\\/]|^C:[\\/]Users[\\/][^\\/]+[\\/]Videos[\\/]/i;
   const RELEASE_TAG = /\b(19|20)\d\d\b|\b(480|576|720|1080|2160)p\b|blu-?ray|bdrip|brrip|web-?dl|webrip|dvdrip|hdtv|x26[45]|hevc|\bS\d\dE\d\d\b|\b\d{1,2}x\d{2}\b|\bE\d{2,3}\b/i;
+  // A recording's date ("Apex Legends_2022.07.30-01.01") is not a film's year.
+  const RECORDED_ON = /(19|20)\d\d[._-]\d\d[._-]\d\d/;
+  const GENERIC_FOLDER = /^(newfolder\d*|videos?|downloads?|desktop|clips?|movies?|media|misc|other|stuff|temp|tmp|export|internal)$/;
   const squashName = (x: unknown) => String(x || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
   const personalClip = (m: any) => {
     if (m.kind !== "video") return false;
@@ -22237,16 +22260,100 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const name = path.basename(p).replace(/\.[^.]+$/, "");
     const folder = squashName(path.basename(path.dirname(p)));
     const show = squashName(m.seriesTitle);
-    // A show's episode filed in the show's own folder ("DBZ Super\12.mp4").
-    if (m.category === "series" && show.length > 2 && folder.length > 2 && (folder.includes(show) || show.includes(folder))) return false;
+    // A show's episode filed in the show's own folder ("DBZ Super\12.mp4"),
+    // but not "New folder (2)\9123.mp4".
+    if (m.category === "series" && show.length > 2 && folder.length > 2 && !GENERIC_FOLDER.test(folder) && !GENERIC_FOLDER.test(show)
+      && (folder.includes(show) || show.includes(folder))) return false;
     if (PERSONAL_NAME.test(name) || PERSONAL_DIR.test(p)) return true;
-    if (!BACKUP_AREA.test(p) || RELEASE_TAG.test(name)) return false;
-    // In a backup folder with no release tag: named after its folder stays
-    // ("One Punch Man\13-One Punch Man"); small untagged files ("clip1",
-    // "car vid", "Bennys Ace") are someone's own videos.
-    if (folder.length > 3 && squashName(name).includes(folder)) return false;
+    if (!BACKUP_AREA.test(p)) return false;
+    if (RECORDED_ON.test(name)) return true;
+    if (RELEASE_TAG.test(name)) return false;
+    // In a backup folder with no release tag: an episode named after its show's
+    // folder stays ("One Punch Man\13-One Punch Man"); small untagged files
+    // ("clip1", "car vid", "Bennys Ace", "Mock Interview final") are someone's own.
+    if (m.category === "series" && folder.length > 3 && !GENERIC_FOLDER.test(folder) && squashName(name).includes(folder)) return false;
     return Number(m.size || 0) < 1.5e9;
   };
+
+  // A show's or film's extras (featurettes, shorts, trailers, samples): small
+  // clips that crowded the lists ("random 30 MB videos"). ?personal=1 lists them.
+  const EXTRAS_DIR = /[\\/](Featurettes?|Extras?|Shorts?( \(Webisodes\))?|Webisodes?|Trailers?|Samples?|Behind[ ._-]?the[ ._-]?Scenes|Deleted[ ._-]?Scenes|Interviews?|Bloopers|Outtakes|Bonus( Features)?)[\\/]/i;
+  const EXTRAS_NAME = /(^|[ ._\-[(])(sample|trailer|teaser)([ ._\-\])]|$)/i;
+  const extraClip = (m: any) => m.kind === "video" && (EXTRAS_DIR.test(String(m.path || ""))
+    || (EXTRAS_NAME.test(path.basename(String(m.path || ""))) && Number(m.size || 0) < 400e6)
+    // Season 0 "specials" that are YouTube promos (Ted Lasso's "YT WEB-DL" clips).
+    || (Number(m.season) === 0 && /\bYT\b|YouTube/i.test(path.basename(String(m.path || ""))) && Number(m.size || 0) < 300e6));
+
+  // The same file kept in two places (the library on this PC and its copy on
+  // Drive, or a film also under "From this PC") is listed once: same name and
+  // size. A copy on a local disk wins (it starts faster), then one outside the
+  // backup folders.
+  const onDrive = (p: string) => /nexus-cloud-media|[\\/]My Drive[\\/]|^\/share\//i.test(p);
+
+  // The same film or episode in two releases ("Backrooms.2026.1080p..." and
+  // "Backrooms.2026.NORDIC..."; a 31 GB remux beside a 1.7 GB copy) is listed
+  // once too: films by title and year, episodes by show, season and episode.
+  // The copy that plays best stays: 1080p, not a remux, already prepared for
+  // browsers, on a local disk, then the bigger one.
+  const STOPWORDS = /\b(the|a|an|and|of)\b/g;
+  const filmKey = (m: any): string | null => {
+    const base = path.basename(String(m.path || m.relPath || "")).replace(/\.[^.]+$/, "")
+      .replace(/^\s*\[[^\]]*\]\s*[-–]?\s*/, "").replace(/[._]+/g, " ");
+    const y = /^(.*?)[\s([]+((?:19|20)\d\d)(?=[\s)\]]|$)/.exec(base);
+    if (!y) return null;
+    const title = y[1].toLowerCase().replace(/&/g, " ").replace(/[^a-z0-9 ]+/g, " ").replace(STOPWORDS, " ").replace(/\s+/g, " ").trim();
+    return title.length >= 2 ? `film|${title}|${y[2]}` : null;
+  };
+  const episodeKey = (m: any): string | null => {
+    const s = Number(m.season), e = Number(m.episode);
+    if (!m.seriesTitle || !Number.isInteger(s) || !Number.isInteger(e) || e <= 0) return null;
+    return `ep|${squashName(m.seriesTitle)}|${s}|${e}`;
+  };
+  const playScore = (m: any) => {
+    const n = path.basename(String(m.path || m.relPath || ""));
+    const res = /\b1080p\b/i.test(n) ? 3 : /\b720p\b/i.test(n) ? 2 : /\b(2160p|4k|uhd)\b/i.test(n) ? 1 : 0;
+    return res * 10 + (/remux/i.test(n) ? -15 : 0) + (videoPrep.copyFor(m.path) ? 4 : 0) + (onDrive(String(m.path || "")) ? 0 : 2);
+  };
+  function oneTitleEach<T extends { kind?: string; category?: string; path?: string; size?: number }>(list: T[]): T[] {
+    // A release a year off for the same title ("Into the Spider-Verse" 2018
+    // and 2019) is the same film: it takes the earlier year's key.
+    const films = new Set(list.map((m) => (m.kind === "video" && m.category === "movie" ? filmKey(m) : null)).filter(Boolean) as string[]);
+    const keyOf = (m: T) => {
+      if (m.category === "series") return episodeKey(m);
+      if (m.category !== "movie") return null;
+      const k = filmKey(m);
+      if (!k) return null;
+      const [, title, year] = k.split("|");
+      const earlier = `film|${title}|${Number(year) - 1}`;
+      return films.has(earlier) ? earlier : k;
+    };
+    const best = new Map<string, T>();
+    for (const m of list) {
+      if (m.kind !== "video") continue;
+      const k = keyOf(m);
+      if (!k) continue;
+      const cur = best.get(k);
+      if (!cur || playScore(m) > playScore(cur) || (playScore(m) === playScore(cur) && Number(m.size || 0) > Number(cur.size || 0))) best.set(k, m);
+    }
+    return list.filter((m) => {
+      if (m.kind !== "video") return true;
+      const k = keyOf(m);
+      return !k || best.get(k) === m;
+    });
+  }
+  function oneOfEach<T extends { kind?: string; path?: string; size?: number }>(list: T[]): T[] {
+    const best = new Map<string, T>();
+    const rank = (m: T) => (onDrive(String(m.path || "")) ? 2 : 0) + (BACKUP_AREA.test(String(m.path || "")) ? 1 : 0);
+    const out: T[] = [];
+    for (const m of list) {
+      if (m.kind !== "video" || !m.size) { out.push(m); continue; }
+      const k = `${path.basename(String(m.path || "")).toLowerCase()}|${m.size}`;
+      const cur = best.get(k);
+      if (!cur) { best.set(k, m); out.push(m); continue; }
+      if (rank(m) < rank(cur)) { out[out.indexOf(cur)] = m; best.set(k, m); }
+    }
+    return out;
+  }
 
   app.get("/api/media/library", async (req, res) => {
     // Check media access: must be logged in AND have media_access flag (or be admin)
@@ -22275,7 +22382,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     // The folder path on the host PC is only of use (and only shown) to admins.
     const root = (await access.callerOf(req)).admin ? mediaRoot : "";
-    const shown = String(req.query.personal || "") === "1" ? mem.media : mem.media.filter((m) => !personalClip(m));
+    const shown = String(req.query.personal || "") === "1" ? mem.media : oneTitleEach(oneOfEach(mem.media.filter((m) => !personalClip(m) && !extraClip(m))));
     const byKind = shown.reduce<Record<string, number>>((acc, m) => {
       acc[m.kind] = (acc[m.kind] ?? 0) + 1;
       return acc;
@@ -24726,7 +24833,7 @@ Keep it concise (2-4 short paragraphs). High-tech tone — you are a gaming AI, 
     const scanned = mem.media.length ? mem.media : (cachedScan && (Date.now() - cachedScan.ts < MEDIA_REC_SCAN_TTL_MS))
       ? cachedScan.items
       : await scanMediaDir(root, 10000).then(items => { mediaRecScanCache.set(root, { items, ts: Date.now() }); return items; });
-    const allItems = scanned.filter(i => i.kind === "video" && !personalClip(i));
+    const allItems = oneTitleEach(oneOfEach(scanned.filter(i => i.kind === "video" && !personalClip(i) && !extraClip(i))));
 
     // Get watch history from DB
     let watchedRelPaths: string[] = [];
